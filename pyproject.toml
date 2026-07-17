@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=75,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "latintts"
+version = "0.1.0"
+description = "Rule-first Ecclesiastical Latin pronunciation core"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.13,<2",
+  "pytest>=8,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.11,<1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+latintts = ["resources/*.json", "resources/*.jsonl"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+allowed-confusables = ["ˈ"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["latintts"]
