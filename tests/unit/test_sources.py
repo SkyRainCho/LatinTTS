@@ -39,22 +39,39 @@ def test_perseus_terms_use_current_license_version() -> None:
     assert "3.0" not in terms
 
 
-def test_document_defines_variant_aware_lookup_without_global_replacement() -> None:
+def test_document_defines_canonical_token_and_lookup_layers() -> None:
     document = _load_pronunciation_document()
+    section = document.split("## Unicode 与拼写规范化", maxsplit=1)[1].split(
+        "## 元音", maxsplit=1
+    )[0]
     required_contracts = (
-        "原始文本",
-        "规范文本",
+        "`surface`",
+        "`source_span`",
+        "canonical normalized token",
+        "`æ -> ae`",
+        "`œ -> oe`",
+        "`expand-ae-ligature`",
+        "`expand-oe-ligature`",
+        "长度变化绝不改写原文 span",
         "lookup key",
-        "æ/ae",
-        "œ/oe",
-        "j/i",
-        "u/v",
-        "变体感知检索",
-        "保留原始拼写",
-        "位置映射",
-        "禁止无条件全局替换",
+        "`j -> i`",
+        "`v -> u`",
+        "`lookup-j-to-i`",
+        "`lookup-v-to-u`",
+        "不得覆盖 canonical normalized token",
+        "禁止对原始短语做无条件全局替换",
     )
-    assert all(contract in document for contract in required_contracts)
+    assert all(contract in section for contract in required_contracts)
+
+
+def test_ligatures_reach_rules_as_expanded_canonical_tokens() -> None:
+    document = _load_pronunciation_document()
+    section = document.split("## 双元音与相邻元音", maxsplit=1)[1].split(
+        "## 辅音", maxsplit=1
+    )[0]
+    assert "G2P/音节规则消费展开后的 canonical normalized token" in section
+    assert "`æ` 已展开为 `ae`" in section
+    assert "`œ` 已展开为 `oe`" in section
 
 
 def test_document_requires_review_when_penult_weight_is_unknown() -> None:

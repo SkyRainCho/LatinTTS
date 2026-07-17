@@ -21,15 +21,14 @@
 
 ## Unicode 与拼写规范化
 
-文本前端必须区分三个层次：
+文本前端必须区分四种责任，不能用一种字符串兼任：
 
-1. **原始文本**：逐码位保留调用方输入、原始拼写和偏移；任何后续形式都要通过位置映射回到这一层。
-2. **规范文本**：采用 Unicode NFC 组合形式，但保留词中的正字法选择。每个规范文本 span 都要记录到原始文本 span 的位置映射，NFC 组合也不能丢失可追踪性。
-3. **lookup key**：仅供词典和例外表查询的临时键，不写回原始文本或规范文本，也不能用于生成展示文本。
+1. **原始短语与词面**：`original_text` 逐码位保留调用方输入。每个词的 `surface` 和半开区间 `source_span` 永久指向原文；它们是展示、诊断和人工覆盖的依据。
+2. **短语规范文本**：`normalized_text` 只做 Unicode NFC 和空白整理，保留标点与原始正字法选择；它不作为词级 G2P 输入。
+3. **词级 canonical normalized token**：`NormalizedWord.normalized` 和后续 `PronunciationToken.normalized` 可做 casefold、重音提示提取，以及非破坏的连字展开。`æ -> ae` 必须记录稳定 transformation ID `expand-ae-ligature`；`œ -> oe` 必须记录 `expand-oe-ligature`。长度变化绝不改写原文 span，`surface`、`source_span` 和 transformation IDs 共同提供可追踪的位置映射。G2P 和音节规则只消费这一层。
+4. **lookup key**：在 canonical normalized token 之上产生，仅用于词典和例外查询。`j -> i` 记录 `lookup-j-to-i`，`v -> u` 记录 `lookup-v-to-u`；检索命中不得覆盖 canonical normalized token，也不能改变展示文本或原文 span。
 
-大小写不改变发音规则。`æ/ae`、`œ/oe`、`j/i`、`u/v` 只通过**变体感知检索**归并：查询层可以依次尝试已登记的等价 lookup key，但命中的词条必须返回原始 spelling span 和所用 key。必须保留原始拼写和位置映射；禁止无条件全局替换 `j/i` 或 `u/v`，也禁止把 `æ/ae` 或 `œ/oe` 的检索别名写回文本。
-
-本文中的规则模式作用于规范文本；词汇数量、历史拼写和例外通过 lookup key 查询。实现不得静默删除字符、改写词形，或因检索别名改变输出 span。
+因此 `æ/ae`、`œ/oe` 在 canonical token 层闭合到规则拼写，而 `j/i`、`u/v` 只在变体感知检索中归并。必须保留原始拼写和位置映射；禁止对原始短语做无条件全局替换，也禁止把 lookup key 写回任一文本层。
 
 ## 元音
 
@@ -45,6 +44,8 @@
 | 元音长短 | 不改变规范音素 | 长短不能取代词重音；时值留给朗读或歌唱层 | `liber-usualis-1962`, PDF lines 1269-1272 |
 
 ## 双元音与相邻元音
+
+G2P/音节规则消费展开后的 canonical normalized token：到达本节前，`æ` 已展开为 `ae`，`œ` 已展开为 `oe`，并分别保留 `expand-ae-ligature` 或 `expand-oe-ligature` transformation ID。因此连字拼写与双字母拼写走同一条 `ae/oe` 规则，但原始 `surface` 和 `source_span` 不变。
 
 | 环境 | 音节与输出政策 | 来源 |
 | --- | --- | --- |
@@ -157,7 +158,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | 其他辅音与双辅音 | `liber-usualis-1962`, PDF lines 1351-1354 | 基线已记录 | 定义音节重接和模型音素编码 |
 | 完整音节与重音区别 | `liber-usualis-1962`, PDF lines 1231-1247 | 政策已记录 | 建立弱 penult 不丢失的回归样例 |
 | 重音位置 | `allen-greenough-accents`, Section 12 | 基线及无证据诊断已记录 | 接入词汇数量并覆盖例外 |
-| Unicode 与拼写规范化 | 工程文本契约 | NFC、变体感知检索和位置映射政策已确定 | 实现三层表示并覆盖拼写变体 |
+| Unicode 与拼写规范化 | 工程文本契约 | phrase NFC、词级连字展开、lookup 变体和 span 追踪政策已确定 | 实现分层表示并覆盖拼写变体 |
 | 词间音变 | 尚无规范规则 | 明确禁用 | 仅在新增不冲突来源后提案 |
 
 ## 冲突决策记录
@@ -166,7 +167,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | --- | --- | --- | --- |
 | 2026-07-17 | 元音间 `s` 的“轻微软化”是否等同 `/z/` | 否。完整音位保持 `/s/`，软化仅为朗读实现注释 | `liber-usualis-1962`, PDF lines 1332-1334 未给出 `/z/` 等值；避免无证据扩大解释 |
 | 2026-07-18 | Perseus Lewis and Short 条款版本 | 登记为 `CC BY-SA 4.0`，保留 Perseus 署名、可用性声明及修改回馈要求 | `perseus-lewis-short` 指定目录的当前 `README.md` 许可段；取代过时的 3.0 元数据 |
-| 2026-07-18 | 拼写变体是否改写规范文本 | 否。变体只生成 lookup key，原始文本、规范文本和位置映射保持可追踪 | 避免 `j/i`、`u/v` 及连字的全局替换破坏拼写与 span |
+| 2026-07-18 | 拼写变体在哪一层归并 | 原始 `surface/source_span` 不变；词级 canonical token 展开 `æ/œ` 并记录 transformation ID；lookup key 再归并 `j/i`、`v/u` | 使 `ae/oe` G2P 规则可消费连字，同时避免全局替换破坏拼写与 span |
 | 2026-07-18 | penult 轻重缺少证据时是否给出确定重音 | 否。仅生成候选并返回 `PRONUNCIATION_NEEDS_REVIEW` | `allen-greenough-accents`, Section 12 需要 penult 轻重；普通拼写不总能提供该证据 |
 
 后续冲突记录必须包含日期、候选解释、采用结果和精确来源位置。改变既有规范音素属于可审计的规则版本变更。
