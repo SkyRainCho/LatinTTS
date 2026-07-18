@@ -50,7 +50,18 @@ class AuditReport:
     errors: tuple[AuditError, ...]
 
 
-DEFAULT_POLICY = AuditPolicy(minimum_total=30, category_minimums={})
+DEFAULT_POLICY = AuditPolicy(
+    minimum_total=320,
+    category_minimums={
+        "vowels": 20,
+        "diphthongs": 20,
+        "consonants": 100,
+        "syllabification": 40,
+        "stress": 60,
+        "orthographic_variants": 30,
+        "liturgical": 50,
+    },
+)
 
 _GOLD_FIELDS = frozenset(
     {

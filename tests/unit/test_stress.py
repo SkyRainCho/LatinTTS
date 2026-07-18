@@ -411,6 +411,134 @@ SEED_EXPECTATIONS: dict[str, SeedExpectation] = {
             "light penult ĭ -> antepenult",
         ),
     ),
+    "eleison": (
+        ("e", "le", "i", "son"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Ordinary of the Mass",
+            "prints eléison",
+        ),
+    ),
+    "laudamus": (
+        ("lau", "da", "mus"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Gloria",
+            "prints Laudámus",
+        ),
+    ),
+    "adoramus": (
+        ("a", "do", "ra", "mus"),
+        2,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Gloria",
+            "prints Adorámus",
+        ),
+    ),
+    "omnipotens": (
+        ("om", "ni", "po", "tens"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Gloria and Credo",
+            "prints omnípotens",
+        ),
+    ),
+    "peccata": (
+        ("pec", "ca", "ta"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Gloria",
+            "prints peccáta",
+        ),
+    ),
+    "suscipe": (
+        ("sus", "ci", "pe"),
+        0,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "Gloria",
+            "prints súscipe",
+        ),
+    ),
+    "mulieribus": (
+        ("mu", "li", "e", "ri", "bus"),
+        2,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 1861 / PDF p. 2105",
+            "Ave Maria",
+            "prints muliéribus",
+        ),
+    ),
+    "peccatoribus": (
+        ("pec", "ca", "to", "ri", "bus"),
+        2,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 1861 / PDF p. 2105",
+            "Ave Maria",
+            "prints peccatóribus",
+        ),
+    ),
+    "sanctificetur": (
+        ("sanc", "ti", "fi", "ce", "tur"),
+        3,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 6 / PDF p. 116",
+            "Pater noster",
+            "prints Sanctificétur",
+        ),
+    ),
+    "quotidianum": (
+        ("quo", "ti", "di", "a", "num"),
+        3,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 6 / PDF p. 116",
+            "Pater noster",
+            "prints quotidiánum",
+        ),
+    ),
+    "spiritu": (
+        ("spi", "ri", "tu"),
+        0,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "unnumbered first Ordinary page / PDF p. 111",
+            "Et cum spíritu tuo",
+        ),
+    ),
+    "oremus": (
+        ("o", "re", "mus"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "printed p. 2 / PDF p. 112",
+            "prints Orémus",
+        ),
+    ),
+    "confiteor": (
+        ("con", "fi", "te", "or"),
+        1,
+        ("liber-usualis-1961-full-scan",),
+        (
+            "unnumbered first Ordinary page / PDF p. 111",
+            "Confiteor prayer",
+            "prints Confíteor",
+        ),
+    ),
 }
 
 LOOKUP_SURFACES = {

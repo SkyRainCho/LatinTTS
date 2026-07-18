@@ -13,9 +13,10 @@
 发生冲突时按来源登记中的 `authority_rank` 处理：
 
 1. `liber-usualis-1962` 是罗马式礼仪发音的主要规则来源。
-2. `ewtn-ecclesiastical-latin` 仅用于交叉核对解释措辞；`iveson-roman-pronunciation-1964` 为 `ph -> /f/` 提供直接次级证据；`allen-greenough-accents` 提供重音规则；`perseus-lewis-short` 提供词汇级元音数量证据。
-3. `wikimedia-ecclesiastical-pronunciation` 仅是评测音频索引，逐文件核对许可后才能使用。
-4. `librivox-public-domain` 仅是候选语料索引，必须人工筛选读音并核对适用法域。
+2. `liber-usualis-1961-full-scan` 只提供礼仪正文出现位置和正文中印刷 acute 的直接词重音证据，不作为发音规则来源；每次引用必须同时给出 printed page、PDF page、祷文/章节，圣咏还要给出 verse 映射。
+3. `ewtn-ecclesiastical-latin` 仅用于交叉核对解释措辞；`iveson-roman-pronunciation-1964` 为 `ph -> /f/` 提供直接次级证据；`allen-greenough-accents` 提供重音规则；`perseus-lewis-short` 提供词汇级元音数量证据。
+4. `wikimedia-ecclesiastical-pronunciation` 仅是评测音频索引，逐文件核对许可后才能使用。
+5. `librivox-public-domain` 仅是候选语料索引，必须人工筛选读音并核对适用法域。
 
 低优先级来源不能覆盖高优先级规则。候选音频不能自动升级为规范来源或训练数据。任何词典证据都要记录具体词条定位。
 
@@ -652,6 +653,93 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 打包例外表据此包含三个精确 lookup key：`mihi`、`nihil`、`nihildum`。`nihildum` 的 `rule_ids=[h-mihi-nihil]`，`source_ids=[liber-usualis-1962, perseus-lewis-short]`，note 同时记录 Liber compound locator 与 L&S 逐词 locator；加载器继续拒绝未知 rule/source、空 note、非法 phoneme 或重复 key。例外不使用前缀匹配，因此普通含 h 词不会被误提升。
 
+### 常见礼仪词汇与最终黄金门禁
+
+本批新增 50 条唯一真实单词，五批各 10 条；最终黄金集为 350 条，其中 `liturgical=55`。所有记录都是普通拼写、`approved`、`warnings == ()`，并且不是 `ResolutionMethod.CANDIDATE`。单词级 gold 只锁定 canonical normalized token、音节、词重音、IPA 与实际运行时 provenance；它不编码整句重音、停顿、圣咏音高、音符时值或歌唱韵律。
+
+`liber-usualis-1961-full-scan` 在下表中承担两种明确分开的职责：每行的“正文”locator 证明词确实出现在指定礼仪文本；只有正文明确印出 acute 且该词进入 stress lexicon 时，该来源才同时作为直接词重音证据进入运行时 `source_ids`。其余正文 locator 不得强塞进 gold token。G2P 发音规则仍由 `liber-usualis-1962` 的 pronunciation table 支持；单/双音节及可证明 heavy penult 仍由 `allen-greenough-accents`, Section 12 支持。表中“规则/来源”列列出关键命中及完整有序 `source_ids`；完整有序 `rule_ids` 由 JSONL 与 `Pronouncer` 的全表测试逐行精确比较。
+
+#### A：弥撒常用词（10 条）
+
+| word / IPA | 礼仪正文精确 locator | 发音/重音证据、关键 rule 与实际 source_ids | review |
+| --- | --- | --- | --- |
+| `eleison` / `/eˈle.i.son/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Kyrie | 同页印 `eléison`，`stress-lexicon`；G2P simple rules 见 Liber pronunciation table；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `Christe` / `/ˈkris.te/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Kyrie | `disyllable-stress`, `ch-hard`；Allen Section 12；Liber lines 1309-1310；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `laudamus` / `/lau̯ˈda.mus/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria | 同页印 `Laudámus`，`stress-lexicon`, `au-diphthong`；Liber lines 1281-1289；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `adoramus` / `/a.doˈra.mus/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria | 同页印 `Adorámus`，`stress-lexicon`；G2P simple rules 见 pronunciation table；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `omnipotens` / `/omˈni.po.tens/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria 与 Credo | 同页印 `omnípotens`，`stress-lexicon`；G2P simple rules 见 pronunciation table；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `tollis` / `/ˈtol.lis/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria；printed p. 6 / PDF p. 116, Agnus Dei | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `peccata` / `/pekˈka.ta/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria；printed p. 6 / PDF p. 116, Agnus Dei | p. 2 印 `peccáta`，`stress-lexicon`, `c-hard`；Liber lines 1307-1308；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `mundi` / `/ˈmun.di/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria；printed p. 6 / PDF p. 116, Agnus Dei | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `suscipe` / `/ˈsu.ʃi.pe/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, Gloria | 同页印 `súscipe`，`stress-lexicon`, `sc-before-front-vowel`；Liber lines 1305-1306；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `pleni` / `/ˈple.ni/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 4 / PDF p. 114, Sanctus | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+
+#### B：Ave Maria（10 条）
+
+以下十词均见 `liber-usualis-1961-full-scan`, “In Honour of the Blessed Virgin Mary”, Ave Maria, printed p. 1861 / PDF p. 2105；该页完整印出祷文，而不是只用索引或相邻福音段落代替。
+
+| word / IPA | 礼仪正文精确 locator | 发音/重音证据、关键 rule 与实际 source_ids | review |
+| --- | --- | --- | --- |
+| `plena` / `/ˈple.na/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `grátia pléna` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `tecum` / `/ˈte.kum/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `Dóminus técum` | `disyllable-stress`, `c-hard`；Allen Section 12；Liber lines 1307-1308；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `benedicta` / `/be.neˈdik.ta/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `benedícta tu` | `heavy-penult-stress`, `c-hard`；闭 penult `dic` + Allen Section 12；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `mulieribus` / `/mu.liˈe.ri.bus/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `in muliéribus` | 同页印 `muliéribus`，`stress-lexicon`；G2P simple rules；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `fructus` / `/ˈfruk.tus/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `frúctus` | `disyllable-stress`, `c-hard`；Allen Section 12；Liber lines 1307-1308；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `ventris` / `/ˈven.tris/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `véntris túi` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `tui` / `/ˈtu.i/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `véntris túi` | `disyllable-stress`；相邻 `ui` 分音节依 Liber lines 1273-1278；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `peccatoribus` / `/pek.kaˈto.ri.bus/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `peccatóribus` | 同页印 `peccatóribus`，`stress-lexicon`, `c-hard`；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `nunc` / `/ˈnunk/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `nunc et in hóra` | `monosyllable-stress`, `c-hard`；Allen Section 12；Liber lines 1307-1308；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `nostrae` / `/ˈnos.tre/` | `liber-usualis-1961-full-scan`, Ave Maria, printed p. 1861 / PDF p. 2105, `mórtis nóstrae` | `disyllable-stress`, `ae-e`；Allen Section 12；Liber lines 1279-1280；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+
+#### C：Pater Noster（10 条）
+
+以下十词均见 `liber-usualis-1961-full-scan`, Ordinary of the Mass, Pater noster, printed p. 6 / PDF p. 116。此 locator 固定正文页而非导言中提及 Pater noster 的位置。
+
+| word / IPA | 礼仪正文精确 locator | 发音/重音证据、关键 rule 与实际 source_ids | review |
+| --- | --- | --- | --- |
+| `noster` / `/ˈnos.ter/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `Páter nóster` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `caelis` / `/ˈt͡ʃe.lis/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `in caélis` | `disyllable-stress`, `c-before-front-vowel`, `ae-e`；Liber lines 1279-1280, 1301-1302；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `sanctificetur` / `/sank.ti.fiˈt͡ʃe.tur/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `Sanctificétur` | 同页印 `Sanctificétur`，`stress-lexicon`, `c-before-front-vowel`；纠正无数量候选的错误 antepenult；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `tuum` / `/ˈtu.um/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `nómen túum` | `disyllable-stress`；相邻 `uu` 分音节依 Liber lines 1273-1278；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `fiat` / `/ˈfi.at/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `Fíat volúntas` | `disyllable-stress`；相邻 `ia` 分音节依 Liber lines 1273-1278；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `sicut` / `/ˈsi.kut/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `sicut in caélo` | `disyllable-stress`, `c-hard`；Allen Section 12；Liber lines 1307-1308；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `quotidianum` / `/kwo.ti.diˈa.num/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `quotidiánum` | 同页印 `quotidiánum`，`stress-lexicon`, `qu-before-vowel`；纠正无数量候选的错误 antepenult；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `da` / `/ˈda/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `da nóbis hódie` | `monosyllable-stress`, `simple-d`, `simple-a`；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `dimitte` / `/diˈmit.te/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `dimítte nóbis` | `heavy-penult-stress`；闭 penult `mit` + Allen Section 12；双 t 按 Liber lines 1351-1354 保持；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `malo` / `/ˈma.lo/` | `liber-usualis-1961-full-scan`, Pater noster, printed p. 6 / PDF p. 116, `a málo` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+
+#### D：圣咏与经文高频词（10 条）
+
+本批固定文本版本为 `liber-usualis-1961-full-scan`, Maundy Thursday at Lauds, printed p. 652 / PDF p. 798, “Psalm 50 (New psalter, p. 36*)”。Liber 本页显示 verse 1-13；下表同时给出该页显示 verse 和 Vulgate Psalm 50 的传统 verse 映射。显示 vv. 1-2 同属 Vulgate Ps 50:3 的两个半节，显示 v. 3 = Vulgate 50:4，v. 4 = 50:5，v. 5 = 50:6。圣咏的音高、reciting tone 和 cadence 不进入单词 gold。
+
+| word / IPA | 明确版本、Psalm/verse 与正文 locator | 发音/重音证据、关键 rule 与实际 source_ids | review |
+| --- | --- | --- | --- |
+| `secundum` / `/seˈkun.dum/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 1 = Vulgate 50:3 | `heavy-penult-stress`, `c-hard`；闭 penult `cun` + Allen Section 12；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `magnam` / `/ˈma.ɲam/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 1 = Vulgate 50:3 | `disyllable-stress`, `gn-palatal`；Allen Section 12；Liber lines 1315-1318；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `tuam` / `/ˈtu.am/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 1 = Vulgate 50:3 | `disyllable-stress`；相邻 `ua` 分音节依 Liber lines 1273-1278；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `dele` / `/ˈde.le/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 2 = Vulgate 50:3 | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `lava` / `/ˈla.va/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 3 = Vulgate 50:4 | `disyllable-stress`, `simple-v`；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `ab` / `/ˈab/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 3 = Vulgate 50:4 | `monosyllable-stress`, `simple-a`, `simple-b`；Allen Section 12；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `meo` / `/ˈme.o/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 3 = Vulgate 50:4 | `disyllable-stress`；相邻 `eo` 分音节依 Liber lines 1273-1278；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `munda` / `/ˈmun.da/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 3 = Vulgate 50:4 | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `semper` / `/ˈsem.per/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 4 = Vulgate 50:5 | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `soli` / `/ˈso.li/` | `liber-usualis-1961-full-scan`, printed p. 652 / PDF p. 798, Psalm 50 displayed v. 5 = Vulgate 50:6 | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+
+#### E：礼仪回应与祷文（10 条）
+
+| word / IPA | 礼仪正文精确 locator | 发音/重音证据、关键 rule 与实际 source_ids | review |
+| --- | --- | --- | --- |
+| `vobiscum` / `/voˈbis.kum/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, `Dóminus vobíscum` | `heavy-penult-stress`, `c-hard`；闭 penult `bis` + Allen Section 12；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `spiritu` / `/ˈspi.ri.tu/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, 回应 `Et cum spíritu túo` | 同页印 `spíritu`，`stress-lexicon`；G2P simple rules；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `Oremus` / `/oˈre.mus/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, printed p. 2 / PDF p. 112, `Orémus` | 同页印 `Orémus`，`stress-lexicon`；G2P simple rules；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `Confiteor` / `/konˈfi.te.or/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, Confiteor prayer | 同页印 `Confíteor`，`stress-lexicon`, `c-hard`；相邻 `eo` 分音节；`[liber-usualis-1961-full-scan, liber-usualis-1962]` | approved |
+| `omnipotenti` / `/om.ni.poˈten.ti/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, Confiteor `Deo omnipoténti` | `heavy-penult-stress`；闭 penult `ten` + Allen Section 12；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `sanctis` / `/ˈsank.tis/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, Confiteor `ómnibus sanctis` | `disyllable-stress`, `c-hard`；Allen Section 12；Liber lines 1307-1308；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `nimis` / `/ˈni.mis/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, Confiteor `peccávi nimis` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `verbo` / `/ˈver.bo/` | `liber-usualis-1961-full-scan`, Ordinary of the Mass, unnumbered first Ordinary page / PDF p. 111, Confiteor `cogitatióne, verbo et opere` | `disyllable-stress`, `simple-v`；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `Ite` / `/ˈi.te/` | `liber-usualis-1961-full-scan`, Ordinary chant IV, printed p. 25 / PDF p. 137, `Ite Missa est` | `disyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+| `est` / `/ˈest/` | `liber-usualis-1961-full-scan`, Ordinary chant IV, printed p. 25 / PDF p. 137, `Ite Missa est` | `monosyllable-stress` + simple rules；Allen Section 12；Liber pronunciation table；`[allen-greenough-accents, liber-usualis-1962]` | approved |
+
 ### G2P 实现规则与 locator
 
 下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。
@@ -690,5 +778,6 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | 2026-07-18 | `ph -> /f/` 的直接来源如何补齐 | 使用 Iveson 明确的 `PH — as the letter F`；`ph-f` 只引用该来源，词内其他基础规则仍分别引用 Liber，结果聚合实际命中的来源 | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46；文首 lines 2-4 说明规则基于罗马省神职人员实际读音 |
 | 2026-07-18 | `q-hard` 是否用造词或现代专名满足真实词黄金覆盖 | 否。真实词黄金集豁免该 fallback；Task 14 用 synthetic 输入锁定内部 `q -> k` 容错路径 | 用户批准方案 A；标准真实词的 q 由 `qu-before-vowel` 覆盖 |
 | 2026-07-18 | `mihi/nihil and their compounds` 是否用前缀规则自动扩张 | 否。只新增有已登记逐词词形证据的 `nihildum` 打包例外；未登记文本中的附着形式不冒充 L&S 来源，普通 h 仍静音 | `liber-usualis-1962`, PDF lines 1319-1321；L&S `entryFree id=n30955`, `key=nihildum` |
+| 2026-07-18 | 发音节选能否同时作为整册礼仪正文来源 | 否。保留 `liber-usualis-1962` 只支持 pronunciation table；另登记 `liber-usualis-1961-full-scan` 支持逐词正文出现和印刷 acute，且正文证据不自动进入运行时 provenance | 原发音 URL 只有导言/发音节选；完整扫描共 2340 PDF pages，本文逐行给出 visually checked printed/PDF page、祷文及 verse locator |
 
 后续冲突记录必须包含日期、候选解释、采用结果和精确来源位置。改变既有规范音素属于可审计的规则版本变更。

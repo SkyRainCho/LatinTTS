@@ -11,6 +11,17 @@
     "usage_note": "Primary rule source for Roman-style liturgical pronunciation"
   },
   {
+    "source_id": "liber-usualis-1961-full-scan",
+    "title": "Liber Usualis 1961 - Complete Solesmes scan",
+    "url": "https://propria.org/wp-content/uploads/2019/10/liber-usualis-1961.pdf",
+    "source_kind": "liturgical_text_scan",
+    "authority_rank": 1,
+    "accessed_on": "2026-07-18",
+    "locator": "Complete 2340-page PDF scan; cite each occurrence by printed page, PDF page, section or prayer, and verse where applicable",
+    "license_or_terms": "Publicly accessible historical scan for reference; verify copyright and local jurisdiction before redistribution or training use",
+    "usage_note": "Liturgical text occurrence and printed acute stress evidence only; not a pronunciation-rule source"
+  },
+  {
     "source_id": "ewtn-ecclesiastical-latin",
     "title": "EWTN Ecclesiastical Latin pronunciation guide",
     "url": "https://www.ewtn.com/catholicism/answers/latin-ecclesiastical-24788",

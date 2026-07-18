@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 import pytest
 
 from latintts.audit import (
+    DEFAULT_POLICY,
     AuditError,
     AuditPolicy,
     AuditReport,
@@ -20,6 +22,7 @@ from latintts.normalization import normalize_word
 from latintts.pipeline import Pronouncer
 
 GOLD_FIXTURE = Path("tests/fixtures/gold_pronunciations.jsonl")
+PRONUNCIATION_DOCUMENT = Path("docs/pronunciation/roman-ecclesiastical.md")
 GOLD_FIELDS = (
     "word",
     "normalized",
@@ -38,6 +41,80 @@ LIGATURE_PAIRS = (
     ("poenas", "pœnas"),
     ("foetus", "fœtus"),
 )
+FINAL_POLICY = AuditPolicy(
+    minimum_total=320,
+    category_minimums={
+        "vowels": 20,
+        "diphthongs": 20,
+        "consonants": 100,
+        "syllabification": 40,
+        "stress": 60,
+        "orthographic_variants": 30,
+        "liturgical": 50,
+    },
+)
+LITURGICAL_BATCHES = {
+    "A:弥撒常用词": (
+        "eleison",
+        "Christe",
+        "laudamus",
+        "adoramus",
+        "omnipotens",
+        "tollis",
+        "peccata",
+        "mundi",
+        "suscipe",
+        "pleni",
+    ),
+    "B:Ave Maria": (
+        "plena",
+        "tecum",
+        "benedicta",
+        "mulieribus",
+        "fructus",
+        "ventris",
+        "tui",
+        "peccatoribus",
+        "nunc",
+        "nostrae",
+    ),
+    "C:Pater Noster": (
+        "noster",
+        "caelis",
+        "sanctificetur",
+        "tuum",
+        "fiat",
+        "sicut",
+        "quotidianum",
+        "da",
+        "dimitte",
+        "malo",
+    ),
+    "D:圣咏与经文高频词": (
+        "secundum",
+        "magnam",
+        "tuam",
+        "dele",
+        "lava",
+        "ab",
+        "meo",
+        "munda",
+        "semper",
+        "soli",
+    ),
+    "E:礼仪回应与祷文": (
+        "vobiscum",
+        "spiritu",
+        "Oremus",
+        "Confiteor",
+        "omnipotenti",
+        "sanctis",
+        "nimis",
+        "verbo",
+        "Ite",
+        "est",
+    ),
+}
 
 
 def _valid_row() -> dict[str, Any]:
@@ -83,6 +160,14 @@ def _gold_rows_by_word() -> dict[str, dict[str, Any]]:
     return {row["word"]: row for row in rows}
 
 
+def _without_acute_casefold(value: str) -> str:
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFD", value.casefold())
+        if character != "\N{COMBINING ACUTE ACCENT}"
+    )
+
+
 def test_gold_entry_has_the_fixed_exact_schema() -> None:
     assert tuple(field.name for field in fields(GoldEntry)) == GOLD_FIELDS
 
@@ -100,33 +185,64 @@ def test_invalid_utf8_returns_a_stable_file_read_error(tmp_path: Path) -> None:
     assert audit_gold_file(fixture) == _file_read_error(fixture)
 
 
+def test_default_policy_matches_final_gold_policy() -> None:
+    assert DEFAULT_POLICY == FINAL_POLICY
+
+
 def test_gold_fixture_has_unique_approved_source_backed_entries() -> None:
-    report = audit_gold_file(
-        GOLD_FIXTURE,
-        AuditPolicy(
-            minimum_total=270,
-            category_minimums={
-                "vowels": 20,
-                "diphthongs": 20,
-                "consonants": 100,
-                "syllabification": 40,
-                "stress": 60,
-                "orthographic_variants": 30,
-            },
-        ),
-    )
+    report = audit_gold_file(GOLD_FIXTURE, FINAL_POLICY)
 
     assert report.errors == ()
-    assert report.total == 300
+    assert report.total == 350
     assert report.category_counts == {
         "vowels": 25,
         "diphthongs": 25,
         "consonants": 110,
         "syllabification": 40,
         "stress": 65,
-        "liturgical": 5,
+        "liturgical": 55,
         "orthographic_variants": 30,
     }
+
+
+def test_liturgical_batches_are_exact_unique_words_and_match_the_document_matrix() -> None:
+    rows = [
+        json.loads(line)
+        for line in GOLD_FIXTURE.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    expected_new = {word for words in LITURGICAL_BATCHES.values() for word in words}
+    old_words = {_without_acute_casefold(row["word"]) for row in rows[:-50]}
+    new_words = {_without_acute_casefold(row["word"]) for row in rows[-50:]}
+
+    assert len(expected_new) == 50
+    assert {row["word"] for row in rows[-50:]} == expected_new
+    assert old_words.isdisjoint(new_words)
+    assert {row["category"] for row in rows[-50:]} == {"liturgical"}
+
+    document = PRONUNCIATION_DOCUMENT.read_text(encoding="utf-8")
+    matrix = document.split("### 常见礼仪词汇与最终黄金门禁", maxsplit=1)[1].split(
+        "### G2P 实现规则与 locator", maxsplit=1
+    )[0]
+    matrix_rows = [
+        line for line in matrix.splitlines() if line.startswith("| `") and "` / `/" in line
+    ]
+    documented_words = {line.split("`", maxsplit=2)[1] for line in matrix_rows}
+    assert documented_words == expected_new
+    assert all("`liber-usualis-1961-full-scan`" in line for line in matrix_rows)
+    assert all("PDF p." in line for line in matrix_rows)
+
+    for heading, expected_words in LITURGICAL_BATCHES.items():
+        batch, title = heading.split(":", maxsplit=1)
+        document_heading = f"{batch}\N{FULLWIDTH COLON}{title}"
+        batch_section = matrix.split(f"#### {document_heading}", maxsplit=1)[1].split(
+            "#### ", maxsplit=1
+        )[0]
+        assert {
+            line.split("`", maxsplit=2)[1]
+            for line in batch_section.splitlines()
+            if line.startswith("| `") and "` / `/" in line
+        } == set(expected_words)
 
 
 def test_ligature_pairs_share_lookup_and_pronunciation_but_keep_surface() -> None:
@@ -433,7 +549,7 @@ def test_cli_success_returns_zero_and_prints_summary(capsys: pytest.CaptureFixtu
     exit_code = main([str(GOLD_FIXTURE)])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "gold-audit: PASS total=300 errors=0\n"
+    assert capsys.readouterr().out == "gold-audit: PASS total=350 errors=0\n"
 
 
 def test_cli_failure_returns_one_and_prints_errors(
