@@ -196,6 +196,72 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | Unicode 与拼写规范化 | 工程文本契约 | phrase NFC、词级连字展开、lookup 变体和 span 追踪已实现 | 在 G2P 集成中保持四层文本契约 |
 | 词间音变 | 尚无规范规则 | 明确禁用 | 仅在新增不冲突来源后提案 |
 
+### 元音与双元音黄金批次审核矩阵
+
+以下四批每批 10 条。审核时逐词运行 `Pronouncer`，只批准非 `ResolutionMethod.CANDIDATE` 且 `warnings == ()` 的结果；黄金记录中的 `rule_ids` 与 `source_ids` 按 token 实际集合完整登记。表中列出本批关注的关键规则，词内其他基础辅音规则仍按下节的实现规则表核对。所有单音节、双音节重音均直接依据 `allen-greenough-accents`, Section 12；`Raymundus` 的闭 penult `mun` 也按同一节推导，不需要扩大重音词典。
+
+#### A：短/长书写元音与 `y`
+
+| word | category | 关键 rule IDs | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `māter` | `vowels` | `disyllable-stress`, `simple-a` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `mē` | `vowels` | `monosyllable-stress`, `simple-e` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `dōnum` | `vowels` | `disyllable-stress`, `simple-o`, `simple-u` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `fīdes` | `vowels` | `disyllable-stress`, `simple-i`, `simple-e` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `lūmen` | `vowels` | `disyllable-stress`, `simple-u`, `simple-e` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `rosa` | `vowels` | `disyllable-stress`, `simple-o`, `simple-a` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `tibi` | `vowels` | `disyllable-stress`, `simple-i` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `bonus` | `vowels` | `disyllable-stress`, `simple-o`, `simple-u` | `liber-usualis-1962`, PDF lines 1254-1272；`allen-greenough-accents`, Section 12 | approved |
+| `hymnus` | `vowels` | `disyllable-stress`, `y-as-i`, `h-muted` | `liber-usualis-1962`, PDF lines 1319-1321, 1349；`allen-greenough-accents`, Section 12 | approved |
+| `myrrha` | `vowels` | `disyllable-stress`, `y-as-i`, `h-muted` | `liber-usualis-1962`, PDF lines 1319-1321, 1325-1331, 1349；`allen-greenough-accents`, Section 12 | approved |
+
+#### B：相邻元音分别成音节
+
+| word | category | 关键 rule IDs | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `mea` | `vowels` | `disyllable-stress`, `simple-e`, `simple-a` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `tua` | `vowels` | `disyllable-stress`, `simple-u`, `simple-a` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `sua` | `vowels` | `disyllable-stress`, `simple-u`, `simple-a` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `duo` | `vowels` | `disyllable-stress`, `simple-u`, `simple-o` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `via` | `vowels` | `disyllable-stress`, `simple-i`, `simple-a` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `pia` | `vowels` | `disyllable-stress`, `simple-i`, `simple-a` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `pius` | `vowels` | `disyllable-stress`, `simple-i`, `simple-u` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `mei` | `vowels` | `disyllable-stress`, `simple-e`, `simple-i` | `liber-usualis-1962`, PDF lines 1290-1291；`allen-greenough-accents`, Section 12 | approved |
+| `prout` | `vowels` | `disyllable-stress`, `simple-o`, `simple-u` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+| `ait` | `vowels` | `disyllable-stress`, `simple-a`, `simple-i` | `liber-usualis-1962`, PDF lines 1273-1278；`allen-greenough-accents`, Section 12 | approved |
+
+#### C：`ae` 与 `oe`
+
+| word | category | 关键 rule IDs | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `laetus` | `diphthongs` | `disyllable-stress`, `ae-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `maestus` | `diphthongs` | `disyllable-stress`, `ae-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `praeda` | `diphthongs` | `disyllable-stress`, `ae-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `caecus` | `diphthongs` | `disyllable-stress`, `c-before-front-vowel`, `ae-e` | `liber-usualis-1962`, PDF lines 1279-1280, 1301-1302；`allen-greenough-accents`, Section 12 | approved |
+| `aedes` | `diphthongs` | `disyllable-stress`, `ae-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `poena` | `diphthongs` | `disyllable-stress`, `oe-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `foedus` | `diphthongs` | `disyllable-stress`, `oe-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `coena` | `diphthongs` | `disyllable-stress`, `c-before-front-vowel`, `oe-e` | `liber-usualis-1962`, PDF lines 1279-1280, 1301-1302；`allen-greenough-accents`, Section 12 | approved |
+| `foenum` | `diphthongs` | `disyllable-stress`, `oe-e` | `liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `coepit` | `diphthongs` | `disyllable-stress`, `c-before-front-vowel`, `oe-e` | `liber-usualis-1962`, PDF lines 1279-1280, 1301-1302；`allen-greenough-accents`, Section 12 | approved |
+
+#### D：`au/eu/ay` 与 `qu/ngu/cui` 边界
+
+| word | category | 关键 rule IDs | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `causa` | `diphthongs` | `disyllable-stress`, `au-diphthong` | `liber-usualis-1962`, PDF lines 1281-1289；`allen-greenough-accents`, Section 12 | approved |
+| `aura` | `diphthongs` | `disyllable-stress`, `au-diphthong` | `liber-usualis-1962`, PDF lines 1281-1289；`allen-greenough-accents`, Section 12 | approved |
+| `neuter` | `diphthongs` | `disyllable-stress`, `eu-diphthong` | `liber-usualis-1962`, PDF lines 1281-1289；`allen-greenough-accents`, Section 12 | approved |
+| `heu` | `diphthongs` | `monosyllable-stress`, `eu-diphthong` | `liber-usualis-1962`, PDF lines 1281-1289；`allen-greenough-accents`, Section 12 | approved |
+| `Raymundus` | `diphthongs` | `heavy-penult-stress`, `ay-diphthong` | `liber-usualis-1962`, PDF lines 1281-1289；`allen-greenough-accents`, Section 12，闭 penult `mun` | approved |
+| `quo` | `diphthongs` | `monosyllable-stress`, `qu-before-vowel` | `liber-usualis-1962`, PDF lines 1292-1294；`allen-greenough-accents`, Section 12 | approved |
+| `aqua` | `diphthongs` | `disyllable-stress`, `qu-before-vowel` | `liber-usualis-1962`, PDF lines 1292-1294；`allen-greenough-accents`, Section 12 | approved |
+| `sanguis` | `diphthongs` | `disyllable-stress`, `ngu-before-vowel` | `liber-usualis-1962`, PDF lines 1292-1294；`allen-greenough-accents`, Section 12 | approved |
+| `lingua` | `diphthongs` | `disyllable-stress`, `ngu-before-vowel` | `liber-usualis-1962`, PDF lines 1292-1294；`allen-greenough-accents`, Section 12 | approved |
+| `cuius` | `diphthongs` | `disyllable-stress`, `simple-u`, `i-consonantal` | `liber-usualis-1962`, PDF lines 1294-1297, 1322-1324；`allen-greenough-accents`, Section 12 | approved |
+
+既有黄金记录 `qui`（`qu-before-vowel`）与 `cui`（`simple-u` + `simple-i`）保持不变，并与本批 `quo`、`aqua`、`sanguis`、`lingua`、`cuius` 共同锁定 `qu/ngu/cui` 的合并与非合并边界。带 diaeresis 的人工变体留待专门的拼写变体批次，不在本批升级为 source-backed gold。
+
 ### G2P 实现规则与 locator
 
 下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。

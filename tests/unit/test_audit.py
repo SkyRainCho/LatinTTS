@@ -85,22 +85,19 @@ def test_gold_fixture_has_unique_approved_source_backed_entries() -> None:
     report = audit_gold_file(
         GOLD_FIXTURE,
         AuditPolicy(
-            minimum_total=30,
+            minimum_total=40,
             category_minimums={
-                "vowels": 5,
-                "diphthongs": 5,
-                "consonants": 10,
-                "stress": 5,
-                "liturgical": 5,
+                "vowels": 20,
+                "diphthongs": 20,
             },
         ),
     )
 
     assert report.errors == ()
-    assert report.total == 30
+    assert report.total == 70
     assert report.category_counts == {
-        "vowels": 5,
-        "diphthongs": 5,
+        "vowels": 25,
+        "diphthongs": 25,
         "consonants": 10,
         "stress": 5,
         "liturgical": 5,
@@ -301,7 +298,7 @@ def test_cli_success_returns_zero_and_prints_summary(capsys: pytest.CaptureFixtu
     exit_code = main([str(GOLD_FIXTURE)])
 
     assert exit_code == 0
-    assert capsys.readouterr().out == "gold-audit: PASS total=30 errors=0\n"
+    assert capsys.readouterr().out == "gold-audit: PASS total=70 errors=0\n"
 
 
 def test_cli_failure_returns_one_and_prints_errors(
