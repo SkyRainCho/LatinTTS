@@ -11,6 +11,7 @@ from latintts.g2p import (
     ecclesiastical_g2p,
     load_g2p_exceptions,
 )
+from latintts.syllables import syllabify
 
 
 @pytest.mark.parametrize(
@@ -47,6 +48,22 @@ def test_source_indices_keep_cross_syllable_consonants_on_their_own_side() -> No
 
     assert ecce.phonemes == ("ˈ", "e", "t", ".", "t͡ʃ", "e")
     assert excelsis.phonemes == ("e", "k", ".", "ˈ", "ʃ", "e", "l", ".", "s", "i", "s")
+
+
+@pytest.mark.parametrize(
+    ("word", "ipa"),
+    [
+        ("descendit", "deˈʃen.dit"),
+        ("ascendit", "aˈʃen.dit"),
+    ],
+)
+def test_sc_phoneme_follows_the_c_source_index_across_real_syllable_boundaries(
+    word: str,
+    ipa: str,
+) -> None:
+    result = ecclesiastical_g2p(word, syllabify(word), 1)
+
+    assert result.ipa == ipa
 
 
 @pytest.mark.parametrize(

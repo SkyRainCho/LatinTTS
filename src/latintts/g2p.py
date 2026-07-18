@@ -45,7 +45,7 @@ VOWEL = r"(?:ae|oe|[aeiouy])"
 RULES = (
     Rule("xc-before-front-vowel", re.compile(rf"xc(?={FRONT})"), ("k", "ʃ"), (0, 1)),
     Rule("cc-before-front-vowel", re.compile(rf"cc(?={FRONT})"), ("t", "t͡ʃ"), (0, 1)),
-    Rule("sc-before-front-vowel", re.compile(rf"sc(?={FRONT})"), ("ʃ",), (0,)),
+    Rule("sc-before-front-vowel", re.compile(rf"sc(?={FRONT})"), ("ʃ",), (1,)),
     Rule("gn-palatal", re.compile(r"gn"), ("ɲ",), (0,)),
     Rule("ti-before-vowel", re.compile(rf"(?<![sxt])ti(?={VOWEL})"), ("t͡s", "i"), (0, 1)),
     Rule("ch-hard", re.compile(r"ch"), ("k",), (0,)),
