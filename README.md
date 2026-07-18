@@ -18,9 +18,11 @@ StyleTTS2 的推理与训练，不包含网页，也不处理句子、祷文或�
 ## 开发环境
 
 项目要求 Python `>=3.10,<3.11`。在 Windows PowerShell 中创建环境并安装
-`pyproject.toml` 声明的开发依赖：
+`pyproject.toml` 声明的开发依赖。IPA 包含 GBK 无法编码的字符，因此必须在当前
+PowerShell 会话调用 Python 之前启用 UTF-8 模式；该环境变量也适用于随后运行的示例和验证命令：
 
 ```powershell
+$env:PYTHONUTF8 = "1"
 py -3.10 -m venv .venv
 .venv\Scripts\python -m pip install --upgrade pip
 .venv\Scripts\python -m pip install -e ".[dev]"
