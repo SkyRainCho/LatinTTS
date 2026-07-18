@@ -178,7 +178,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 例外必须以词条或受限上下文显式建模，并记录来源：
 
-- 打包例外表当前只收录 `nihil`、`mihi`，其中 `h` 输出 `/k/`；其他 `h` 不输出。派生词只有在逐条确认来源并加入例外表后才能获得 `/k/`，扫描器不得仅凭词形猜测。来源：`liber-usualis-1962`, PDF lines 1319-1321。
+- 打包例外表收录 `nihil`、`mihi` 以及逐条核验的 `nihildum`、`nihilne`，其中 `h` 输出 `/k/`；其他 `h` 不输出。更多派生词只有在逐条确认词形来源并加入例外表后才能获得 `/k/`，扫描器不得仅凭前缀猜测。来源：`liber-usualis-1962`, PDF lines 1319-1321；复合词 locator 详见拼写变体审核矩阵。
 - 感叹词 `hei` 的 `ei` 同属一个音节，其他词中的同形序列默认分开。来源：`liber-usualis-1962`, PDF lines 1290-1291。
 - `cui` 通常为两个音节；只有记录到具体赞美诗格律要求时才允许一音节覆盖。来源：`liber-usualis-1962`, PDF lines 1294-1297。
 - `ti` 规则在前一字母为 `s/x/t` 时不触发。来源：`liber-usualis-1962`, PDF lines 1335-1341。
@@ -415,9 +415,9 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `panis` | 基础 p/n | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
 | `vita` | 基础 v/t | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
 
-批次级覆盖结论：`c-before-front-vowel`、`cc-before-front-vowel`、`sc-before-front-vowel`、`ch-hard`、`g-before-front-vowel`、`g-hard`、`gn-palatal`、`h-muted`、`j-consonantal`、`i-consonantal`、`ti-before-vowel`、`th-t`、`x-ks`、`xc-before-front-vowel`、`z-dz`、`qu-before-vowel`、`ngu-before-vowel` 均至少有两个正例；关键上下文均有至少一个实际不触发该规则的边界词。`h-mihi-nihil` 的两个正例由既有 `mihi` 与本批 `nihil` 组成。`bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 共 12 类双辅音均由 IPA 中两个相邻辅音位置锁定；实现当前没有另造“geminate” rule ID。
+批次级覆盖结论：`c-before-front-vowel`、`cc-before-front-vowel`、`sc-before-front-vowel`、`ch-hard`、`g-before-front-vowel`、`g-hard`、`gn-palatal`、`h-muted`、`j-consonantal`、`i-consonantal`、`ti-before-vowel`、`th-t`、`x-ks`、`xc-before-front-vowel`、`z-dz`、`qu-before-vowel`、`ngu-before-vowel` 均至少有两个正例；关键上下文均有至少一个实际不触发该规则的边界词。`h-mihi-nihil` 的基本词正例是 `mihi/nihil`，拼写变体批次再加入逐条核验的 `nihildum/nihilne`。`bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 共 12 类双辅音均由 IPA 中两个相邻辅音位置锁定；实现当前没有另造“geminate” rule ID。
 
-基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。`q-hard` 仍是计划明文要求与“只用真实普通拉丁词”之间的待用户裁决边界：当前黄金集不以造词或无权威发音来源的现代专名自行满足该项，也不把它标为已豁免。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 只锁定真实 `qu` 路径，不能替代 `q-hard` 裁决。
+基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。用户已批准方案 A：真实词黄金集豁免 `q-hard`，不以造词或无权威发音来源的现代专名满足覆盖数字；Task 14 使用 synthetic 输入单测扫描器的独立 `q -> k` 容错路径。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 只锁定真实 `qu` 路径，不冒充 `q-hard` 真实词证据。
 
 ### 音节与重音黄金批次审核矩阵
 
@@ -595,6 +595,63 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 `quia` 的推导需要同时使用三段规则：lines 1292-1294 使 `qu` 中的 u 作为滑音与 i 同属首音节；lines 1273-1278 使不在双元音清单中的 `ia` 分属两音节；lines 1322-1324 的辅音 i 只适用于词首或两个真正元音核之间，因此不能把已由 `qu` 使用的滑音 u 当作前一个元音核。由此得到 `qui-a` 与 `/ˈkwi.a/`。`qui`、`cui`、`eius`、`sequi`、`equus` 保留为单元测试正反对照。
 
+### 拼写变体与例外黄金批次审核矩阵
+
+本批新增 30 条 `orthographic_variants`，累计黄金集为 300 条。每条均为 `approved`、`warnings == ()`，且不是 `ResolutionMethod.CANDIDATE`；JSONL 中的 `normalized`、音节、重音、IPA 以及有序 `rule_ids/source_ids` 均由测试与 `PronunciationToken` 精确比较。词形真实性以 Lewis and Short 的逐词 `entryFree`、其所引原典或既有礼仪拼写为据；发音规则仍分别引用 Liber、Allen and Greenough 和 Iveson，不能用运行时输出反向证明词形。
+
+#### A：`æ/ae`、`œ/oe` 五对（10 条）
+
+五对都必须满足：不同原始 `word/surface`，但 `lookup_key`、canonical `normalized`、音节、重音与 IPA 相同。连字形额外记录 `expand-ae-ligature` 或 `expand-oe-ligature`；双字母形不记录该 transformation，因此 transformation 序列不要求相同。Liber lines 1279-1280 规定 `æ/œ` 与相应 `ae/oe` 的 `/e/` 读法；全部是双音节，重音依据 Allen and Greenough Section 12。
+
+| word | normalized / lookup / IPA | 成对契约与词形来源 locator | review |
+| --- | --- | --- | --- |
+| `aetas` | `aetas` / `aetas` / `/ˈe.tas/` | 与 `ætas` 成对；`perseus-lewis-short`, `entryFree id=n1406`, `key=aetas`, `orth=aetas` | approved |
+| `ætas` | `aetas` / `aetas` / `/ˈe.tas/` | 同 `n1406`；连字是 `ae` 的版式变体，读音见 Liber lines 1279-1280 | approved |
+| `laetum` | `laetum` / `laetum` / `/ˈle.tum/` | 与 `lætum` 成对；`entryFree id=n25653`, `key=laetus`, `orth=laetus`, `a, um` | approved |
+| `lætum` | `laetum` / `laetum` / `/ˈle.tum/` | 同 `n25653` 的中性单数词形；连字展开可追踪 | approved |
+| `praesens` | `praesens` / `praesens` / `/ˈpre.sens/` | 与 `præsens` 成对；`entryFree id=n37937`, `key=praesens` | approved |
+| `præsens` | `praesens` / `praesens` / `/ˈpre.sens/` | 同 `n37937`；连字展开不回写 surface/span | approved |
+| `poenas` | `poenas` / `poenas` / `/ˈpe.nas/` | 与 `pœnas` 成对；`entryFree id=n36788`, `key=poena`，正文多见复数宾格 `poenas` | approved |
+| `pœnas` | `poenas` / `poenas` / `/ˈpe.nas/` | 同 `n36788`；`œ/oe -> /e/` 见 Liber lines 1279-1280 | approved |
+| `foetus` | `foetus` / `foetus` / `/ˈfe.tus/` | 与 `fœtus` 成对；`entryFree id=n18064`, `key=fetus2`, `orth=fētus`，明列 alternate `foet-` | approved |
+| `fœtus` | `foetus` / `foetus` / `/ˈfe.tus/` | 同 `n18064` 的 `foet-` 变体；连字与双字母只在 surface/transformation 不同 | approved |
+
+#### B：`j/i` 上下文（10 条）
+
+`lookup_key` 统一不等于 canonical token 全局改写。显式 `j` 走 `j-consonantal`；词首或真正元音核之间的辅音 `i` 走 `i-consonantal`；`finis` 的元音 `i` 保持 `simple-i`。下表前三对以及 `ejus/eius`、`cujus/cuius` 对照都要求 lookup 与 IPA 相同，但 normalized 与命中的 j/i rule ID 保持各自拼写。辅音 j/i 见 Liber lines 1322-1324，双音节或闭 penult 重音见 Allen and Greenough Section 12。
+
+| word | normalized / lookup / IPA | 覆盖与词形来源 locator | review |
+| --- | --- | --- | --- |
+| `Joseph` | `joseph` / `ioseph` / `/ˈjo.sef/` | 显式词首 j；`entryFree id=n25253`, `key=Joseph`, `orth=Jōsēph or ĭōsēph`；`ph-f` 另见 Iveson p.14 lines 44-46 | approved |
+| `Ioseph` | `ioseph` / `ioseph` / `/ˈjo.sef/` | 词首辅音 i；同 `n25253` 明列 `ĭōsēph` | approved |
+| `Joannes` | `joannes` / `ioannes` / `/joˈan.nes/` | 显式词首 j；`entryFree id=n25228`, `key=Joannes`，明列 trisyllabic；闭 penult `an` | approved |
+| `Ioannes` | `ioannes` / `ioannes` / `/joˈan.nes/` | 词首辅音 i；`entryFree id=n24834`, `key=Ioannes`, `orth=Iōannes`, cross-reference Joannes | approved |
+| `judex` | `judex` / `iudex` / `/ˈju.deks/` | 显式词首 j；`entryFree id=n25280`, `key=judex`, `orth=jūdex` | approved |
+| `iudex` | `iudex` / `iudex` / `/ˈju.deks/` | 词首辅音 i；同 `n25280`，按已批准 j/i lookup 契约与 `judex` 对照 | approved |
+| `ejus` | `ejus` / `eius` / `/ˈe.jus/` | 元音间显式 j；`entryFree id=n15368`, `key=ejus`, `orth=ējus`；`entryFree id=n25029`, `key=is` 亦明列 `eius` | approved |
+| `cujus` | `cujus` / `cuius` / `/ˈku.jus/` | 元音间显式 j；L&S XML 正文通行 `cujus`，`entryFree id=n40269`, `key=quojus2` 明列 `= cujus`；与既有 `cuius` 对照 | approved |
+| `Troia` | `troia` / `troia` / `/ˈtro.ja/` | 元音核 o 与 a 之间的辅音 i；`entryFree id=n49272`, `key=Troia`, `orth=Trōĭa` | approved |
+| `finis` | `finis` / `finis` / `/ˈfi.nis/` | i 在辅音前保持元音；`entryFree id=n18202`, `key=finis`, `orth=fīnis` | approved |
+
+#### C：`u/v` 角色与 `mihi/nihil` 例外边界（10 条）
+
+`v -> u` 只生成 lookup key：`servus/avus/vivus/vox` 的 canonical v 仍为 `/v/`，`unus/umbra` 的 u 仍为 `/u/`，禁止把 lookup key 写回发音输入。Liber lines 1319-1321 明确 `mihi`、`nihil` **及其 compounds** 的 h 读 `/k/`，其他 h 静音；因此 `nihildum/nihilne` 进入逐词打包例外，而 `traho/honor` 保持 `h-muted`。所有重音由单音节、双音节或闭 penult 结构按 Allen and Greenough Section 12 确定。
+
+| word | normalized / lookup / IPA | 覆盖与词形/例外来源 locator | review |
+| --- | --- | --- | --- |
+| `servus` | `servus` / `seruus` / `/ˈser.vus/` | consonantal v + vocalic u；`entryFree id=n43952`, `key=servus2`, `orth=servus` | approved |
+| `avus` | `avus` / `auus` / `/ˈa.vus/` | 元音间 v + 词尾 u；`entryFree id=n4730`, `key=avus` | approved |
+| `vivus` | `vivus` / `uiuus` / `/ˈvi.vus/` | 两个 consonantal v 与 vocalic i/u；`entryFree id=n51239`, `key=vivus` | approved |
+| `vox` | `vox` / `uox` / `/ˈvoks/` | 词首 v 不因 lookup 变成 `/u/`；`entryFree id=n51406`, `key=vox` | approved |
+| `unus` | `unus` / `unus` / `/ˈu.nus/` | 词首 u 保持元音；`entryFree id=n49871`, `key=unus` | approved |
+| `umbra` | `umbra` / `umbra` / `/ˈum.bra/` | u 在辅音前保持元音；`entryFree id=n49694`, `key=umbra` | approved |
+| `nihildum` | `nihildum` / `nihildum` / `/niˈkil.dum/` | nihil compound；Liber lines 1319-1321；`entryFree id=n30955`, `key=nihildum`, `orth=nĭhildum` | approved |
+| `nihilne` | `nihilne` / `nihilne` / `/niˈkil.ne/` | nihil + enclitic `-ne` 的真实连写形式；Cicero, *In Catilinam* 1.1 开头 `Nihilne`；基本词见 `entryFree id=n30954`, `key=nihil`；Liber compound 规则同上 | approved |
+| `traho` | `traho` / `traho` / `/ˈtra.o/` | 非例外 h 静音反例；`entryFree id=n48709`, `key=traho`；Liber lines 1319-1321 | approved |
+| `honor` | `honor` / `honor` / `/ˈo.nor/` | 非例外词首 h 静音反例；`entryFree id=n20890`, `key=honor`；Liber lines 1319-1321 | approved |
+
+打包例外表据此包含四个精确 lookup key：`mihi`、`nihil`、`nihildum`、`nihilne`。`nihildum/nihilne` 的 `rule_ids=[h-mihi-nihil]`，`source_ids=[liber-usualis-1962, perseus-lewis-short]`，note 同时记录 Liber compound locator 与逐词文本 locator；加载器继续拒绝未知 rule/source、空 note、非法 phoneme 或重复 key。例外不使用前缀匹配，因此普通含 h 词不会被误提升。
+
 ### G2P 实现规则与 locator
 
 下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。
@@ -611,7 +668,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `ch-hard` | `ch -> k`，包括 `e/i` 前 | `Cham`, `machina` / 不走 `c-before-front-vowel` | `liber-usualis-1962`, PDF lines 1309-1310 |
 | `g-before-front-vowel`, `g-hard` | `g` 在前元音前输出 `d͡ʒ`，否则 `ɡ` | `regina` / `ego` | `liber-usualis-1962`, PDF lines 1311-1314 |
 | `gn-palatal` | `gn -> ɲ` | `regnum` / 不拆成 `ɡ,n` | `liber-usualis-1962`, PDF lines 1315-1318 |
-| `h-mihi-nihil`, `h-muted` | 仅打包例外或后续逐条确认的例外输出 `k`；普通 `h` 不输出 | `mihi`, `nihil` / `hora` | `liber-usualis-1962`, PDF lines 1319-1321 |
+| `h-mihi-nihil`, `h-muted` | 仅打包例外输出 `k`；普通 `h` 不输出 | `mihi`, `nihil`, `nihildum`, `nihilne` / `hora`, `traho`, `honor` | `liber-usualis-1962`, PDF lines 1319-1321；逐词复合词 locator 见拼写变体审核矩阵 |
 | `i-consonantal`, `j-consonantal` | 词首接元音或真正元音核之间的 `i`，以及显式 `j` 输出 `j`；diaeresis 阻止辅音 `i`，`qu/ngu` 的滑音 u 不计作前一元音核 | `iam`, `major`, `eius` / `quia`, `aïa` | `liber-usualis-1962`, PDF lines 1322-1324；`quia` 边界另结合 lines 1273-1278, 1292-1294 |
 | `simple-r` | `r -> r`，不能在辅音旁省略 | `carnis` | `liber-usualis-1962`, PDF lines 1325-1331 |
 | `simple-s` | 阶段 1 始终输出完整音位 `s` | `misericordia` / 不自动改写为 `z` | `liber-usualis-1962`, PDF lines 1332-1334 |
@@ -631,5 +688,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | 2026-07-18 | 拼写变体在哪一层归并 | 原始 `surface/source_span` 不变；词级 canonical token 展开 `æ/œ` 并记录 transformation ID；lookup key 再归并 `j/i`、`v/u` | 使 `ae/oe` G2P 规则可消费连字，同时避免全局替换破坏拼写与 span |
 | 2026-07-18 | penult 轻重缺少证据时是否给出确定重音 | 否。仅生成候选并返回 `PRONUNCIATION_NEEDS_REVIEW` | `allen-greenough-accents`, Section 12 需要 penult 轻重；普通拼写不总能提供该证据 |
 | 2026-07-18 | `ph -> /f/` 的直接来源如何补齐 | 使用 Iveson 明确的 `PH — as the letter F`；`ph-f` 只引用该来源，词内其他基础规则仍分别引用 Liber，结果聚合实际命中的来源 | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46；文首 lines 2-4 说明规则基于罗马省神职人员实际读音 |
+| 2026-07-18 | `q-hard` 是否用造词或现代专名满足真实词黄金覆盖 | 否。真实词黄金集豁免该 fallback；Task 14 用 synthetic 输入锁定内部 `q -> k` 容错路径 | 用户批准方案 A；标准真实词的 q 由 `qu-before-vowel` 覆盖 |
+| 2026-07-18 | `mihi/nihil and their compounds` 是否用前缀规则自动扩张 | 否。只新增有逐词词形证据的 `nihildum/nihilne` 打包例外；普通 h 仍静音 | `liber-usualis-1962`, PDF lines 1319-1321；L&S `n30955/n30954`；Cicero, *In Catilinam* 1.1 |
 
 后续冲突记录必须包含日期、候选解释、采用结果和精确来源位置。改变既有规范音素属于可审计的规则版本变更。

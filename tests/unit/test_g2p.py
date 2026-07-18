@@ -182,16 +182,80 @@ def test_lookup_key_selects_a_packaged_exception_without_rewriting_the_word() ->
     assert result.applied_rule_ids == ("h-mihi-nihil",)
 
 
-def test_load_g2p_exceptions_reads_the_two_source_backed_entries() -> None:
+@pytest.mark.parametrize(
+    ("word", "syllables", "ipa", "phonemes"),
+    [
+        (
+            "nihildum",
+            ("ni", "hil", "dum"),
+            "niˈkil.dum",
+            ("n", "i", ".", "ˈ", "k", "i", "l", ".", "d", "u", "m"),
+        ),
+        (
+            "nihilne",
+            ("ni", "hil", "ne"),
+            "niˈkil.ne",
+            ("n", "i", ".", "ˈ", "k", "i", "l", ".", "n", "e"),
+        ),
+    ],
+)
+def test_nihil_compounds_use_the_source_backed_h_exception(
+    word: str,
+    syllables: tuple[str, ...],
+    ipa: str,
+    phonemes: tuple[str, ...],
+) -> None:
+    result = ecclesiastical_g2p(word, syllables, 1)
+
+    assert result.ipa == ipa
+    assert result.phonemes == phonemes
+    assert result.applied_rule_ids == ("h-mihi-nihil",)
+    assert result.source_ids == (
+        "liber-usualis-1962",
+        "perseus-lewis-short",
+    )
+
+
+@pytest.mark.parametrize("word", ["traho", "honor"])
+def test_unrelated_h_words_remain_muted(word: str) -> None:
+    syllables = syllabify(word)
+    result = ecclesiastical_g2p(word, syllables, 0)
+
+    assert "h-muted" in result.applied_rule_ids
+    assert "h-mihi-nihil" not in result.applied_rule_ids
+
+
+def test_load_g2p_exceptions_reads_the_source_backed_entries() -> None:
     exceptions = load_g2p_exceptions()
 
-    assert set(exceptions) == {"mihi", "nihil"}
+    assert set(exceptions) == {"mihi", "nihil", "nihildum", "nihilne"}
     assert exceptions["mihi"] == G2PExceptionEntry(
         lookup_key="mihi",
         phonemes_by_syllable=(("m", "i"), ("k", "i")),
         rule_ids=("h-mihi-nihil",),
         source_ids=("liber-usualis-1962",),
         note="Liber Usualis pronunciation table, h pronounced k in mihi",
+    )
+    assert exceptions["nihildum"] == G2PExceptionEntry(
+        lookup_key="nihildum",
+        phonemes_by_syllable=(("n", "i"), ("k", "i", "l"), ("d", "u", "m")),
+        rule_ids=("h-mihi-nihil",),
+        source_ids=("liber-usualis-1962", "perseus-lewis-short"),
+        note=(
+            "Liber Usualis PDF lines 1319-1321: mihi/nihil and their compounds; "
+            "Lewis and Short entryFree id=n30955, key=nihildum"
+        ),
+    )
+    assert exceptions["nihilne"] == G2PExceptionEntry(
+        lookup_key="nihilne",
+        phonemes_by_syllable=(("n", "i"), ("k", "i", "l"), ("n", "e")),
+        rule_ids=("h-mihi-nihil",),
+        source_ids=("liber-usualis-1962", "perseus-lewis-short"),
+        note=(
+            "Liber Usualis PDF lines 1319-1321: mihi/nihil and their compounds; "
+            "Lewis and Short entryFree id=n30954, key=nihil; Cicero, In Catilinam 1.1, "
+            "Nihilne"
+        ),
     )
 
 
