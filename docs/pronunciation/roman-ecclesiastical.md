@@ -6,7 +6,7 @@
 
 目标是为现代罗马教会式拉丁语建立确定、可审计的文本前端规范。每条规则应能追溯到来源登记中的稳定 `source_id` 和具体位置，并最终产生音节、重音、IPA 与规范音素。
 
-本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。本文不实现 Unicode 规范化、音节划分或 G2P；未决行为必须显式保留，不能由实现自行猜测。
+本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。下述 Unicode 与拼写规范化契约已有实现；音节划分和 G2P 尚未实现，未决行为必须显式保留，不能由实现自行猜测。
 
 ## 来源优先级
 
@@ -27,6 +27,8 @@
 2. **短语规范文本**：`normalized_text` 只做 Unicode NFC 和空白整理，保留标点与原始正字法选择；它不作为词级 G2P 输入。
 3. **词级 canonical normalized token**：`NormalizedWord.normalized` 和后续 `PronunciationToken.normalized` 可做 casefold、重音提示提取，以及非破坏的连字展开。`æ -> ae` 必须记录稳定 transformation ID `expand-ae-ligature`；`œ -> oe` 必须记录 `expand-oe-ligature`。长度变化绝不改写原文 span，`surface`、`source_span` 和 transformation IDs 共同提供可追踪的位置映射。G2P 和音节规则只消费这一层。
 4. **lookup key**：在 canonical normalized token 之上产生，仅用于词典和例外查询。`j -> i` 记录 `lookup-j-to-i`，`v -> u` 记录 `lookup-v-to-u`；检索命中不得覆盖 canonical normalized token，也不能改变展示文本或原文 span。
+
+连字上的附加符号采用可复现的工程归一化政策：先统一分解并展开基本连字，原附加符号自然保留在展开序列的第二个字母上，因此 `ǣ -> aē`；`ǽ` 的 acute 作为索引 `1` 的显式重音提示提取后从 canonical token 移除。lookup key 只移除 acute，保留 macron、diaeresis 及其他非 acute 附加符号。
 
 因此 `æ/ae`、`œ/oe` 在 canonical token 层闭合到规则拼写，而 `j/i`、`u/v` 只在变体感知检索中归并。必须保留原始拼写和位置映射；禁止对原始短语做无条件全局替换，也禁止把 lookup key 写回任一文本层。
 

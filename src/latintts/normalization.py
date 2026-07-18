@@ -45,25 +45,25 @@ def normalize_phrase(text: str) -> str:
 
 def _lookup_key(value: str) -> str:
     decomposed = unicodedata.normalize("NFD", value)
-    without_marks = "".join(
-        char for char in decomposed if not unicodedata.category(char).startswith("M")
-    )
-    return without_marks.replace("j", "i").replace("v", "u")
+    without_acute = "".join(char for char in decomposed if char != COMBINING_ACUTE)
+    recomposed = unicodedata.normalize("NFC", without_acute)
+    return recomposed.replace("j", "i").replace("v", "u")
 
 
 def _describe_transformations(surface: str, normalized: str) -> tuple[str, ...]:
     result: list[str] = []
     nfc_surface = unicodedata.normalize("NFC", surface)
     folded_surface = nfc_surface.casefold()
+    decomposed_surface = unicodedata.normalize("NFD", folded_surface)
     if nfc_surface != surface:
         result.append("unicode-nfc")
     if folded_surface != nfc_surface:
         result.append("casefold")
-    if "æ" in folded_surface:
+    if "æ" in decomposed_surface:
         result.append("expand-ae-ligature")
-    if "œ" in folded_surface:
+    if "œ" in decomposed_surface:
         result.append("expand-oe-ligature")
-    if COMBINING_ACUTE in unicodedata.normalize("NFD", folded_surface):
+    if COMBINING_ACUTE in decomposed_surface:
         result.append("remove-acute-stress-mark")
     if "j" in normalized:
         result.append("lookup-j-to-i")
@@ -73,20 +73,21 @@ def _describe_transformations(surface: str, normalized: str) -> tuple[str, ...]:
 
 
 def normalize_word(surface: str) -> NormalizedWord:
-    expanded = unicodedata.normalize("NFC", surface).casefold()
-    expanded = expanded.replace("æ", "ae").replace("œ", "oe")
-    decomposed = unicodedata.normalize("NFD", expanded)
+    folded = unicodedata.normalize("NFC", surface).casefold()
+    decomposed = unicodedata.normalize("NFD", folded)
     output: list[str] = []
     base_index = -1
     marked_vowel_index: int | None = None
     for char in decomposed:
-        if not unicodedata.category(char).startswith("M"):
-            base_index += 1
-            output.append(char)
-        elif char == COMBINING_ACUTE:
-            marked_vowel_index = base_index
-        else:
-            output.append(char)
+        if unicodedata.category(char).startswith("M"):
+            if char == COMBINING_ACUTE:
+                marked_vowel_index = base_index
+            else:
+                output.append(char)
+            continue
+        expanded = char.replace("æ", "ae").replace("œ", "oe")
+        base_index += len(expanded)
+        output.extend(expanded)
     normalized = unicodedata.normalize("NFC", "".join(output))
     return NormalizedWord(
         surface=surface,
