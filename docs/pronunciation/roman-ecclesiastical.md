@@ -57,7 +57,7 @@ G2P/音节规则消费展开后的 canonical normalized token：到达本节前�
 | 一般相邻元音，包括 `ou`、`ai` | 各保留自己的音质并分属不同音节 | `liber-usualis-1962`, PDF lines 1273-1278 |
 | `ae`、`oe` | 合为一个音节，规范输出 `/e/` | `liber-usualis-1962`, PDF lines 1279-1280 |
 | `au`、`eu`、`ay` | 同属一个音节但两个元音都发出，重心在第一个元音 | `liber-usualis-1962`, PDF lines 1281-1289 |
-| `ei` | 仅感叹词 `hei` 按一个音节处理；其他位置如 `mei` 分开 | `liber-usualis-1962`, PDF lines 1290-1291 |
+| `ei` | 仅感叹词 `hei` 按一个音节处理；两个元音都发出、主体在第一个，规范工程输出 `/ei̯/`。其他位置如 `mei` 依然分开，diaeresis 输入 `heï` 也不命中例外 | `liber-usualis-1962`, PDF lines 1281-1291 |
 | `qu` 或 `ngu` 后接元音 | `u` 保持音质，并与后续元音同属一个音节 | `liber-usualis-1962`, PDF lines 1292-1294 |
 | `cui` | 通常为两个音节；诗歌格律要求的一音节用法是显式例外 | `liber-usualis-1962`, PDF lines 1294-1297 |
 
@@ -106,6 +106,16 @@ G2P 扫描器按上表从特殊二合字到单字符执行当前位置最长匹�
 | 双辅音 | 从中间分开并保留两个辅音位置：`ecce -> ("ec", "ce")` | `liber-usualis-1962`, PDF lines 1352-1354 |
 | 其他多辅音簇 | 仅把允许的最长 onset 后缀移到下一音节，否则只移最后一个辅音：`sanctus -> ("sanc", "tus")` | 阶段 1 确定性工程边界政策；辅音完整发音依据 `liber-usualis-1962`, PDF lines 1351-1354 |
 | 相邻独立元音核 | 核之间没有辅音时直接在两核之间分界：`gratia -> ("gra", "ti", "a")` | `liber-usualis-1962`, PDF lines 1273-1278 |
+
+全局双元音集合不包含 `ei`。实现将下表作为显式命名的
+`SOURCE_BACKED_SYLLABLE_RANGE_EXCEPTIONS`读取；集成测试要求注册表每个 key 与此手工矩阵一一对应，
+不得在通用核扫描中隐藏词形特判。
+
+<!-- syllable-range-exception-matrix:start -->
+| canonical 例外词 | code-point 半开区间 | 音节 | 不命中反例 | source / locator |
+| --- | --- | --- | --- | --- |
+| `hei` | `[0,3)` | `hei` | `mei -> me-i`；`heï -> he-ï` | `liber-usualis-1962`, PDF lines 1281-1291 |
+<!-- syllable-range-exception-matrix:end -->
 
 `syllable_ranges("poëta") == ((0, 2), (2, 3), (3, 5))` 展示 canonical code-point 半开区间契约。无音节核的输入会失败并报告 `word contains no vowel nucleus`；调用方必须先完成词级 canonical 规范化。
 
@@ -208,7 +218,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | 范围 | 规范来源 | 阶段 1 状态 | 发布证据 |
 | --- | --- | --- | --- |
 | 单元音 | `liber-usualis-1962`, PDF lines 1254-1272 | 已锁定 | 元音单测、25 条 `vowels` gold |
-| 双元音与相邻元音 | `liber-usualis-1962`, PDF lines 1273-1297 | 已锁定 | 合并、分离、diaeresis 与边界单测；25 条 `diphthongs` gold |
+| 双元音与相邻元音 | `liber-usualis-1962`, PDF lines 1273-1297 | 已锁定 | 合并、分离、diaeresis 与边界单测；26 条 `diphthongs` gold |
 | `c/cc/sc/ch/g/gn/h/j` | `liber-usualis-1962`, PDF lines 1298-1324 | 已锁定 | 正例、反例、最长匹配与例外测试；110 条 `consonants` gold |
 | `r/s/ti/th/x/xc/y/z` | `liber-usualis-1962`, PDF lines 1325-1350 | 已锁定 | 上下文反例、例外优先级与宽式 IPA 测试 |
 | 其他辅音与双辅音 | `liber-usualis-1962`, PDF lines 1351-1354 | 已锁定 | 基础映射、12 类双辅音和音节重接测试 |
@@ -219,7 +229,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 ### 元音与双元音黄金批次审核矩阵
 
-以下四批每批 10 条。审核时逐词运行 `Pronouncer`，只批准非 `ResolutionMethod.CANDIDATE` 且 `warnings == ()` 的结果；黄金记录中的 `rule_ids` 与 `source_ids` 按 token 实际集合完整登记。表中列出本批关注的关键规则，词内其他基础辅音规则仍按下节的实现规则表核对。所有单音节、双音节重音均直接依据 `allen-greenough-accents`, Section 12；`Raymundus` 的闭 penult `mun` 也按同一节推导，不需要扩大重音词典。
+下列四批每批 10 条，后面再列出一条精确词级 `hei` 例外。审核时逐词运行 `Pronouncer`，只批准非 `ResolutionMethod.CANDIDATE` 且 `warnings == ()` 的结果；黄金记录中的 `rule_ids` 与 `source_ids` 按 token 实际集合完整登记。表中列出本批关注的关键规则，词内其他基础辅音规则仍按下节的实现规则表核对。所有单音节、双音节重音均直接依据 `allen-greenough-accents`, Section 12；`Raymundus` 的闭 penult `mun` 也按同一节推导，不需要扩大重音词典。
 
 #### A：短/长书写元音与 `y`
 
@@ -282,6 +292,14 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `cuius` | `diphthongs` | `disyllable-stress`, `simple-u`, `i-consonantal` | `liber-usualis-1962`, PDF lines 1294-1297, 1322-1324；`allen-greenough-accents`, Section 12 | approved |
 
 既有黄金记录 `qui`（`qu-before-vowel`）与 `cui`（`simple-u` + `simple-i`）保持不变，并与本批 `quo`、`aqua`、`sanguis`、`lingua`、`cuius` 共同锁定 `qu/ngu/cui` 的合并与非合并边界。带 diaeresis 的输入由单元测试锁定为规则阻断边界，不冒充 source-backed 真实词 gold。
+
+#### E：`hei` 精确 `ei` 例外
+
+| word | category | 关键 rule IDs | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `hei` | `diphthongs` | `monosyllable-stress`, `hei-ei-diphthong` | `liber-usualis-1962`, PDF lines 1281-1291；`ei` 只在该感叹词中作一音节，两元音均可闻且首元音为主；单音节重音见 `allen-greenough-accents`, Section 12 | approved |
+
+`hei` 的宽式工程 IPA 为 `/ˈei̯/`。`mei -> /ˈme.i/` 与 diaeresis 边界 `heï -> /ˈe.i/` 都由单元和管线测试锁定；实现不向全局双元音集合添加 `ei`。
 
 ### 辅音规则黄金批次审核矩阵
 
@@ -651,15 +669,15 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `traho` | `traho` / `traho` / `/ˈtra.o/` | 非例外 h 静音反例；`entryFree id=n48709`, `key=traho`；Liber lines 1319-1321 | approved |
 | `honor` | `honor` / `honor` / `/ˈo.nor/` | 非例外词首 h 静音反例；`entryFree id=n20890`, `key=honor`；Liber lines 1319-1321 | approved |
 
-打包例外表据此包含三个精确 lookup key：`mihi`、`nihil`、`nihildum`。`nihildum` 的 `rule_ids=[h-mihi-nihil]`，`source_ids=[liber-usualis-1962, perseus-lewis-short]`，note 同时记录 Liber compound locator 与 L&S 逐词 locator；加载器继续拒绝未知 rule/source、空 note、非法 phoneme 或重复 key。例外不使用前缀匹配，因此普通含 h 词不会被误提升。
+h 的打包例外表据此包含三个精确 lookup key：`mihi`、`nihil`、`nihildum`。`nihildum` 的 `rule_ids=[h-mihi-nihil]`，`source_ids=[liber-usualis-1962, perseus-lewis-short]`，note 同时记录 Liber compound locator 与 L&S 逐词 locator；资源中还有独立的 `hei` 精确 G2P 例外。加载器继续拒绝未知 rule/source、空 note、非法 phoneme 或重复 key。例外不使用前缀匹配，因此普通含 h 词和普通 `ei` 词都不会被误提升。
 
 ### 常见礼仪词汇与最终黄金门禁
 
-本批新增 50 条唯一真实单词，五批各 10 条；最终黄金集为 350 条，其中 `liturgical=55`。所有记录都是普通拼写、`approved`、`warnings == ()`，并且不是 `ResolutionMethod.CANDIDATE`。单词级 gold 只锁定 canonical normalized token、音节、词重音、IPA 与实际运行时 provenance；它不编码整句重音、停顿、圣咏音高、音符时值或歌唱韵律。
+本批新增 50 条唯一真实单词，五批各 10 条，并保持为 JSONL 的最后 50 条；该 Task 13 检查点将黄金集带到 350 条。当前发布再于这 50 条之前加入 `hei` 词级例外，因此总数为 351，其中 `liturgical=55`。所有记录都是普通拼写、`approved`、`warnings == ()`，并且不是 `ResolutionMethod.CANDIDATE`。单词级 gold 只锁定 canonical normalized token、音节、词重音、IPA 与实际运行时 provenance；它不编码整句重音、停顿、圣咏音高、音符时值或歌唱韵律。
 
 阶段 1 发布审计的 `DEFAULT_POLICY` 固定为总数至少 320，并要求 `vowels >= 20`、
 `diphthongs >= 20`、`consonants >= 100`、`syllabification >= 40`、`stress >= 60`、
-`orthographic_variants >= 30`、`liturgical >= 50`。当前 350 条实际分类计数依次为 25、25、
+`orthographic_variants >= 30`、`liturgical >= 50`。当前 351 条实际分类计数依次为 25、26、
 110、40、65、30、55；CLI 与测试使用同一策略，不能以降低门槛换取通过。
 
 `liber-usualis-1961-full-scan` 在下表中承担两种明确分开的职责：每行的“正文”locator 证明词确实出现在指定礼仪文本；只有正文明确印出 acute 且该词进入 stress lexicon 时，该来源才同时作为直接词重音证据进入运行时 `source_ids`。其余正文 locator 不得强塞进 gold token。G2P 发音规则仍由 `liber-usualis-1962` 的 pronunciation table 支持；单/双音节及可证明 heavy penult 仍由 `allen-greenough-accents`, Section 12 支持。表中“规则/来源”列列出关键命中及完整有序 `source_ids`；完整有序 `rule_ids` 由 JSONL 与 `Pronouncer` 的全表测试逐行精确比较。
@@ -747,10 +765,10 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 ### G2P 实现规则与 locator
 
-下表逐行列出阶段 1 当前实现的全部 44 个稳定 G2P rule ID。每一行都是人工解释，
+下表逐行列出阶段 1 当前实现的全部 45 个稳定 G2P rule ID。每一行都是人工解释，
 并由集成测试检查与 `IMPLEMENTED_RULE_IDS` 精确一致；它不是从代码规则表自动生成的文档。
 正例说明规则触发，反例锁定上下文、最长匹配或例外优先级。“gold 词”给出至少一条
-350 词真实词黄金记录；唯一例外 `q-hard` 是非标准或残缺输入的内部 fallback，只由明确标记的
+351 词真实词黄金记录；唯一例外 `q-hard` 是非标准或残缺输入的内部 fallback，只由明确标记的
 synthetic 单元测试覆盖。一个 locator 没有直接写出工程 IPA token 时，表中只是把来源描述
 映射到宽式音素，不声称来源使用了 IPA。
 
@@ -768,6 +786,7 @@ synthetic 单元测试覆盖。一个 locator 没有直接写出工程 IPA token
 | `au-diphthong` | 无 diaeresis 的 `au` | `a u̯` | `lauda` | `aüla` 的 diaeresis 阻止合并 | `liber-usualis-1962`, PDF lines 1281-1289 | `lauda` |
 | `eu-diphthong` | 无 diaeresis 的 `eu` | `e u̯` | `euge` | `eü` 的 diaeresis 阻止合并 | `liber-usualis-1962`, PDF lines 1281-1289 | `euge` |
 | `ay-diphthong` | 无 diaeresis 的 `ay` | `a i̯` | `Raymundus` | `aÿ` 的 diaeresis 阻止合并 | `liber-usualis-1962`, PDF lines 1281-1289 | `Raymundus` |
+| `hei-ei-diphthong` | 仅精确词级例外 `hei` | `e i̯` | `hei` | `mei` 与 `heï` 保持分音节 | `liber-usualis-1962`, PDF lines 1281-1291 | `hei` |
 | `qu-before-vowel` | 无 diaeresis 的 `qu` 后接元音 | `k w` | `qui` | `qüi` 的 diaeresis 阻止合并 | `liber-usualis-1962`, PDF lines 1292-1294 | `qui` |
 | `ngu-before-vowel` | 无 diaeresis 的 `ngu` 后接元音 | `ŋ ɡ w` | `sanguis` | `sangüis` 的 diaeresis 阻止合并 | `liber-usualis-1962`, PDF lines 1292-1294 | `sanguis` |
 | `c-before-front-vowel` | `c` 后接 `e ae oe i y` | `t͡ʃ` | `caelum` | `caritas` 中 c 后接 a 为硬音 | `liber-usualis-1962`, PDF lines 1301-1302 | `caelum` |
@@ -814,6 +833,7 @@ synthetic 单元测试覆盖。一个 locator 没有直接写出工程 IPA token
 | 2026-07-18 | `ph -> /f/` 的直接来源如何补齐 | 使用 Iveson 明确的 `PH — as the letter F`；`ph-f` 只引用该来源，词内其他基础规则仍分别引用 Liber，结果聚合实际命中的来源 | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46；文首 lines 2-4 说明规则基于罗马省神职人员实际读音 |
 | 2026-07-18 | `q-hard` 是否用造词或现代专名满足真实词黄金覆盖 | 否。真实词黄金集豁免该 fallback；Task 14 用 synthetic 输入锁定内部 `q -> k` 容错路径 | 用户批准方案 A；标准真实词的 q 由 `qu-before-vowel` 覆盖 |
 | 2026-07-18 | `mihi/nihil and their compounds` 是否用前缀规则自动扩张 | 否。只新增有已登记逐词词形证据的 `nihildum` 打包例外；未登记文本中的附着形式不冒充 L&S 来源，普通 h 仍静音 | `liber-usualis-1962`, PDF lines 1319-1321；L&S `entryFree id=n30955`, `key=nihildum` |
+| 2026-07-18 | `ei` 是否加入全局双元音规则 | 否。仅 canonical `hei` 命中命名的音节区间例外和精确 G2P 例外，输出 `/ˈei̯/`；`mei` 及 `heï` 继续分音节 | `liber-usualis-1962`, PDF lines 1281-1291；“similarly treated” 承接两元音均可闻、首元音为主的前文 |
 | 2026-07-18 | 发音节选能否同时作为整册礼仪正文来源 | 否。保留 `liber-usualis-1962` 只支持 pronunciation table；另登记 `liber-usualis-1961-full-scan` 支持逐词正文出现和印刷 acute，且正文证据不自动进入运行时 provenance | 原发音 URL 只有导言/发音节选；完整扫描共 2340 PDF pages，本文逐行给出 visually checked printed/PDF page、祷文及 verse locator |
 
 后续冲突记录必须包含日期、候选解释、采用结果和精确来源位置。改变既有规范音素属于可审计的规则版本变更。

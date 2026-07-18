@@ -143,8 +143,10 @@ SIMPLE_RULE_IDS = {
     "z": "z-dz",
 }
 
+EXCEPTION_RULE_IDS = frozenset({"h-mihi-nihil", "hei-ei-diphthong"})
+
 IMPLEMENTED_RULE_IDS = frozenset(
-    {rule.rule_id for rule in RULES} | set(SIMPLE_RULE_IDS.values()) | {"h-mihi-nihil"}
+    {rule.rule_id for rule in RULES} | set(SIMPLE_RULE_IDS.values()) | EXCEPTION_RULE_IDS
 )
 
 _RULE_SOURCE_IDS = {

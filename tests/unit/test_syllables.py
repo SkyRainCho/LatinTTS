@@ -1,5 +1,6 @@
 import pytest
 
+from latintts import syllables as syllables_module
 from latintts.normalization import normalize_word
 from latintts.syllables import syllabify, syllable_ranges
 
@@ -29,6 +30,32 @@ def test_syllable_ranges_are_canonical_code_point_half_open_ranges() -> None:
 
 def test_diaeresis_breaks_u_glide() -> None:
     assert syllabify("qüi") == ("qü", "i")
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("hei", ("hei",)),
+        ("mei", ("me", "i")),
+        ("heï", ("he", "ï")),
+    ],
+)
+def test_only_canonical_hei_has_the_source_backed_ei_syllable_exception(
+    word: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert syllabify(word) == expected
+
+
+def test_source_backed_syllable_exception_has_an_explicit_named_registry() -> None:
+    exceptions = getattr(
+        syllables_module,
+        "SOURCE_BACKED_SYLLABLE_RANGE_EXCEPTIONS",
+        {},
+    )
+
+    assert exceptions == {"hei": ((0, 3),)}
+    assert "ei" not in syllables_module.DIPHTHONGS
 
 
 @pytest.mark.parametrize(

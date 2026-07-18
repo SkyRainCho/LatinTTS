@@ -231,7 +231,17 @@ def test_unrelated_h_words_remain_muted(word: str) -> None:
 def test_load_g2p_exceptions_reads_the_source_backed_entries() -> None:
     exceptions = load_g2p_exceptions()
 
-    assert set(exceptions) == {"mihi", "nihil", "nihildum"}
+    assert set(exceptions) == {"hei", "mihi", "nihil", "nihildum"}
+    assert exceptions["hei"] == G2PExceptionEntry(
+        lookup_key="hei",
+        phonemes_by_syllable=(("e", "i̯"),),
+        rule_ids=("hei-ei-diphthong",),
+        source_ids=("liber-usualis-1962",),
+        note=(
+            "Liber Usualis PDF lines 1281-1291: ei is treated as one syllable only "
+            "in the interjection hei; both vowels are heard and the first has principal emphasis"
+        ),
+    )
     assert exceptions["mihi"] == G2PExceptionEntry(
         lookup_key="mihi",
         phonemes_by_syllable=(("m", "i"), ("k", "i")),
@@ -256,6 +266,15 @@ def test_load_g2p_exceptions_reads_the_source_backed_entries() -> None:
         source_ids=("liber-usualis-1962",),
         note="Liber Usualis pronunciation table, h pronounced k in nihil",
     )
+
+
+def test_hei_exception_emits_audible_e_and_nonsyllabic_i() -> None:
+    result = ecclesiastical_g2p("hei", ("hei",), 0)
+
+    assert result.ipa == "ˈei̯"
+    assert result.phonemes == ("ˈ", "e", "i̯")
+    assert result.applied_rule_ids == ("hei-ei-diphthong",)
+    assert result.source_ids == ("liber-usualis-1962",)
 
 
 def _install_exception_rows(

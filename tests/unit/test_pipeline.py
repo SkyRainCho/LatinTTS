@@ -150,6 +150,28 @@ def test_g2p_exception_marks_token_resolution_method() -> None:
     assert "h-mihi-nihil" in token.applied_rule_ids
 
 
+def test_hei_word_level_exception_does_not_generalize_ei() -> None:
+    hei, mei, diaeresis = (
+        Pronouncer.default().analyze(word).tokens[0] for word in ("hei", "mei", "heï")
+    )
+
+    assert hei.syllables == ("hei",)
+    assert hei.stress_index == 0
+    assert hei.ipa == "ˈei̯"
+    assert hei.model_phonemes == ("ˈ", "e", "i̯")
+    assert hei.applied_rule_ids == ("monosyllable-stress", "hei-ei-diphthong")
+    assert hei.source_ids == ("allen-greenough-accents", "liber-usualis-1962")
+    assert hei.resolution_method is ResolutionMethod.EXCEPTION
+    assert hei.warnings == ()
+
+    assert mei.syllables == ("me", "i")
+    assert mei.ipa == "ˈme.i"
+    assert "hei-ei-diphthong" not in mei.applied_rule_ids
+    assert diaeresis.syllables == ("he", "ï")
+    assert diaeresis.ipa == "ˈe.i"
+    assert "hei-ei-diphthong" not in diaeresis.applied_rule_ids
+
+
 def test_invalid_override_error_identifies_token() -> None:
     override = PronunciationOverride(
         ipa="ˈaunknown",

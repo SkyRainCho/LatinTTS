@@ -9,7 +9,7 @@ LatinTTS 当前提供一个规则优先、可追溯的现代罗马/意大利式�
 - 变体感知的 Unicode 与 `æ/ae`、`œ/oe`、`j/i`、`u/v` 规范化。
 - 来源可追溯的音节划分、词重音解析和罗马教会式 G2P。
 - `PronunciationPlan` Python API，以及人工重音/音素覆盖的输入验证。
-- 350 条已审核单词黄金集和自动审计、精确匹配、规则覆盖发布门禁。
+- 351 条已审核单词黄金集和自动审计、精确匹配、规则覆盖发布门禁。
 
 阶段 1 不包含录音文本恢复、音频切分或强制对齐，不包含 MMS-TTS、Piper/VITS 或
 StyleTTS2 的推理与训练，不包含网页，也不处理句子、祷文或经文的长文本停顿、呼吸组和
@@ -55,7 +55,7 @@ git diff --check
 
 审计使用最终发布策略：至少 320 条记录，并分别要求 `vowels >= 20`、
 `diphthongs >= 20`、`consonants >= 100`、`syllabification >= 40`、`stress >= 60`、
-`orthographic_variants >= 30`、`liturgical >= 50`。当前固定数据集为 350 条。
+`orthographic_variants >= 30`、`liturgical >= 50`。当前固定数据集为 351 条。
 
 ## 规则、来源与数据使用
 

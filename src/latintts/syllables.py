@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Mapping
 from itertools import pairwise
+from types import MappingProxyType
+from typing import Final
 
 VOWELS = frozenset("aeiouyāēīōūȳ")
 DIPHTHONGS = frozenset({"ae", "oe", "au", "eu", "ay"})
+SyllableRanges = tuple[tuple[int, int], ...]
+SOURCE_BACKED_SYLLABLE_RANGE_EXCEPTIONS: Final[Mapping[str, SyllableRanges]] = MappingProxyType(
+    {
+        # Liber Usualis PDF lines 1281-1291 limits one-syllable ei to this interjection.
+        "hei": ((0, 3),),
+    }
+)
 ONSET_CLUSTERS = frozenset(
     {
         "bl",
@@ -97,6 +107,10 @@ def _onset_length(cluster: str) -> int:
 
 
 def syllable_ranges(word: str) -> tuple[tuple[int, int], ...]:
+    exception = SOURCE_BACKED_SYLLABLE_RANGE_EXCEPTIONS.get(word)
+    if exception is not None:
+        return exception
+
     nuclei = _find_nuclei(word)
     if not nuclei:
         raise ValueError("word contains no vowel nucleus")
