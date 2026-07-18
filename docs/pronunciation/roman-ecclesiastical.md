@@ -262,6 +262,143 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 既有黄金记录 `qui`（`qu-before-vowel`）与 `cui`（`simple-u` + `simple-i`）保持不变，并与本批 `quo`、`aqua`、`sanguis`、`lingua`、`cuius` 共同锁定 `qu/ngu/cui` 的合并与非合并边界。带 diaeresis 的人工变体留待专门的拼写变体批次，不在本批升级为 source-backed gold。
 
+### 辅音规则黄金批次审核矩阵
+
+以下五批各 20 条，共新增 100 条 `consonants` 记录；与既有 10 条合计 110 条。逐词审核要求与上一批相同：`approved`、`warnings == ()`，且 `normalized`、音节、重音、IPA、完整 `rule_ids/source_ids` 均与 `PronunciationToken` 精确相等。表中“覆盖角色”只列本批关注点；完整集合以 JSONL 记录为准。
+
+来源边界必须严格区分：Liber 的 locator 证明字母组合读法，Allen and Greenough Section 12 只证明单音节、双音节或由闭音节/长元音可见的重 penult 规则。带 acute 的 `grátias/rátio/vítium/inítium/hóstia/míxtio/Áttia/béstia` 是显式重音输入测试，运行时使用 `explicit-stress`，因此不把 Allen 添加到这些记录的 `source_ids`，也不把 acute 位置冒充为词典推导。`excīdit` 的 macron 是输入中可见的长元音证据。所有词均为真实拉丁词形或传统拉丁专名；没有为触发扫描器而构造假词。
+
+上下文门禁：`c/cc/sc/g` 的前元音为 `e/i/y/ae/oe`，硬音反例使用 `a/o/u` 或辅音；`ch` 在 `e/i` 前仍走最长匹配；`ti` 的前接 `s/x/t` 反例必须实际落入基础 `simple-t/simple-i`；普通 `h` 与 `mihi/nihil` 例外分开；元音间 `s` 按既定工程政策仍输出 `/s/`。
+
+#### A：`c/cc/sc/ch`
+
+| word | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- |
+| `cena` | 词首 c+e 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `cibus` | 词首 c+i 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `facit` | 词中 c+i 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `pacem` | 词中 c+e 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `lucet` | 词中 c+e 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `caro` | c+a 硬音边界 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `corpus` | c+o 硬音边界 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `culpa` | c+u 硬音边界 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `crux` | c+辅音硬音边界 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `cervus` | 词首 c+e 正例、词首/词中覆盖 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `successus` | cc+e 正例、跨音节 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `siccus` | cc+u 反例、保留 k.k | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `bucca` | cc+a 反例、保留 k.k | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `scio` | sc+i 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `scena` | sc+e 正例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `scala` | sc+a 反例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `scutum` | sc+u 反例 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `charta` | ch+a 硬音 | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `chios` | ch+i 仍为 k | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `cherub` | ch+e 仍为 k | `liber-usualis-1962`, PDF lines 1301-1310；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+
+#### B：`g/gn/h/j`
+
+| word | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- |
+| `gelu` | 词首 g+e 软音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `gens` | 词首 g+e 软音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `gignit` | g+i 软音兼 gn 正例 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `ago` | 词中 g+o 硬音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `ego` | 词中 g+o 硬音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `gallus` | 词首 g+a 硬音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `signum` | gn 正例 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `lignum` | gn 正例 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `dignus` | gn 正例 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `ignis` | gn 正例 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `nihil` | h-mihi-nihil 例外；与既有 mihi 成对 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `hora` | 普通词首 h 静音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `homo` | 普通词首 h 静音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `heri` | h+e 静音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `hostis` | h+o 静音 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `jam` | 显式 j 词首 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `Jesus` | 显式 j 词首 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `major` | 显式 j 元音间 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `iam` | 写作 i 的词首辅音值 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `maior` | 写作 i 的元音间辅音值 | `liber-usualis-1962`, PDF lines 1311-1324；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+
+#### C：`ti/th/x/xc/z`
+
+| word | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- |
+| `grátias` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `rátio` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `vítium` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `inítium` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `hóstia` | 前接 s 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `míxtio` | 前接 x 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `Áttia` | 前接 t 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `béstia` | 前接 s 的第二反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `thomas` | th 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `theca` | th+前元音正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `thronus` | th+辅音正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `lex` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `rex` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `pax` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `lux` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `excelsus` | xc+e 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `excīdit` | xc+i 正例；macron 证明重 penult | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `zelus` | 词首 z 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `zona` | 词首 z 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `zeta` | 词首 z 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+
+#### D：`qu/ngu/r/s`
+
+| word | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- |
+| `quae` | qu+ae 正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `quem` | qu+e 正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `quod` | qu+o 正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `quare` | qu+a 词首正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `anguis` | ngu+i 正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `pinguis` | ngu+i 第二正例 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `unguentum` | ngu+e 正例、闭 penult | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `res` | 词首 r、词尾 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `ara` | 元音间 r | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `terra` | 双 r | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `mare` | 词中 r | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `frater` | 辅音连缀后 r | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `angustus` | `ngu` 后不接元音的反例，实际命中 `g-hard` | `liber-usualis-1962`, PDF lines 1292-1294, 1311-1314；`allen-greenough-accents`, Section 12，闭 penult `gus` | approved |
+| `sal` | 词首 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `sed` | 词首 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `spes` | 词首辅音群 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `nasus` | 元音间 s 保持 /s/ | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `casa` | 元音间 s 保持 /s/ | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `mensa` | 词中辅音前 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `pascit` | sc+i 正例并保持 s 工程政策 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+
+#### E：双辅音与基础辅音
+
+| word | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- |
+| `gibbus` | bb 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `reddo` | dd 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `offert` | ff 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `agger` | gg 双辅音及硬/软 g 边界 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `villa` | ll 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `summa` | mm 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `annus` | nn 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `cappa` | pp 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `currus` | rr 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `missa` | ss 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `mitto` | tt 双辅音 | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `kalendae` | 基础 k/l/n/d；闭 penult | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `bona` | 基础 b/n | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `dies` | 基础 d | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `fama` | 基础 f/m | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `lana` | 基础 l/n | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `manus` | 基础 m/n | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `nomen` | 基础 n/m | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `panis` | 基础 p/n | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+| `vita` | 基础 v/t | `liber-usualis-1962`, PDF lines 1351-1354；`allen-greenough-accents`, Section 12 | approved |
+
+批次级覆盖结论：`c-before-front-vowel`、`cc-before-front-vowel`、`sc-before-front-vowel`、`ch-hard`、`g-before-front-vowel`、`g-hard`、`gn-palatal`、`h-muted`、`j-consonantal`、`i-consonantal`、`ti-before-vowel`、`th-t`、`x-ks`、`xc-before-front-vowel`、`z-dz`、`qu-before-vowel`、`ngu-before-vowel` 均至少有两个正例；关键上下文均有至少一个实际不触发该规则的边界词。`h-mihi-nihil` 的两个正例由既有 `mihi` 与本批 `nihil` 组成。`bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 共 12 类双辅音均由 IPA 中两个相邻辅音位置锁定；实现当前没有另造“geminate” rule ID。
+
+基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。普通拉丁正字法没有可用于 `q-hard` 的独立词例；本批遵守“真实拉丁词、不得造词”的上位要求，不用合成 `q` 词为内部退化路径制造假黄金数据。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 锁定真实 `q` 边界。
+
 ### G2P 实现规则与 locator
 
 下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。
