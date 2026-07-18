@@ -185,6 +185,22 @@ def test_invalid_utf8_returns_a_stable_file_read_error(tmp_path: Path) -> None:
     assert audit_gold_file(fixture) == _file_read_error(fixture)
 
 
+def test_blank_lines_are_ignored_without_counting_as_gold_rows(tmp_path: Path) -> None:
+    fixture = tmp_path / "with-blank-lines.jsonl"
+    fixture.write_text(
+        f"\n  \n{json.dumps(_valid_row(), ensure_ascii=False)}\n\t\n",
+        encoding="utf-8",
+    )
+
+    report = audit_gold_file(
+        fixture,
+        AuditPolicy(minimum_total=0, category_minimums={}),
+    )
+
+    assert report.total == 1
+    assert report.errors == ()
+
+
 def test_default_policy_matches_final_gold_policy() -> None:
     assert DEFAULT_POLICY == FINAL_POLICY
 

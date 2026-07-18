@@ -363,21 +363,6 @@ def _syllable_starts(syllables: tuple[str, ...]) -> tuple[tuple[int, ...], int]:
     return tuple(starts), cursor
 
 
-def _render_ipa(
-    syllables: tuple[str, ...],
-    stress_index: int,
-    emitted: tuple[tuple[int, str], ...],
-) -> str:
-    starts, cursor = _syllable_starts(syllables)
-    phonemes_by_syllable: list[tuple[str, ...]] = []
-    for syllable_index, start in enumerate(starts):
-        end = starts[syllable_index + 1] if syllable_index + 1 < len(starts) else cursor
-        phonemes_by_syllable.append(
-            tuple(phoneme for source_index, phoneme in emitted if start <= source_index < end)
-        )
-    return _render_ipa_syllables(tuple(phonemes_by_syllable), stress_index)
-
-
 def _render_ipa_syllables(
     phonemes_by_syllable: tuple[tuple[str, ...], ...],
     stress_index: int,
@@ -464,7 +449,7 @@ def ecclesiastical_g2p(
         dict.fromkeys(source_id for rule_id in applied for source_id in _RULE_SOURCE_IDS[rule_id])
     )
     return G2PResult(
-        ipa=_render_ipa(syllables, stress_index, emitted),
+        ipa=_render_ipa_syllables(phonemes_by_syllable, stress_index),
         phonemes=model_phonemes,
         applied_rule_ids=tuple(dict.fromkeys(applied)),
         source_ids=source_ids,

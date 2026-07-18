@@ -50,6 +50,27 @@ def test_source_indices_keep_cross_syllable_consonants_on_their_own_side() -> No
     assert excelsis.phonemes == ("e", "k", ".", "ˈ", "ʃ", "e", "l", ".", "s", "i", "s")
 
 
+def test_regular_g2p_projects_emitted_phonemes_to_syllables_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = g2p_module._syllable_starts
+    call_count = 0
+
+    def counting_syllable_starts(
+        syllables: tuple[str, ...],
+    ) -> tuple[tuple[int, ...], int]:
+        nonlocal call_count
+        call_count += 1
+        return original(syllables)
+
+    monkeypatch.setattr(g2p_module, "_syllable_starts", counting_syllable_starts)
+
+    result = ecclesiastical_g2p("descendit", ("de", "scen", "dit"), 1, exceptions={})
+
+    assert result.ipa == "deˈʃen.dit"
+    assert call_count == 1
+
+
 @pytest.mark.parametrize(
     ("word", "ipa"),
     [

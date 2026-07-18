@@ -1,5 +1,9 @@
+import json
 from pathlib import Path
 
+import pytest
+
+from latintts import sources as sources_module
 from latintts.sources import load_source_registry
 
 SOURCE_IDS = {
@@ -19,6 +23,41 @@ PRONUNCIATION_DOCUMENT = (
 
 def _load_pronunciation_document() -> str:
     return PRONUNCIATION_DOCUMENT.read_text(encoding="utf-8")
+
+
+class _FakeResource:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def joinpath(self, name: str) -> "_FakeResource":
+        assert name == "pronunciation_sources.json"
+        return self
+
+    def read_text(self, *, encoding: str) -> str:
+        assert encoding == "utf-8"
+        return self._text
+
+
+def _source_row(source_id: str = "test-source", authority_rank: int = 1) -> dict[str, object]:
+    return {
+        "source_id": source_id,
+        "title": "Test source",
+        "url": "https://example.test/source",
+        "source_kind": "test",
+        "authority_rank": authority_rank,
+        "accessed_on": "2026-07-18",
+        "locator": "test locator",
+        "license_or_terms": "test terms",
+        "usage_note": "test use only",
+    }
+
+
+def _install_source_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[dict[str, object]],
+) -> None:
+    text = json.dumps(rows)
+    monkeypatch.setattr(sources_module, "files", lambda package: _FakeResource(text))
 
 
 def test_registry_contains_normative_and_evaluation_sources() -> None:
@@ -45,6 +84,23 @@ def test_registry_has_unique_ids_and_nonempty_usage_terms() -> None:
     assert len(sources) == 8
     assert all(record.license_or_terms.strip() for record in sources.values())
     assert all(record.usage_note.strip() for record in sources.values())
+
+
+def test_registry_rejects_duplicate_source_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = _source_row()
+    _install_source_rows(monkeypatch, [row, row])
+
+    with pytest.raises(ValueError, match="pronunciation source IDs must be unique"):
+        load_source_registry()
+
+
+def test_registry_rejects_nonpositive_authority_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_source_rows(monkeypatch, [_source_row(authority_rank=0)])
+
+    with pytest.raises(ValueError, match="authority_rank must be positive"):
+        load_source_registry()
 
 
 def test_perseus_terms_use_current_license_version() -> None:
@@ -120,6 +176,20 @@ def test_document_requires_review_when_penult_weight_is_unknown() -> None:
         "只能生成候选",
         "PRONUNCIATION_NEEDS_REVIEW",
         "不得静默宣称确定",
+    )
+    assert all(contract in document for contract in required_contracts)
+
+
+def test_document_defines_version_and_phoneme_rendering_contracts() -> None:
+    document = _load_pronunciation_document()
+    required_contracts = (
+        '`schema_version == "1"`',
+        '`rule_version == "ecclesiastical-roman-v1"`',
+        "消费前必须同时校验",
+        "不得静默消费不匹配的版本",
+        "每个音节边界都保留 `.`",
+        "重读音节前插入独立 token `ˈ`",
+        "重读音节边界用 `ˈ` 取代 `.`",
     )
     assert all(contract in document for contract in required_contracts)
 
