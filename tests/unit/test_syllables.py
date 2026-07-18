@@ -31,6 +31,25 @@ def test_diaeresis_breaks_u_glide() -> None:
     assert syllabify("qüi") == ("qü", "i")
 
 
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("qui", ("qui",)),
+        ("cui", ("cu", "i")),
+        ("quia", ("qui", "a")),
+        ("eius", ("e", "ius")),
+        ("sequi", ("se", "qui")),
+        ("equus", ("e", "quus")),
+        ("qüia", ("qü", "ia")),
+    ],
+)
+def test_qu_glide_does_not_turn_a_following_i_into_a_consonant(
+    word: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert syllabify(word) == expected
+
+
 @pytest.mark.parametrize("surface", ["ǣlum", "æ\u0304lum"])
 def test_ligature_surface_forms_have_equivalent_canonical_ranges(surface: str) -> None:
     canonical = normalize_word(surface).normalized

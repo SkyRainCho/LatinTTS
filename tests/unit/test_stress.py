@@ -5,6 +5,7 @@ import pytest
 
 from latintts import stress as stress_module
 from latintts.domain import ResolutionMethod, Severity
+from latintts.normalization import normalize_word
 from latintts.stress import StressLexiconEntry, load_stress_lexicon, resolve_stress
 from latintts.syllables import syllabify
 
@@ -168,6 +169,253 @@ SEED_EXPECTATIONS: dict[str, SeedExpectation] = {
             "closed penult cel ends in a consonant",
         ),
     ),
+    "anima": (
+        ("a", "ni", "ma"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n2612",
+            "key=anima",
+            "orth=ănĭma",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "animus": (
+        ("a", "ni", "mus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n2636",
+            "key=animus",
+            "orth=ănĭmus",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "spiritus": (
+        ("spi", "ri", "tus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n45053",
+            "key=spiritus",
+            "orth=spīrĭtus",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "oculus": (
+        ("o", "cu", "lus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n32239",
+            "key=oculus",
+            "orth=ŏcŭlus",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "saeculum": (
+        ("sae", "cu", "lum"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n42210",
+            "key=saeculum",
+            "orth=saecŭlum",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "discipulus": (
+        ("dis", "ci", "pu", "lus"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n14173",
+            "key=discipulus",
+            "orth=discĭpŭlus",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "angelus": (
+        ("an", "ge", "lus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n2554",
+            "key=angelus",
+            "orth=angĕlus",
+            "Allen and Greenough Section 12",
+            "light penult ĕ -> antepenult",
+        ),
+    ),
+    "opera": (
+        ("o", "pe", "ra"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n32660",
+            "key=opera",
+            "orth=ŏpĕra",
+            "Allen and Greenough Section 12",
+            "light penult ĕ -> antepenult",
+        ),
+    ),
+    "familia": (
+        ("fa", "mi", "li", "a"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n17652",
+            "key=familia",
+            "orth=fămĭlĭa",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "femina": (
+        ("fe", "mi", "na"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n17904",
+            "key=femina",
+            "orth=fēmĭna",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "formula": (
+        ("for", "mu", "la"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n18602",
+            "key=formula",
+            "orth=formŭla",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "tabula": (
+        ("ta", "bu", "la"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n47346",
+            "key=tabula",
+            "orth=tăbŭla",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "epistula": (
+        ("e", "pis", "tu", "la"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n15995",
+            "key=epistula",
+            "orth=ĕpistŭla",
+            "Allen and Greenough Section 12",
+            "light penult ŭ -> antepenult",
+        ),
+    ),
+    "caritas": (
+        ("ca", "ri", "tas"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n6810",
+            "key=caritas",
+            "orth=cārĭtas",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "ueritas": (
+        ("ve", "ri", "tas"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n50557",
+            "key=veritas",
+            "orth=vērĭtas",
+            "lookup v -> u",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "unitas": (
+        ("u", "ni", "tas"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n49852",
+            "key=unitas",
+            "orth=ūnĭtas",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "uictima": (
+        ("vic", "ti", "ma"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n50861",
+            "key=victima",
+            "orth=victĭma",
+            "lookup v -> u",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "maximus": (
+        ("ma", "xi", "mus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n28269",
+            "key=maximus",
+            "orth=maxĭmus",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "optimus": (
+        ("op", "ti", "mus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n32847",
+            "key=optimus",
+            "orth=optĭmus",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+    "humilitas": (
+        ("hu", "mi", "li", "tas"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n21059",
+            "key=humilitas",
+            "orth=hŭmĭlĭtas",
+            "Allen and Greenough Section 12",
+            "light penult ĭ -> antepenult",
+        ),
+    ),
+}
+
+LOOKUP_SURFACES = {
+    "ueritas": "veritas",
+    "uictima": "victima",
 }
 
 
@@ -214,7 +462,10 @@ def test_seed_lexicon_has_exact_source_backed_entries() -> None:
     for lookup_key, expected in SEED_EXPECTATIONS.items():
         syllables, stress_index, source_ids, note_fragments = expected
         entry = lexicon[lookup_key]
-        assert entry.syllables == syllables == syllabify(lookup_key)
+        surface = LOOKUP_SURFACES.get(lookup_key, lookup_key)
+        normalized = normalize_word(surface)
+        assert normalized.lookup_key == lookup_key
+        assert entry.syllables == syllables == syllabify(normalized.normalized)
         assert entry.stress_index == stress_index
         assert entry.source_ids == source_ids
         assert all(fragment in entry.note for fragment in note_fragments)

@@ -133,6 +133,30 @@ def test_longest_match_multigraph_rules(
     assert rule_id in result.applied_rule_ids
 
 
+@pytest.mark.parametrize(
+    ("word", "syllables", "ipa", "has_consonantal_i"),
+    [
+        ("qui", ("qui",), "ˈkwi", False),
+        ("cui", ("cu", "i"), "ˈku.i", False),
+        ("quia", ("qui", "a"), "ˈkwi.a", False),
+        ("eius", ("e", "ius"), "ˈe.jus", True),
+        ("sequi", ("se", "qui"), "ˈse.kwi", False),
+        ("equus", ("e", "quus"), "ˈe.kwus", False),
+        ("qüia", ("qü", "ia"), "ˈku.ja", True),
+    ],
+)
+def test_qu_glide_does_not_trigger_consonantal_i(
+    word: str,
+    syllables: tuple[str, ...],
+    ipa: str,
+    has_consonantal_i: bool,
+) -> None:
+    result = ecclesiastical_g2p(word, syllables, 0)
+
+    assert result.ipa == ipa
+    assert ("i-consonantal" in result.applied_rule_ids) is has_consonantal_i
+
+
 def test_ph_rule_aggregates_its_direct_source_with_simple_rule_sources() -> None:
     result = ecclesiastical_g2p("pharus", ("pha", "rus"), 0)
 

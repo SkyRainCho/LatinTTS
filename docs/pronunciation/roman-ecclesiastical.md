@@ -98,8 +98,8 @@ G2P 扫描器按上表从特殊二合字到单字符执行当前位置最长匹�
 | 每个音节都完整发音 | 不得吞掉或截短弱 penult，例如不得把 `Domine` 读成 `Domne` | `liber-usualis-1962`, PDF lines 1231-1247 |
 | 元音核固定集合 | `a e i o u y ā ē ī ō ū ȳ`；附加符号不改变 base-letter 元音身份。`a/e/i/o/u` 与长短政策见元音段，`y` 作为元音 | `liber-usualis-1962`, PDF lines 1254-1272, 1349 |
 | 双元音固定集合 | `ae oe au eu ay`；按 Unicode base letters 比较，diaeresis 打断合并。`caelum -> ("cae", "lum")`、canonical `aēlum -> ("aē", "lum")`、`poëta -> ("po", "ë", "ta")` | `liber-usualis-1962`, PDF lines 1273-1289；Unicode/diaeresis 是 canonical token 工程契约 |
-| 辅音 `i` | 词首接元音或位于两个元音之间时作为下一音节的辅音起始；带 diaeresis 时仍为元音。`alleluia -> ("al", "le", "lu", "ia")` | `liber-usualis-1962`, PDF lines 1322-1324 |
-| `u` 滑音 | `q` 或 `ng` 后且后接元音时不另立音节核；带 diaeresis 时仍为元音，`qüi -> ("qü", "i")`。`qui -> ("qui",)`；来源明确规定的 `cui -> ("cu", "i")` 保持两音节 | `liber-usualis-1962`, PDF lines 1292-1297；diaeresis 是 canonical token 工程契约 |
+| 辅音 `i` | 词首接元音或位于两个真正元音核之间时作为下一音节的辅音起始；带 diaeresis 时仍为元音。`alleluia -> ("al", "le", "lu", "ia")`；`quia` 中前置 u 已是 `qu` 滑音，不构成前一个元音核，所以 i 仍是元音 | `liber-usualis-1962`, PDF lines 1322-1324；`quia` 边界另结合 lines 1273-1278, 1292-1294 |
+| `u` 滑音 | `q` 或 `ng` 后且后接元音时不另立音节核；带 diaeresis 时仍为元音，`qüi -> ("qü", "i")`。`qui -> ("qui",)`、`quia -> ("qui", "a")`；来源明确规定的 `cui -> ("cu", "i")` 保持两音节 | `liber-usualis-1962`, PDF lines 1292-1297；diaeresis 是 canonical token 工程契约 |
 | 允许的 onset 固定集合 | `bl br cl cr dr fl fr gl gr pl pr tr qu gu ch ph th gn` 整体进入下一音节，例如 `patris -> ("pa", "tris")`。这是阶段 1 的确定性工程 whitelist；其特殊字母组的发音身份分别按辅音表保留 | `liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables |
 | 单辅音 | 相邻音节核间的单辅音进入下一音节：`ave -> ("a", "ve")`、`gratia -> ("gra", "ti", "a")` | 阶段 1 确定性工程边界政策；元音与辅音身份来自 `liber-usualis-1962`, PDF lines 1254-1354 |
 | 双辅音 | 从中间分开并保留两个辅音位置：`ecce -> ("ec", "ce")` | `liber-usualis-1962`, PDF lines 1352-1354 |
@@ -140,6 +140,26 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `misericordia` | `cor` | `perseus-lewis-short`, `entryFree id=n29266`, `key=misericordia`, `mĭsĕrĭcordĭa`；`liber-usualis-1962`, PDF page 32 (printed xxxviii), S example；`allen-greenough-accents`, Section 12 |
 | `benedictus` | `dic` | `perseus-lewis-short`, `entryFree id=n5170`, `key=benedico`, principal part `ctum` 支持该分词；`allen-greenough-accents`, Section 12，`dic` 为闭 penult 的规则推导 |
 | `excelsis` | `cel` | `perseus-lewis-short`, `entryFree id=n16651`, `key=excelsus`, inflection `a, um` 支持该屈折词；`allen-greenough-accents`, Section 12，`cel` 为闭 penult 的规则推导 |
+| `anima` | `a` | `perseus-lewis-short`, `entryFree id=n2612`, `key=anima`, `orth=ănĭma`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `animus` | `a` | `perseus-lewis-short`, `entryFree id=n2636`, `key=animus`, `orth=ănĭmus`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `spiritus` | `spi` | `perseus-lewis-short`, `entryFree id=n45053`, `key=spiritus`, `orth=spīrĭtus`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `oculus` | `o` | `perseus-lewis-short`, `entryFree id=n32239`, `key=oculus`, `orth=ŏcŭlus`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult |
+| `saeculum` | `sae` | `perseus-lewis-short`, `entryFree id=n42210`, `key=saeculum`, `orth=saecŭlum`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult |
+| `discipulus` | `ci` | `perseus-lewis-short`, `entryFree id=n14173`, `key=discipulus`, `orth=discĭpŭlus`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult `ci` |
+| `angelus` | `an` | `perseus-lewis-short`, `entryFree id=n2554`, `key=angelus`, `orth=angĕlus`；`allen-greenough-accents`, Section 12，短 penult `ĕ` -> antepenult |
+| `opera` | `o` | `perseus-lewis-short`, `entryFree id=n32660`, `key=opera`, `orth=ŏpĕra`；`allen-greenough-accents`, Section 12，短 penult `ĕ` -> antepenult |
+| `familia` | `mi` | `perseus-lewis-short`, `entryFree id=n17652`, `key=familia`, `orth=fămĭlĭa`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult `mi` |
+| `femina` | `fe` | `perseus-lewis-short`, `entryFree id=n17904`, `key=femina`, `orth=fēmĭna`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `formula` | `for` | `perseus-lewis-short`, `entryFree id=n18602`, `key=formula`, `orth=formŭla`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult |
+| `tabula` | `ta` | `perseus-lewis-short`, `entryFree id=n47346`, `key=tabula`, `orth=tăbŭla`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult |
+| `epistula` | `pis` | `perseus-lewis-short`, `entryFree id=n15995`, `key=epistula`, `orth=ĕpistŭla`；`allen-greenough-accents`, Section 12，短 penult `ŭ` -> antepenult `pis` |
+| `caritas` | `ca` | `perseus-lewis-short`, `entryFree id=n6810`, `key=caritas`, `orth=cārĭtas`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `ueritas` (`veritas`) | `ve` | `perseus-lewis-short`, `entryFree id=n50557`, `key=veritas`, `orth=vērĭtas`；lookup `v -> u` 得 `ueritas`，canonical 音节仍为 `ve-ri-tas`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `unitas` | `u` | `perseus-lewis-short`, `entryFree id=n49852`, `key=unitas`, `orth=ūnĭtas`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `uictima` (`victima`) | `vic` | `perseus-lewis-short`, `entryFree id=n50861`, `key=victima`, `orth=victĭma`；lookup `v -> u` 得 `uictima`，canonical 音节仍为 `vic-ti-ma`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `maximus` | `ma` | `perseus-lewis-short`, `entryFree id=n28269`, `key=maximus`, `orth=maxĭmus`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `optimus` | `op` | `perseus-lewis-short`, `entryFree id=n32847`, `key=optimus`, `orth=optĭmus`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult |
+| `humilitas` | `mi` | `perseus-lewis-short`, `entryFree id=n21059`, `key=humilitas`, `orth=hŭmĭlĭtas`；`allen-greenough-accents`, Section 12，短 penult `ĭ` -> antepenult `mi` |
 
 ## 双辅音
 
@@ -399,6 +419,182 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。`q-hard` 仍是计划明文要求与“只用真实普通拉丁词”之间的待用户裁决边界：当前黄金集不以造词或无权威发音来源的现代专名自行满足该项，也不把它标为已豁免。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 只锁定真实 `qu` 路径，不能替代 `q-hard` 裁决。
 
+### 音节与重音黄金批次审核矩阵
+
+本次精确新增 100 个唯一真实拉丁词：`syllabification` 四批各 10 条，`stress` 六批各 10 条。每行同时锁定 canonical 音节与 IPA 点位；所有行均为 `approved`、无 candidate、无 warning。表中 L&S 均指 `perseus-lewis-short` 登记的 XML `entryFree`；重音规则均指 `allen-greenough-accents`, Section 12。
+
+#### A：单辅音跨音节
+
+相邻元音核之间的单辅音整体进入下一音节；与 C 批双辅音从中间拆分形成正反对照。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `amor` | `a-mor` / `ˈa.mor` | 单辅音进入后音节: `a-mor` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `avis` | `a-vis` / `ˈa.vis` | 单辅音进入后音节: `a-vis` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `ager` | `a-ger` / `ˈa.d͡ʒer` | 单辅音进入后音节: `a-ger` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `domus` | `do-mus` / `ˈdo.mus` | 单辅音进入后音节: `do-mus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `locus` | `lo-cus` / `ˈlo.kus` | 单辅音进入后音节: `lo-cus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `modus` | `mo-dus` / `ˈmo.dus` | 单辅音进入后音节: `mo-dus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `novus` | `no-vus` / `ˈno.vus` | 单辅音进入后音节: `no-vus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `focus` | `fo-cus` / `ˈfo.kus` | 单辅音进入后音节: `fo-cus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `onus` | `o-nus` / `ˈo.nus` | 单辅音进入后音节: `o-nus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+| `opus` | `o-pus` / `ˈo.pus` | 单辅音进入后音节: `o-pus` | 阶段 1 单辅音边界政策；`liber-usualis-1962`, PDF lines 1231-1247, 1254-1354；`allen-greenough-accents`, Section 12 | approved |
+
+#### B：允许的 onset cluster
+
+两核之间的 `cr/tr/gr/br/pr` 等合法词首 onset 整体进入下一音节；与 D 批不合法的完整多辅音簇对照。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `sacrum` | `sa-crum` / `ˈsa.krum` | 合法 onset 整体进入后音节: `sa-crum` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `patrem` | `pa-trem` / `ˈpa.trem` | 合法 onset 整体进入后音节: `pa-trem` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `agrum` | `a-grum` / `ˈa.ɡrum` | 合法 onset 整体进入后音节: `a-grum` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `libra` | `li-bra` / `ˈli.bra` | 合法 onset 整体进入后音节: `li-bra` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `febris` | `fe-bris` / `ˈfe.bris` | 合法 onset 整体进入后音节: `fe-bris` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `capra` | `ca-pra` / `ˈka.pra` | 合法 onset 整体进入后音节: `ca-pra` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `aegra` | `ae-gra` / `ˈe.ɡra` | 合法 onset 整体进入后音节: `ae-gra` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `nigra` | `ni-gra` / `ˈni.ɡra` | 合法 onset 整体进入后音节: `ni-gra` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `petra` | `pe-tra` / `ˈpe.tra` | 合法 onset 整体进入后音节: `pe-tra` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+| `patris` | `pa-tris` / `ˈpa.tris` | 合法 onset 整体进入后音节: `pa-tris` | 阶段 1 onset whitelist；`liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables；`allen-greenough-accents`, Section 12 | approved |
+
+#### C：双辅音
+
+拼写双辅音从中间分开，IPA 的音节点位于两个辅音位置之间；不得把双辅音整体移作 onset 或简化为一个位置。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `abbas` | `ab-bas` / `ˈab.bas` | 双辅音跨点位拆分: `ab-bas` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `cella` | `cel-la` / `ˈt͡ʃel.la` | 双辅音跨点位拆分: `cel-la` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `collum` | `col-lum` / `ˈkol.lum` | 双辅音跨点位拆分: `col-lum` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `nullus` | `nul-lus` / `ˈnul.lus` | 双辅音跨点位拆分: `nul-lus` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `passus` | `pas-sus` / `ˈpas.sus` | 双辅音跨点位拆分: `pas-sus` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `peccat` | `pec-cat` / `ˈpek.kat` | 双辅音跨点位拆分: `pec-cat` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `sella` | `sel-la` / `ˈsel.la` | 双辅音跨点位拆分: `sel-la` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `stella` | `stel-la` / `ˈstel.la` | 双辅音跨点位拆分: `stel-la` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `bellum` | `bel-lum` / `ˈbel.lum` | 双辅音跨点位拆分: `bel-lum` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+| `mamma` | `mam-ma` / `ˈmam.ma` | 双辅音跨点位拆分: `mam-ma` | `liber-usualis-1962`, PDF lines 1352-1354；`allen-greenough-accents`, Section 12 | approved |
+
+#### D：三辅音与滑音/hiatus 边界
+
+多辅音簇只保留合法的最长 onset 后缀；`qu` 的 u 是滑音，但不能因此把随后的 i 错判为辅音；真正位于两元音核之间的 i 仍为 /j/。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `sanctus` | `sanc-tus` / `ˈsank.tus` | `nct` 不整体作 onset，只移末尾 `t`: `sanc-tus` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `punctum` | `punc-tum` / `ˈpunk.tum` | `nct` 不整体作 onset，只移末尾 `t`: `punc-tum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `templum` | `tem-plum` / `ˈtem.plum` | `mpl` 保留合法后缀 `pl`: `tem-plum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `scriptum` | `scrip-tum` / `ˈskrip.tum` | `pt` 非合法 onset，只移末尾 `t`: `scrip-tum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `monstrum` | `mons-trum` / `ˈmons.trum` | `nstr` 保留合法后缀 `tr`: `mons-trum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `castrum` | `cas-trum` / `ˈkas.trum` | `str` 保留合法后缀 `tr`: `cas-trum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `nostrum` | `nos-trum` / `ˈnos.trum` | `str` 保留合法后缀 `tr`: `nos-trum` | 逐词 locator 见表；非特殊多辅音项依据阶段 1 多辅音边界政策、`liber-usualis-1962` PDF lines 1351-1354 与 `allen-greenough-accents` Section 12 | approved |
+| `quia` | `qui-a` / `ˈkwi.a` | `qu` 的 u 为滑音；i 仍是元音核，`ia` 分音节: `qui-a` | `liber-usualis-1962`, PDF lines 1273-1278, 1292-1294, 1322-1324；`allen-greenough-accents`, Section 12 | approved |
+| `eius` | `e-ius` / `ˈe.jus` | i 真正在 e/u 两元音核之间作 /j/: `e-ius` | `liber-usualis-1962`, PDF lines 1273-1278, 1322-1324；`allen-greenough-accents`, Section 12 | approved |
+| `equus` | `e-quus` / `ˈe.kwus` | 首个 u 随 q 作滑音，后一个 u 为核: `e-quus` | `liber-usualis-1962`, PDF lines 1292-1294；`allen-greenough-accents`, Section 12 | approved |
+
+#### E：单音节重音
+
+每词只有一个音节核，`stress_index=0`；只记录词重音，不把短语或歌唱重音混入。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `et` | `et` / `ˈet` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `in` | `in` / `ˈin` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `ad` | `ad` / `ˈad` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `cum` | `cum` / `ˈkum` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `non` | `non` / `ˈnon` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `tu` | `tu` / `ˈtu` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `me` | `me` / `ˈme` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `te` | `te` / `ˈte` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `nos` | `nos` / `ˈnos` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `vos` | `vos` / `ˈvos` | 唯一音节 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+
+#### F：双音节重音
+
+双音节词固定首音节重读，`stress_index=0`；闭音节只影响音节结构，不改变双音节首重音规则。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `amen` | `a-men` / `ˈa.men` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `salve` | `sal-ve` / `ˈsal.ve` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `sancta` | `sanc-ta` / `ˈsank.ta` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `porta` | `por-ta` / `ˈpor.ta` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `verbum` | `ver-bum` / `ˈver.bum` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `panem` | `pa-nem` / `ˈpa.nem` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `puer` | `pu-er` / `ˈpu.er` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `fratres` | `fra-tres` / `ˈfra.tres` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `matris` | `ma-tris` / `ˈma.tris` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+| `pacis` | `pa-cis` / `ˈpa.t͡ʃis` | 双音节首重音 `stress_index=0` | `allen-greenough-accents`, Section 12；音素身份见 `liber-usualis-1962`, PDF lines 1254-1354 | approved |
+
+#### G：双元音证明重 penult
+
+每词 penult 含 `ae/oe` 双元音，普通拼写本身证明其为重音节；L&S locator 证明真实词形，Allen Section 12 推出 penult 重音。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `amoenus` | `a-moe-nus` / `aˈme.nus` | penult `moe` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n2288`, `key=amoenus`, `orth=ămoenus`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `tropaeum` | `tro-pae-um` / `troˈpe.um` | penult `pae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n49285`, `key=tropaeum`, `orth=trŏpaeum`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Nicaea` | `ni-cae-a` / `niˈt͡ʃe.a` | penult `cae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n30885`, `key=Nicaea`, `orth=Nīcaea`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Nicaeus` | `ni-cae-us` / `niˈt͡ʃe.us` | penult `cae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n30886`, `key=Nicaeus`, `orth=Nīcaeus`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Judaea` | `ju-dae-a` / `juˈde.a` | penult `dae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n25276`, `key=Judaea`, `orth=Jūdaea`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Galilaea` | `ga-li-lae-a` / `ɡa.liˈle.a` | penult `lae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n19239`, `key=Galilaea`, `orth=Gălī^laea`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Hebraei` | `he-brae-i` / `eˈbre.i` | penult `brae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n20309`, `key=Hebraei`, `orth=Hĕbraei`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Chaldaei` | `chal-dae-i` / `kalˈde.i` | penult `dae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n7687`, `key=Chaldaei`, `orth=Chaldaei`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Pharisaeus` | `pha-ri-sae-us` / `fa.riˈse.us` | penult `sae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n35938`, `key=Pharisaeus`, `orth=Phărĭsaeus`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+| `Idumaea` | `i-du-mae-a` / `i.duˈme.a` | penult `mae` 含书写双元音 | `perseus-lewis-short`, `entryFree id=n21368`, `key=Idumaea`, `orth=Ĭdūmaea`；`liber-usualis-1962`, PDF lines 1279-1280；`allen-greenough-accents`, Section 12 | approved |
+
+#### H：macron 与闭音节证明重 penult
+
+前五词的 macron 逐词来自 L&S 印刷词头；后五词的 penult 以辅音闭合。两类均由 Allen Section 12 推出 penult 重音。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `amīca` | `a-mī-ca` / `aˈmi.ka` | macron `ī` 证明重 penult | `perseus-lewis-short`, `entryFree id=n2227`, `key=amica`, `orth=ămīca`；`allen-greenough-accents`, Section 12 | approved |
+| `fidēlis` | `fi-dē-lis` / `fiˈde.lis` | macron `ē` 证明重 penult | `perseus-lewis-short`, `entryFree id=n18117`, `key=fidelis`, `orth=fĭdēlis`；`allen-greenough-accents`, Section 12 | approved |
+| `doctrīna` | `doc-trī-na` / `dokˈtri.na` | macron `ī` 证明重 penult | `perseus-lewis-short`, `entryFree id=n14618`, `key=doctrina`, `orth=doctrīna`；`allen-greenough-accents`, Section 12 | approved |
+| `dīvīnus` | `dī-vī-nus` / `diˈvi.nus` | macron `ī` 证明重 penult | `perseus-lewis-short`, `entryFree id=n14573`, `key=divinus`, `orth=dīvīnus`；`allen-greenough-accents`, Section 12 | approved |
+| `fortūna` | `for-tū-na` / `forˈtu.na` | macron `ū` 证明重 penult | `perseus-lewis-short`, `entryFree id=n18643`, `key=fortuna`, `orth=fortūna`；`allen-greenough-accents`, Section 12 | approved |
+| `adventus` | `ad-ven-tus` / `adˈven.tus` | 闭 penult `ven` 证明重 penult | `perseus-lewis-short`, `entryFree id=n1072`, `key=adventus`, `orth=adventus`；`allen-greenough-accents`, Section 12 | approved |
+| `potestas` | `po-tes-tas` / `poˈtes.tas` | 闭 penult `tes` 证明重 penult | `perseus-lewis-short`, `entryFree id=n37292`, `key=potestas`, `orth=pŏtestas`；`allen-greenough-accents`, Section 12 | approved |
+| `confessor` | `con-fes-sor` / `konˈfes.sor` | 闭 penult `fes` 证明重 penult | `perseus-lewis-short`, `entryFree id=n10099`, `key=confessor`, `orth=confessor`；`allen-greenough-accents`, Section 12 | approved |
+| `voluntas` | `vo-lun-tas` / `voˈlun.tas` | 闭 penult `lun` 证明重 penult | `perseus-lewis-short`, `entryFree id=n51337`, `key=voluntas`, `orth=vŏluntas`；`allen-greenough-accents`, Section 12 | approved |
+| `tempestas` | `tem-pes-tas` / `temˈpes.tas` | 闭 penult `pes` 证明重 penult | `perseus-lewis-short`, `entryFree id=n47718`, `key=tempestas`, `orth=tempestas`；`allen-greenough-accents`, Section 12 | approved |
+
+#### I：轻 penult 词典（一）
+
+普通拼写不能证明开放 penult 的历史数量；逐词 L&S 短元音 + Allen Section 12 进入 stress lexicon，禁止候选静默升级。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `anima` | `a-ni-ma` / `ˈa.ni.ma` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n2612`, `key=anima`, `orth=ănĭma`；`allen-greenough-accents`, Section 12 | approved |
+| `animus` | `a-ni-mus` / `ˈa.ni.mus` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n2636`, `key=animus`, `orth=ănĭmus`；`allen-greenough-accents`, Section 12 | approved |
+| `spiritus` | `spi-ri-tus` / `ˈspi.ri.tus` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n45053`, `key=spiritus`, `orth=spīrĭtus`；`allen-greenough-accents`, Section 12 | approved |
+| `oculus` | `o-cu-lus` / `ˈo.ku.lus` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n32239`, `key=oculus`, `orth=ŏcŭlus`；`allen-greenough-accents`, Section 12 | approved |
+| `saeculum` | `sae-cu-lum` / `ˈse.ku.lum` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n42210`, `key=saeculum`, `orth=saecŭlum`；`allen-greenough-accents`, Section 12 | approved |
+| `discipulus` | `dis-ci-pu-lus` / `diˈʃi.pu.lus` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n14173`, `key=discipulus`, `orth=discĭpŭlus`；`allen-greenough-accents`, Section 12 | approved |
+| `angelus` | `an-ge-lus` / `ˈan.d͡ʒe.lus` | 开放 penult 的 `ĕ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n2554`, `key=angelus`, `orth=angĕlus`；`allen-greenough-accents`, Section 12 | approved |
+| `opera` | `o-pe-ra` / `ˈo.pe.ra` | 开放 penult 的 `ĕ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n32660`, `key=opera`, `orth=ŏpĕra`；`allen-greenough-accents`, Section 12 | approved |
+| `familia` | `fa-mi-li-a` / `faˈmi.li.a` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n17652`, `key=familia`, `orth=fămĭlĭa`；`allen-greenough-accents`, Section 12 | approved |
+| `femina` | `fe-mi-na` / `ˈfe.mi.na` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n17904`, `key=femina`, `orth=fēmĭna`；`allen-greenough-accents`, Section 12 | approved |
+
+#### J：轻 penult 词典（二）
+
+继续覆盖短 `ĕ/ĭ/ŭ` 与多音节 antepenult；`veritas/victima` 额外锁定 lookup `v -> u` 不得改写 canonical 音节。
+
+| word | 音节 / IPA | 覆盖角色 | 精确来源 locator | review |
+| --- | --- | --- | --- | --- |
+| `formula` | `for-mu-la` / `ˈfor.mu.la` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n18602`, `key=formula`, `orth=formŭla`；`allen-greenough-accents`, Section 12 | approved |
+| `tabula` | `ta-bu-la` / `ˈta.bu.la` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n47346`, `key=tabula`, `orth=tăbŭla`；`allen-greenough-accents`, Section 12 | approved |
+| `epistula` | `e-pis-tu-la` / `eˈpis.tu.la` | 开放 penult 的 `ŭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n15995`, `key=epistula`, `orth=ĕpistŭla`；`allen-greenough-accents`, Section 12 | approved |
+| `caritas` | `ca-ri-tas` / `ˈka.ri.tas` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n6810`, `key=caritas`, `orth=cārĭtas`；`allen-greenough-accents`, Section 12 | approved |
+| `veritas` | `ve-ri-tas` / `ˈve.ri.tas` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n50557`, `key=veritas`, `orth=vērĭtas`；lookup `veritas -> ueritas`，canonical `ve-ri-tas` 不变；`allen-greenough-accents`, Section 12 | approved |
+| `unitas` | `u-ni-tas` / `ˈu.ni.tas` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n49852`, `key=unitas`, `orth=ūnĭtas`；`allen-greenough-accents`, Section 12 | approved |
+| `victima` | `vic-ti-ma` / `ˈvik.ti.ma` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n50861`, `key=victima`, `orth=victĭma`；lookup `victima -> uictima`，canonical `vic-ti-ma` 不变；`allen-greenough-accents`, Section 12 | approved |
+| `maximus` | `ma-xi-mus` / `ˈma.ksi.mus` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n28269`, `key=maximus`, `orth=maxĭmus`；`allen-greenough-accents`, Section 12 | approved |
+| `optimus` | `op-ti-mus` / `ˈop.ti.mus` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n32847`, `key=optimus`, `orth=optĭmus`；`allen-greenough-accents`, Section 12 | approved |
+| `humilitas` | `hu-mi-li-tas` / `uˈmi.li.tas` | 开放 penult 的 `ĭ` 为短；词典解析到 antepenult | `perseus-lewis-short`, `entryFree id=n21059`, `key=humilitas`, `orth=hŭmĭlĭtas`；`allen-greenough-accents`, Section 12 | approved |
+
+`quia` 的推导需要同时使用三段规则：lines 1292-1294 使 `qu` 中的 u 作为滑音与 i 同属首音节；lines 1273-1278 使不在双元音清单中的 `ia` 分属两音节；lines 1322-1324 的辅音 i 只适用于词首或两个真正元音核之间，因此不能把已由 `qu` 使用的滑音 u 当作前一个元音核。由此得到 `qui-a` 与 `/ˈkwi.a/`。`qui`、`cui`、`eius`、`sequi`、`equus` 保留为单元测试正反对照。
+
 ### G2P 实现规则与 locator
 
 下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。
@@ -408,7 +604,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `simple-a`, `simple-e`, `simple-i`, `simple-o`, `simple-u`, `y-as-i` | 单元音输出 `a/e/i/o/u`；`y -> i` | `pater`, `poëta`, `kyrie` | `liber-usualis-1962`, PDF lines 1254-1272, 1349 |
 | `ae-e`, `oe-e` | 无 diaeresis 的 base-letter `ae/oe -> e` | `caelum`, `poena` / `poëta` | `liber-usualis-1962`, PDF lines 1279-1280 |
 | `au-diphthong`, `eu-diphthong`, `ay-diphthong` | 无 diaeresis 时输出 `a,u̯`、`e,u̯`、`a,i̯` | `lauda`, `euge`, `Raymundus` / `aüla` | `liber-usualis-1962`, PDF lines 1281-1289 |
-| `qu-before-vowel`, `ngu-before-vowel` | 无 diaeresis 时 `qu -> k,w`；`ngu -> ŋ,ɡ,w` | `qui`, `sanguis` / `qüi`, `sangüis` | `liber-usualis-1962`, PDF lines 1292-1294 |
+| `qu-before-vowel`, `ngu-before-vowel` | 无 diaeresis 时 `qu -> k,w`；`ngu -> ŋ,ɡ,w` | `qui`, `quia`, `sanguis` / `qüi`, `sangüis` | `liber-usualis-1962`, PDF lines 1292-1294 |
 | `c-before-front-vowel`, `c-hard` | `c` 在 `e/ae/oe/i/y` 前输出 `t͡ʃ`，否则 `k` | `caelum` / `caritas` | `liber-usualis-1962`, PDF lines 1301-1302, 1307-1308 |
 | `cc-before-front-vowel` | 同一前元音环境输出 `t,t͡ʃ`，并按两个 `c` 的 source index 分属音节 | `ecce -> ˈet.t͡ʃe` / `siccus` | `liber-usualis-1962`, PDF lines 1303-1304 |
 | `sc-before-front-vowel` | 同一前元音环境输出 `ʃ` | `descendit` / `scutum` | `liber-usualis-1962`, PDF lines 1305-1306 |
@@ -416,7 +612,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `g-before-front-vowel`, `g-hard` | `g` 在前元音前输出 `d͡ʒ`，否则 `ɡ` | `regina` / `ego` | `liber-usualis-1962`, PDF lines 1311-1314 |
 | `gn-palatal` | `gn -> ɲ` | `regnum` / 不拆成 `ɡ,n` | `liber-usualis-1962`, PDF lines 1315-1318 |
 | `h-mihi-nihil`, `h-muted` | 仅打包例外或后续逐条确认的例外输出 `k`；普通 `h` 不输出 | `mihi`, `nihil` / `hora` | `liber-usualis-1962`, PDF lines 1319-1321 |
-| `i-consonantal`, `j-consonantal` | 词首接元音或元音间的 `i`，以及显式 `j` 输出 `j`；diaeresis 阻止辅音 `i` | `iam`, `major` / `aïa` | `liber-usualis-1962`, PDF lines 1322-1324 |
+| `i-consonantal`, `j-consonantal` | 词首接元音或真正元音核之间的 `i`，以及显式 `j` 输出 `j`；diaeresis 阻止辅音 `i`，`qu/ngu` 的滑音 u 不计作前一元音核 | `iam`, `major`, `eius` / `quia`, `aïa` | `liber-usualis-1962`, PDF lines 1322-1324；`quia` 边界另结合 lines 1273-1278, 1292-1294 |
 | `simple-r` | `r -> r`，不能在辅音旁省略 | `carnis` | `liber-usualis-1962`, PDF lines 1325-1331 |
 | `simple-s` | 阶段 1 始终输出完整音位 `s` | `misericordia` / 不自动改写为 `z` | `liber-usualis-1962`, PDF lines 1332-1334 |
 | `ti-before-vowel`, `simple-t` | `ti` 后接元音且前一字母不是 `s/x/t` 时输出 `t͡s,i`；否则 `t,i` | `gratia` / `hostia`, `mixtio`, `attia` | `liber-usualis-1962`, PDF lines 1335-1341 |

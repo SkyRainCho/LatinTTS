@@ -48,7 +48,8 @@ def _is_consonantal_i(word: str, index: int) -> bool:
         or not _is_vowel_at(word, index + 1)
     ):
         return False
-    return index == 0 or _is_vowel_at(word, index - 1)
+    previous_is_vowel_nucleus = _is_vowel_at(word, index - 1) and not _is_glide_u(word, index - 1)
+    return index == 0 or previous_is_vowel_nucleus
 
 
 def _is_glide_u(word: str, index: int) -> bool:

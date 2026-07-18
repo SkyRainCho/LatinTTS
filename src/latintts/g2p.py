@@ -64,7 +64,12 @@ RULES = (
     Rule("au-diphthong", re.compile(r"au"), ("a", "u̯"), (0, 1)),
     Rule("eu-diphthong", re.compile(r"eu"), ("e", "u̯"), (0, 1)),
     Rule("ay-diphthong", re.compile(r"ay"), ("a", "i̯"), (0, 1)),
-    Rule("i-consonantal", re.compile(r"(?<![^aeiouy])i(?=[aeiouy])"), ("j",), (0,)),
+    Rule(
+        "i-consonantal",
+        re.compile(r"(?<![^aeiouy])i(?=[aeiouy])"),
+        ("j",),
+        (0,),
+    ),
     Rule("c-before-front-vowel", re.compile(rf"c(?={FRONT})"), ("t͡ʃ",), (0,)),
     Rule("g-before-front-vowel", re.compile(rf"g(?={FRONT})"), ("d͡ʒ",), (0,)),
 )
@@ -283,6 +288,16 @@ def load_g2p_exceptions() -> dict[str, G2PExceptionEntry]:
     return result
 
 
+def _is_after_glide_u(
+    word: str,
+    index: int,
+    diaeresis_indices: set[int],
+) -> bool:
+    if index == 0 or word[index - 1] != "u" or index - 1 in diaeresis_indices:
+        return False
+    return word[max(0, index - 2) : index - 1] == "q" or word[max(0, index - 3) : index - 1] == "ng"
+
+
 def _scan(word: str) -> tuple[tuple[tuple[int, str], ...], tuple[str, ...]]:
     folded = "".join(unicodedata.normalize("NFD", char)[0] for char in word)
     diaeresis_indices = {
@@ -294,6 +309,10 @@ def _scan(word: str) -> tuple[tuple[tuple[int, str], ...], tuple[str, ...]]:
     while index < len(folded):
         matched = False
         for rule in RULES:
+            if rule.rule_id == "i-consonantal" and _is_after_glide_u(
+                folded, index, diaeresis_indices
+            ):
+                continue
             result = rule.pattern.match(folded, index)
             if result is None:
                 continue
