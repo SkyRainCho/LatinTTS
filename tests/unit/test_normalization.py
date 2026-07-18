@@ -1,3 +1,5 @@
+import unicodedata
+
 from latintts.normalization import normalize_phrase, normalize_word, tokenize_words
 
 
@@ -24,6 +26,34 @@ def test_lookup_key_preserves_non_acute_marks() -> None:
     assert normalize_word("māter").lookup_key == "māter"
     assert normalize_word("aër").lookup_key == "aër"
     assert normalize_word("ae\u0308r").lookup_key == "aër"
+
+
+def test_lookup_key_maps_decomposed_marked_j_and_returns_nfc() -> None:
+    lookup_key = normalize_word("j\u0308").lookup_key
+
+    assert lookup_key == normalize_word("ï").lookup_key == "ï"
+    assert unicodedata.is_normalized("NFC", lookup_key)
+
+
+def test_lookup_key_maps_precomposed_marked_j_and_records_transformation() -> None:
+    word = normalize_word("ǰ")
+
+    assert word.lookup_key == normalize_word("ǐ").lookup_key == "ǐ"
+    assert "lookup-j-to-i" in word.transformations
+
+
+def test_lookup_key_maps_decomposed_marked_v_and_returns_nfc() -> None:
+    lookup_key = normalize_word("v\u0304").lookup_key
+
+    assert lookup_key == normalize_word("ū").lookup_key == "ū"
+    assert unicodedata.is_normalized("NFC", lookup_key)
+
+
+def test_lookup_key_maps_precomposed_marked_v_and_records_transformation() -> None:
+    word = normalize_word("ṽ")
+
+    assert word.lookup_key == normalize_word("ũ").lookup_key == "ũ"
+    assert "lookup-v-to-u" in word.transformations
 
 
 def test_normalization_records_stable_transformation_ids() -> None:

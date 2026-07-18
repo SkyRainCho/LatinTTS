@@ -45,9 +45,12 @@ def normalize_phrase(text: str) -> str:
 
 def _lookup_key(value: str) -> str:
     decomposed = unicodedata.normalize("NFD", value)
-    without_acute = "".join(char for char in decomposed if char != COMBINING_ACUTE)
-    recomposed = unicodedata.normalize("NFC", without_acute)
-    return recomposed.replace("j", "i").replace("v", "u")
+    mapped = "".join(
+        char.replace("j", "i").replace("v", "u")
+        for char in decomposed
+        if char != COMBINING_ACUTE
+    )
+    return unicodedata.normalize("NFC", mapped)
 
 
 def _describe_transformations(surface: str, normalized: str) -> tuple[str, ...]:
@@ -55,6 +58,7 @@ def _describe_transformations(surface: str, normalized: str) -> tuple[str, ...]:
     nfc_surface = unicodedata.normalize("NFC", surface)
     folded_surface = nfc_surface.casefold()
     decomposed_surface = unicodedata.normalize("NFD", folded_surface)
+    decomposed_normalized = unicodedata.normalize("NFD", normalized)
     if nfc_surface != surface:
         result.append("unicode-nfc")
     if folded_surface != nfc_surface:
@@ -65,9 +69,9 @@ def _describe_transformations(surface: str, normalized: str) -> tuple[str, ...]:
         result.append("expand-oe-ligature")
     if COMBINING_ACUTE in decomposed_surface:
         result.append("remove-acute-stress-mark")
-    if "j" in normalized:
+    if "j" in decomposed_normalized:
         result.append("lookup-j-to-i")
-    if "v" in normalized:
+    if "v" in decomposed_normalized:
         result.append("lookup-v-to-u")
     return tuple(result)
 
