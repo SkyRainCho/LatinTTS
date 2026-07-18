@@ -132,6 +132,8 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `regina` | `gi` | `perseus-lewis-short`, `entryFree id=n40899`, `key=regina`, `rēgīna`；`allen-greenough-accents`, Section 12 |
 | `maria` | `ri` | `perseus-lewis-short`, `entryFree id=n28037`, `key=Maria1`, `Mărī^a`, sense I.1 Mary；`allen-greenough-accents`, Section 12 |
 | `gratia` | `gra` | `perseus-lewis-short`, `entryFree id=n19896`, `key=gratia`, `grātĭa`；`allen-greenough-accents`, Section 12 |
+| `gloria` | `glo` | `perseus-lewis-short`, `entryFree id=n19675`, `key=gloria`, `glōrĭa`；`allen-greenough-accents`, Section 12，轻 penult -> antepenult |
+| `kyrie` | `ky` | `liber-usualis-1962`, PDF page 32 (printed xxxviii), R example，印作 `Kýrie` |
 | `caelum` | `cae` | `perseus-lewis-short`, `entryFree id=n6042`, `key=caelum2`；`allen-greenough-accents`, Section 12 双音节规则 |
 | `alleluia` | `lu` | `perseus-lewis-short`, `entryFree id=n1926`, `key=alleluja`, `allēlūja`；`liber-usualis-1962`, PDF page 32 (printed xxxviii), J example；`allen-greenough-accents`, Section 12 |
 | `magnificat` | `gni` | `perseus-lewis-short`, `entryFree id=n27636`, `key=magnifico`, `magnĭfĭco` 的现在时第三人称单数；`liber-usualis-1962`, PDF page 32 (printed xxxviii), GN example；`allen-greenough-accents`, Section 12 |

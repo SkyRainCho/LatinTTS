@@ -58,6 +58,27 @@ SEED_EXPECTATIONS: dict[str, SeedExpectation] = {
             "Allen and Greenough Section 12",
         ),
     ),
+    "gloria": (
+        ("glo", "ri", "a"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n19675",
+            "key=gloria",
+            "orth=glōrĭa",
+            "Allen and Greenough Section 12",
+            "light penult -> antepenult",
+        ),
+    ),
+    "kyrie": (
+        ("ky", "ri", "e"),
+        0,
+        ("liber-usualis-1962",),
+        (
+            "PDF page 32 (printed xxxviii), R example",
+            "prints Kýrie",
+        ),
+    ),
     "caelum": (
         ("cae", "lum"),
         0,
