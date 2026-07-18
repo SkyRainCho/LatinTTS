@@ -19,8 +19,10 @@ class SourceRecord:
 
 
 def load_source_registry() -> dict[str, SourceRecord]:
-    raw = files("latintts.resources").joinpath("pronunciation_sources.json").read_text(
-        encoding="utf-8"
+    raw = (
+        files("latintts.resources")
+        .joinpath("pronunciation_sources.json")
+        .read_text(encoding="utf-8")
     )
     rows = json.loads(raw)
     records = [SourceRecord(**row) for row in rows]

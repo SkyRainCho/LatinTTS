@@ -133,6 +133,15 @@ def test_longest_match_multigraph_rules(
     assert rule_id in result.applied_rule_ids
 
 
+def test_bare_q_is_a_synthetic_fallback_for_nonstandard_or_incomplete_input() -> None:
+    result = ecclesiastical_g2p("q", ("q",), 0)
+
+    assert result.ipa == "ˈk"
+    assert result.phonemes == ("ˈ", "k")
+    assert result.applied_rule_ids == ("q-hard",)
+    assert result.source_ids == ("liber-usualis-1962",)
+
+
 @pytest.mark.parametrize(
     ("word", "syllables", "ipa", "has_consonantal_i"),
     [

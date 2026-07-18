@@ -46,9 +46,7 @@ def normalize_phrase(text: str) -> str:
 def _lookup_key(value: str) -> str:
     decomposed = unicodedata.normalize("NFD", value)
     mapped = "".join(
-        char.replace("j", "i").replace("v", "u")
-        for char in decomposed
-        if char != COMBINING_ACUTE
+        char.replace("j", "i").replace("v", "u") for char in decomposed if char != COMBINING_ACUTE
     )
     return unicodedata.normalize("NFC", mapped)
 

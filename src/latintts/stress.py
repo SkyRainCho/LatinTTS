@@ -36,9 +36,7 @@ class StressDecision:
 
 
 def load_stress_lexicon() -> dict[str, StressLexiconEntry]:
-    text = files("latintts.resources").joinpath("stress_lexicon.jsonl").read_text(
-        encoding="utf-8"
-    )
+    text = files("latintts.resources").joinpath("stress_lexicon.jsonl").read_text(encoding="utf-8")
     known_sources = set(load_source_registry())
     result: dict[str, StressLexiconEntry] = {}
     for line_number, line in enumerate(text.splitlines(), start=1):
