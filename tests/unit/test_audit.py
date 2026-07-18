@@ -192,7 +192,11 @@ def test_j_i_contexts_unify_lookup_without_rewriting_canonical_spelling() -> Non
 
 
 def test_u_v_lookup_unification_preserves_pronunciation_roles_and_h_boundaries() -> None:
+    rows = _gold_rows_by_word()
     pronouncer = Pronouncer.default()
+    assert "herba" in rows
+    assert "nihilne" not in rows
+
     for word in ("servus", "avus", "vivus", "vox"):
         normalized = normalize_word(word)
         token = pronouncer.analyze(word).tokens[0]
@@ -207,13 +211,13 @@ def test_u_v_lookup_unification_preserves_pronunciation_roles_and_h_boundaries()
         assert "simple-u" in token.applied_rule_ids
         assert "simple-v" not in token.applied_rule_ids
 
-    for word in ("nihildum", "nihilne"):
+    for word in ("nihildum",):
         token = pronouncer.analyze(word).tokens[0]
         assert token.resolution_method is ResolutionMethod.EXCEPTION
         assert token.applied_rule_ids[-1] == "h-mihi-nihil"
         assert "h-muted" not in token.applied_rule_ids
 
-    for word in ("traho", "honor"):
+    for word in ("traho", "honor", "herba"):
         token = pronouncer.analyze(word).tokens[0]
         assert "h-muted" in token.applied_rule_ids
         assert "h-mihi-nihil" not in token.applied_rule_ids

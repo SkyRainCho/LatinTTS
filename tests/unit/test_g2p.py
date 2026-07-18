@@ -191,12 +191,6 @@ def test_lookup_key_selects_a_packaged_exception_without_rewriting_the_word() ->
             "niˈkil.dum",
             ("n", "i", ".", "ˈ", "k", "i", "l", ".", "d", "u", "m"),
         ),
-        (
-            "nihilne",
-            ("ni", "hil", "ne"),
-            "niˈkil.ne",
-            ("n", "i", ".", "ˈ", "k", "i", "l", ".", "n", "e"),
-        ),
     ],
 )
 def test_nihil_compounds_use_the_source_backed_h_exception(
@@ -216,7 +210,7 @@ def test_nihil_compounds_use_the_source_backed_h_exception(
     )
 
 
-@pytest.mark.parametrize("word", ["traho", "honor"])
+@pytest.mark.parametrize("word", ["traho", "honor", "herba"])
 def test_unrelated_h_words_remain_muted(word: str) -> None:
     syllables = syllabify(word)
     result = ecclesiastical_g2p(word, syllables, 0)
@@ -228,7 +222,7 @@ def test_unrelated_h_words_remain_muted(word: str) -> None:
 def test_load_g2p_exceptions_reads_the_source_backed_entries() -> None:
     exceptions = load_g2p_exceptions()
 
-    assert set(exceptions) == {"mihi", "nihil", "nihildum", "nihilne"}
+    assert set(exceptions) == {"mihi", "nihil", "nihildum"}
     assert exceptions["mihi"] == G2PExceptionEntry(
         lookup_key="mihi",
         phonemes_by_syllable=(("m", "i"), ("k", "i")),
@@ -246,16 +240,12 @@ def test_load_g2p_exceptions_reads_the_source_backed_entries() -> None:
             "Lewis and Short entryFree id=n30955, key=nihildum"
         ),
     )
-    assert exceptions["nihilne"] == G2PExceptionEntry(
-        lookup_key="nihilne",
-        phonemes_by_syllable=(("n", "i"), ("k", "i", "l"), ("n", "e")),
+    assert exceptions["nihil"] == G2PExceptionEntry(
+        lookup_key="nihil",
+        phonemes_by_syllable=(("n", "i"), ("k", "i", "l")),
         rule_ids=("h-mihi-nihil",),
-        source_ids=("liber-usualis-1962", "perseus-lewis-short"),
-        note=(
-            "Liber Usualis PDF lines 1319-1321: mihi/nihil and their compounds; "
-            "Lewis and Short entryFree id=n30954, key=nihil; Cicero, In Catilinam 1.1, "
-            "Nihilne"
-        ),
+        source_ids=("liber-usualis-1962",),
+        note="Liber Usualis pronunciation table, h pronounced k in nihil",
     )
 
 
