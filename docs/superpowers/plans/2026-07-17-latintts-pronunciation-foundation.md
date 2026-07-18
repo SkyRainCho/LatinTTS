@@ -2133,6 +2133,7 @@ git commit -m "test: cover ecclesiastical Latin vowels"
 **Files:**
 - Modify: `tests/fixtures/gold_pronunciations.jsonl`
 - Modify: `tests/unit/test_audit.py`
+- Modify: `tests/integration/test_gold_pronunciations.py`
 - Modify: `docs/pronunciation/roman-ecclesiastical.md`
 
 **Interfaces:**
@@ -2162,14 +2163,14 @@ Expected: FAIL with total and consonant category不足。
 
 - [ ] **Step 6: 审核 20 条双辅音和基础辅音数据**
 
-覆盖 `bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 中至少十类，以及 `b/d/f/k/l/m/n/p/q/v` 基础映射。
+覆盖 `bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 中至少十类，以及 `b/d/f/k/l/m/n/p/v` 基础映射。标准普通拉丁正字法中的 `q` 由 `qu-before-vowel` 真实词例覆盖；`q-hard` 仅为非标准或残缺输入的内部退化路径，免除真实词黄金集正例要求，不计入至少 320 条 approved 黄金词。该决策由用户于 2026-07-18 选择方案 A 批准；Task 14 必须用明确标为 synthetic fallback 的单元测试覆盖 `q-hard`。
 
 - [ ] **Step 7: 运行审计、精确匹配并提交**
 
 ```powershell
 .venv\Scripts\python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
 .venv\Scripts\python -m pytest tests/integration/test_gold_pronunciations.py -q
-git add tests/fixtures/gold_pronunciations.jsonl tests/unit/test_audit.py docs/pronunciation/roman-ecclesiastical.md
+git add tests/fixtures/gold_pronunciations.jsonl tests/unit/test_audit.py tests/integration/test_gold_pronunciations.py docs/pronunciation/roman-ecclesiastical.md
 git commit -m "test: cover ecclesiastical Latin consonants"
 ```
 
@@ -2350,6 +2351,7 @@ Expected: `gold-audit: PASS total=320 errors=0` 或更高总数；所有分类�
 
 **Files:**
 - Create: `tests/integration/test_rule_document_coverage.py`
+- Modify: `tests/unit/test_g2p.py`
 - Modify: `README.md`
 - Modify: `docs/pronunciation/roman-ecclesiastical.md`
 - Modify: `src/latintts/audit.py`
@@ -2366,6 +2368,8 @@ from pathlib import Path
 
 from latintts.g2p import IMPLEMENTED_RULE_IDS
 
+REAL_WORD_GOLD_EXEMPT_RULE_IDS = {"q-hard"}
+
 
 def test_every_g2p_rule_has_gold_coverage() -> None:
     covered = set()
@@ -2375,7 +2379,7 @@ def test_every_g2p_rule_has_gold_coverage() -> None:
         if line.strip():
             covered.update(json.loads(line)["rule_ids"])
     missing = IMPLEMENTED_RULE_IDS - covered
-    assert missing == set()
+    assert missing == REAL_WORD_GOLD_EXEMPT_RULE_IDS
 
 
 def test_rule_document_lists_every_implemented_rule() -> None:
@@ -2395,6 +2399,8 @@ Expected: FAIL and list concrete missing rule IDs or documentation rows.
 - [ ] **Step 3: 补齐规则覆盖矩阵**
 
 对失败列表逐项添加黄金记录或文档矩阵行。每行包含：rule ID、拼写条件、IPA 输出、正例、反例、source ID、locator、对应黄金词。不得通过从 `RULES` 自动生成文档来掩盖缺少人工解释。
+
+同时在 `tests/unit/test_g2p.py` 增加明确命名为 synthetic fallback 的裸 `q` 测试：输入 `q`，断言 IPA 为 `/k/`、rule ID 为 `q-hard`、source ID 为 `liber-usualis-1962`。该测试只验证非标准或残缺输入的内部容错实现，不得计入真实拉丁词黄金数据或 320 词门槛。
 
 - [ ] **Step 4: 更新 README**
 
@@ -2430,7 +2436,7 @@ Expected:
 - [ ] **Step 6: 提交阶段 1 文档与发布门禁**
 
 ```powershell
-git add README.md docs/pronunciation/roman-ecclesiastical.md src/latintts/audit.py tests/integration/test_rule_document_coverage.py
+git add README.md docs/pronunciation/roman-ecclesiastical.md src/latintts/audit.py tests/integration/test_rule_document_coverage.py tests/unit/test_g2p.py
 git commit -m "docs: complete pronunciation foundation guide"
 ```
 
