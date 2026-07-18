@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 SourceSpan = tuple[int, int]
+# `phrase_phonemes` uses this control token between words. It is intentionally
+# not part of the per-token phoneme inventory or override control tokens.
+WORD_BOUNDARY_TOKEN = "|"
 
 
 class Severity(str, Enum):

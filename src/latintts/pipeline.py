@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from latintts.domain import (
+    WORD_BOUNDARY_TOKEN,
     Diagnostic,
     PronunciationOverride,
     PronunciationPlan,
@@ -170,7 +171,7 @@ class Pronouncer:
                 override=override,
             )
             if phrase_phonemes:
-                phrase_phonemes.append("|")
+                phrase_phonemes.append(WORD_BOUNDARY_TOKEN)
             phrase_phonemes.extend(token.model_phonemes)
             tokens.append(token)
             plan_warnings.extend(warnings)

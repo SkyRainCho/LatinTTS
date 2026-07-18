@@ -6,7 +6,13 @@ import pytest
 
 import latintts
 from latintts import pipeline as pipeline_module
-from latintts.domain import Diagnostic, PronunciationOverride, ResolutionMethod, Severity
+from latintts.domain import (
+    WORD_BOUNDARY_TOKEN,
+    Diagnostic,
+    PronunciationOverride,
+    ResolutionMethod,
+    Severity,
+)
 from latintts.g2p import G2PResult
 from latintts.pipeline import Pronouncer
 
@@ -231,10 +237,10 @@ def test_phrase_phonemes_put_one_boundary_between_words() -> None:
 
     assert plan.phrase_phonemes == (
         *plan.tokens[0].model_phonemes,
-        "|",
+        WORD_BOUNDARY_TOKEN,
         *plan.tokens[1].model_phonemes,
     )
-    assert plan.phrase_phonemes.count("|") == 1
+    assert plan.phrase_phonemes.count(WORD_BOUNDARY_TOKEN) == 1
 
 
 def test_empty_text_builds_an_empty_plan() -> None:

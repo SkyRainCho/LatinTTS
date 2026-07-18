@@ -78,7 +78,7 @@ _GOLD_FIELDS = frozenset(
 )
 
 
-def _string_tuple(value: object, *, field: str) -> tuple[str, ...]:
+def _coerce_gold_string_list(value: object, *, field: str) -> tuple[str, ...]:
     if type(value) is not list or any(type(item) is not str for item in value):
         raise TypeError(f"{field} must be a list of strings")
     result = tuple(value)
@@ -100,12 +100,12 @@ def _parse_entry(raw: object) -> GoldEntry:
     return GoldEntry(
         word=raw["word"],
         normalized=raw["normalized"],
-        syllables=_string_tuple(raw["syllables"], field="syllables"),
+        syllables=_coerce_gold_string_list(raw["syllables"], field="syllables"),
         stress_index=raw["stress_index"],
         ipa=raw["ipa"],
         category=raw["category"],
-        rule_ids=_string_tuple(raw["rule_ids"], field="rule_ids"),
-        source_ids=_string_tuple(raw["source_ids"], field="source_ids"),
+        rule_ids=_coerce_gold_string_list(raw["rule_ids"], field="rule_ids"),
+        source_ids=_coerce_gold_string_list(raw["source_ids"], field="source_ids"),
         review_state=raw["review_state"],
     )
 

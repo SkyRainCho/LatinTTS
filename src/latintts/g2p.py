@@ -36,6 +36,8 @@ class Rule:
     rule_id: str
     pattern: re.Pattern[str]
     phonemes: tuple[str, ...]
+    # One placement anchor per emitted phoneme, not a list of every consumed
+    # grapheme. Anchors decide which syllable receives a fused phoneme.
     source_offsets: tuple[int, ...]
     source_ids: tuple[str, ...] = ("liber-usualis-1962",)
 
@@ -45,6 +47,8 @@ VOWEL = r"(?:ae|oe|[aeiouy])"
 RULES = (
     Rule("xc-before-front-vowel", re.compile(rf"xc(?={FRONT})"), ("k", "ʃ"), (0, 1)),
     Rule("cc-before-front-vowel", re.compile(rf"cc(?={FRONT})"), ("t", "t͡ʃ"), (0, 1)),
+    # Anchor fused /ʃ/ to c so a split such as nes-cio places it in the onset
+    # of the second syllable; offset 0 would incorrectly attach it to nes-.
     Rule("sc-before-front-vowel", re.compile(rf"sc(?={FRONT})"), ("ʃ",), (1,)),
     Rule("gn-palatal", re.compile(r"gn"), ("ɲ",), (0,)),
     Rule("ti-before-vowel", re.compile(rf"(?<![sxt])ti(?={VOWEL})"), ("t͡s", "i"), (0, 1)),
@@ -193,7 +197,12 @@ _EXCEPTION_FIELDS = frozenset(
 )
 
 
-def _string_tuple(value: object, *, field: str, line_number: int) -> tuple[str, ...]:
+def _parse_required_unique_strings(
+    value: object,
+    *,
+    field: str,
+    line_number: int,
+) -> tuple[str, ...]:
     if (
         not isinstance(value, list)
         or not value
@@ -253,8 +262,12 @@ def load_g2p_exceptions() -> dict[str, G2PExceptionEntry]:
                 raise ValueError(f"invalid phonemes_by_syllable at line {line_number}")
             phonemes_by_syllable.append(tuple(part))
 
-        rule_ids = _string_tuple(raw["rule_ids"], field="rule_ids", line_number=line_number)
-        source_ids = _string_tuple(raw["source_ids"], field="source_ids", line_number=line_number)
+        rule_ids = _parse_required_unique_strings(
+            raw["rule_ids"], field="rule_ids", line_number=line_number
+        )
+        source_ids = _parse_required_unique_strings(
+            raw["source_ids"], field="source_ids", line_number=line_number
+        )
         entry = G2PExceptionEntry(
             lookup_key=lookup_key,
             phonemes_by_syllable=tuple(phonemes_by_syllable),
@@ -415,6 +428,12 @@ def ecclesiastical_g2p(
     lookup_key: str | None = None,
     exceptions: Mapping[str, G2PExceptionEntry] | None = None,
 ) -> G2PResult:
+    """Convert one canonical word to G2P output.
+
+    Passing ``exceptions`` avoids resource I/O for repeated direct calls.
+    ``Pronouncer`` loads the exception mapping once per instance and always
+    supplies it here.
+    """
     if not 0 <= stress_index < len(syllables):
         raise ValueError("stress_index must point to an existing syllable")
     if word != unicodedata.normalize("NFC", word):

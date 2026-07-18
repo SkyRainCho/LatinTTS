@@ -119,6 +119,9 @@ def resolve_stress(
             entry.source_ids,
             applied_rule_ids=(rule_id,),
         )
+    # Both the lexicon and this argument use normalize_word().lookup_key
+    # semantics (including j-to-i and v-to-u), so suffix stripping remains in the
+    # same key space as the subsequent dictionary lookup.
     enclitic_suffix = next(
         (
             suffix
