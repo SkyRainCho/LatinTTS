@@ -2355,6 +2355,9 @@ Expected: `gold-audit: PASS total=320 errors=0` 或更高总数；所有分类�
 - Modify: `README.md`
 - Modify: `docs/pronunciation/roman-ecclesiastical.md`
 - Modify: `src/latintts/audit.py`
+- Modify: `src/latintts/normalization.py`（仅 Ruff 格式化）
+- Modify: `src/latintts/sources.py`（仅 Ruff 格式化）
+- Modify: `src/latintts/stress.py`（仅 Ruff 格式化）
 
 **Interfaces:**
 - Consumes: G2P rule IDs、规则文档覆盖矩阵、黄金词条 `rule_ids`。
@@ -2436,7 +2439,7 @@ Expected:
 - [ ] **Step 6: 提交阶段 1 文档与发布门禁**
 
 ```powershell
-git add README.md docs/pronunciation/roman-ecclesiastical.md src/latintts/audit.py tests/integration/test_rule_document_coverage.py tests/unit/test_g2p.py
+git add README.md docs/pronunciation/roman-ecclesiastical.md src/latintts/audit.py src/latintts/normalization.py src/latintts/sources.py src/latintts/stress.py tests/integration/test_rule_document_coverage.py tests/unit/test_g2p.py
 git commit -m "docs: complete pronunciation foundation guide"
 ```
 
