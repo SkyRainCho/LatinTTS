@@ -266,7 +266,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 以下五批各 20 条，共新增 100 条 `consonants` 记录；与既有 10 条合计 110 条。逐词审核要求与上一批相同：`approved`、`warnings == ()`，且 `normalized`、音节、重音、IPA、完整 `rule_ids/source_ids` 均与 `PronunciationToken` 精确相等。表中“覆盖角色”只列本批关注点；完整集合以 JSONL 记录为准。
 
-来源边界必须严格区分：Liber 的 locator 证明字母组合读法，Allen and Greenough Section 12 只证明单音节、双音节或由闭音节/长元音可见的重 penult 规则。带 acute 的 `grátias/rátio/vítium/inítium/hóstia/míxtio/Áttia/béstia` 是显式重音输入测试，运行时使用 `explicit-stress`，因此不把 Allen 添加到这些记录的 `source_ids`，也不把 acute 位置冒充为词典推导。`excīdit` 的 macron 是输入中可见的长元音证据。所有词均为真实拉丁词形或传统拉丁专名；没有为触发扫描器而构造假词。
+来源边界必须严格区分：Liber 的 locator 证明字母组合读法，Lewis and Short 的逐词 `entryFree` 证明词形与 penult 元音量，Allen and Greenough Section 12 再把该元音量推导为具体重音位置。带 acute 的 `grátias/rátio/vítium/inítium/hóstia/Séxtius/Áttius/béstia` 是显式重音输入测试，运行时使用 `explicit-stress`；acute 的语言学正确性由下表逐词 locator 独立证明，绝不以输入标记自证。因为 `source_ids` 是当前 `PronunciationToken` 实际采用的运行时 provenance，explicit-stress 记录不伪加没有被管线加载的词典来源。`excīdit` 和 `excussōrum` 的 macron 是输入中可见的长元音证据。所有词均为真实拉丁词形或传统拉丁专名；没有为触发扫描器而构造假词。
 
 上下文门禁：`c/cc/sc/g` 的前元音为 `e/i/y/ae/oe`，硬音反例使用 `a/o/u` 或辅音；`ch` 在 `e/i` 前仍走最长匹配；`ti` 的前接 `s/x/t` 反例必须实际落入基础 `simple-t/simple-i`；普通 `h` 与 `mihi/nihil` 例外分开；元音间 `s` 按既定工程政策仍输出 `/s/`。
 
@@ -324,21 +324,21 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 | word | 覆盖角色 | 精确来源 locator | review |
 | --- | --- | --- | --- |
-| `grátias` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `rátio` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `vítium` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `inítium` | ti+元音正例；acute 显式给重音 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `hóstia` | 前接 s 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `míxtio` | 前接 x 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `Áttia` | 前接 t 的 ti 反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `béstia` | 前接 s 的第二反例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `grátias` | ti+元音正例；acute 在 `gra` | `perseus-lewis-short`, `entryFree id=n19896`, `key=gratia`, `orth=grātĭa`，词条正文亦见屈折形式 `gratias`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `gra`；`liber-usualis-1962`, PDF lines 1335-1339 明列 `Gratia` 为 TI 正例 | approved |
+| `rátio` | ti+元音正例；acute 在 `ra` | `perseus-lewis-short`, `entryFree id=n40449`, `key=ratio`, `orth=rătĭo`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `ra`；TI 读音见 `liber-usualis-1962`, PDF lines 1335-1340 | approved |
+| `vítium` | ti+元音正例；acute 在 `vi` | `perseus-lewis-short`, `entryFree id=n51190`, `key=vitium`, `orth=vĭtĭum`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `vi`；TI 读音见 `liber-usualis-1962`, PDF lines 1335-1340 | approved |
+| `inítium` | ti+元音正例；acute 在第二音节 `ni` | `perseus-lewis-short`, `entryFree id=n23493`, `key=initium`, `orth=ĭnĭtĭum`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `ni`；TI 读音见 `liber-usualis-1962`, PDF lines 1335-1340 | approved |
+| `hóstia` | 前接 s 的 ti 反例；acute 在 `hos` | `perseus-lewis-short`, `entryFree id=n21011`, `key=hostia`, `orth=hostĭa`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `hos`；TI 的 S 前置例外见 `liber-usualis-1962`, PDF lines 1335-1341 | approved |
+| `Séxtius` | 前接 x 的 ti 反例；acute 在 `sex` | `perseus-lewis-short`, `entryFree id=n44086`, `key=Sextius`, `orth=Sextĭus`（主条交叉定位 `n44022`, `key=Sestius`）；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `sex`；TI 的 X 前置例外见 `liber-usualis-1962`, PDF lines 1335-1341 | approved |
+| `Áttius` | 前接 t 的 ti 反例；acute 在 `at` | `perseus-lewis-short`, `entryFree id=n4369`, `key=Attius`, `orth=Attĭus`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `at`；TI 的 T 前置例外见 `liber-usualis-1962`, PDF lines 1335-1341 | approved |
+| `béstia` | 前接 s 的第二反例；acute 在 `bes` | `perseus-lewis-short`, `entryFree id=n5232`, `key=bestia1`, `orth=bestĭa`；短 penult `ĭ` + `allen-greenough-accents`, Section 12 推出 antepenult `bes`；TI 的 S 前置例外见 `liber-usualis-1962`, PDF lines 1335-1341 | approved |
 | `thomas` | th 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `theca` | th+前元音正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `thronus` | th+辅音正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `lex` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `rex` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `pax` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
-| `lux` | 普通 x 词尾 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
+| `excussōrum` | `xc+u` 真反例：实际命中 `x-ks` + `c-hard`，不命中 `xc-before-front-vowel` | `liber-usualis-1962`, PDF lines 1343-1348 明列 `excussorum = eks-coos-so-room`；`perseus-lewis-short`, `entryFree id=n16775`, `key=excutio`, principal part `excussum` / `orth=excussus` 支持分词词干；可见 `ō` + `allen-greenough-accents`, Section 12 推出重 penult `sō` | approved |
 | `excelsus` | xc+e 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `excīdit` | xc+i 正例；macron 证明重 penult | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
 | `zelus` | 词首 z 正例 | `liber-usualis-1962`, PDF lines 1335-1350；非显式重音另见 `allen-greenough-accents`, Section 12 | approved |
@@ -368,7 +368,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | `nasus` | 元音间 s 保持 /s/ | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
 | `casa` | 元音间 s 保持 /s/ | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
 | `mensa` | 词中辅音前 s | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
-| `pascit` | sc+i 正例并保持 s 工程政策 | `liber-usualis-1962`, PDF lines 1292-1294, 1325-1334；`allen-greenough-accents`, Section 12 | approved |
+| `pascit` | `sc+i` 正例；`sc` 整体命中 `sc-before-front-vowel` 并输出 `/ʃ/`，不声称命中 `simple-s` | `liber-usualis-1962`, PDF lines 1305-1306；`allen-greenough-accents`, Section 12 | approved |
 
 #### E：双辅音与基础辅音
 
@@ -397,7 +397,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 批次级覆盖结论：`c-before-front-vowel`、`cc-before-front-vowel`、`sc-before-front-vowel`、`ch-hard`、`g-before-front-vowel`、`g-hard`、`gn-palatal`、`h-muted`、`j-consonantal`、`i-consonantal`、`ti-before-vowel`、`th-t`、`x-ks`、`xc-before-front-vowel`、`z-dz`、`qu-before-vowel`、`ngu-before-vowel` 均至少有两个正例；关键上下文均有至少一个实际不触发该规则的边界词。`h-mihi-nihil` 的两个正例由既有 `mihi` 与本批 `nihil` 组成。`bb/cc/dd/ff/gg/ll/mm/nn/pp/rr/ss/tt` 共 12 类双辅音均由 IPA 中两个相邻辅音位置锁定；实现当前没有另造“geminate” rule ID。
 
-基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。普通拉丁正字法没有可用于 `q-hard` 的独立词例；本批遵守“真实拉丁词、不得造词”的上位要求，不用合成 `q` 词为内部退化路径制造假黄金数据。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 锁定真实 `q` 边界。
+基础辅音覆盖包括 `b/d/f/k/l/m/n/p/v`，而正字法 `q` 的真实词例由 `qu-before-vowel` 组覆盖。`q-hard` 仍是计划明文要求与“只用真实普通拉丁词”之间的待用户裁决边界：当前黄金集不以造词或无权威发音来源的现代专名自行满足该项，也不把它标为已豁免。`quae/quem/quod/quare` 与既有 `qui/quo/aqua` 只锁定真实 `qu` 路径，不能替代 `q-hard` 裁决。
 
 ### G2P 实现规则与 locator
 

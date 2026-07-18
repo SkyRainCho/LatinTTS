@@ -50,5 +50,5 @@ def test_gold_pronunciation(row: dict[str, object]) -> None:
     assert list(token.syllables) == row["syllables"]
     assert token.stress_index == row["stress_index"]
     assert token.ipa == row["ipa"]
-    assert set(row["rule_ids"]) <= set(token.applied_rule_ids)  # type: ignore[arg-type]
-    assert set(row["source_ids"]) <= set(token.source_ids)  # type: ignore[arg-type]
+    assert list(token.applied_rule_ids) == row["rule_ids"]
+    assert list(token.source_ids) == row["source_ids"]
