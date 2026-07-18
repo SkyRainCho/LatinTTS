@@ -1,5 +1,10 @@
-from latintts.domain import PronunciationPlan, PronunciationToken
+from latintts.domain import PronunciationOverride, PronunciationPlan, PronunciationToken
+from latintts.pipeline import Pronouncer
 
+__all__ = [
+    "Pronouncer",
+    "PronunciationOverride",
+    "PronunciationPlan",
+    "PronunciationToken",
+]
 __version__ = "0.1.0"
-
-__all__ = ["PronunciationPlan", "PronunciationToken", "__version__"]
