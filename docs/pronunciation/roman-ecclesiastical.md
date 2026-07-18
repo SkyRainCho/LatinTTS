@@ -1,6 +1,6 @@
 # 现代罗马教会式拉丁语发音规范基线
 
-状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化和音节划分已实现，G2P 尚未实现。
+状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化、音节划分和来源可追溯的重音解析已实现，G2P 尚未实现。
 
 ## 目标与非目标
 
@@ -118,6 +118,23 @@ G2P/音节规则消费展开后的 canonical normalized token：到达本节前�
 | 附着词加入词干 | 附着词之前的音节，不论该音节长短 | `allen-greenough-accents`, Section 12 |
 
 penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 可提供词汇证据，但每个词条必须记录具体定位。三音节及以上词若普通拼写无法证明 penult 轻重，只能生成候选，且必须返回 `PRONUNCIATION_NEEDS_REVIEW` 诊断；不得静默宣称确定，也不得把候选重音升级为规范输出。双音节词和有充分证据的词仍按上表确定重音。
+
+实现严格按以下优先级解析：请求覆盖 > acute 显式提示 > 全词例外/词典 > 经已知 base lexicon 证实的附着词 > 单/双音节规则 > 可证明的 heavy penult > antepenult 候选。附着词只在去掉 `que/ne/ve` 后的 base 已存在于词典时触发；仅仅以这些字母结尾不构成证据。可证明的 heavy penult 仅包括含 macron、含 base-letter 双元音，或以辅音结尾的音节。不得把未知开放 penult 静默确定；此时只给出 antepenult 候选并附带 `PRONUNCIATION_NEEDS_REVIEW`。
+
+首批重音词典的 locator 与推导如下。Lewis and Short 的 `entryFree id` 和 `key` 均指 `perseus-lewis-short` 登记的 XML；Liber 页码同时给出 PDF 页和印刷页。`benedictus`、`excelsis` 是明确标注的 lemma/inflection + Section 12 闭 penult 规则推导，不声称词典直接印出了屈折词重音。
+
+| lookup key | 重音 | 证据与具体定位 |
+| --- | --- | --- |
+| `dominus` | `do` | `perseus-lewis-short`, `entryFree id=n14699`, `key=dominus`, `dŏmĭnus`；`allen-greenough-accents`, Section 12 |
+| `regina` | `gi` | `perseus-lewis-short`, `entryFree id=n40899`, `key=regina`, `rēgīna`；`allen-greenough-accents`, Section 12 |
+| `maria` | `ri` | `perseus-lewis-short`, `entryFree id=n28037`, `key=Maria1`, `Mărī^a`, sense I.1 Mary；`allen-greenough-accents`, Section 12 |
+| `gratia` | `gra` | `perseus-lewis-short`, `entryFree id=n19896`, `key=gratia`, `grātĭa`；`allen-greenough-accents`, Section 12 |
+| `caelum` | `cae` | `perseus-lewis-short`, `entryFree id=n6042`, `key=caelum2`；`allen-greenough-accents`, Section 12 双音节规则 |
+| `alleluia` | `lu` | `perseus-lewis-short`, `entryFree id=n1926`, `key=alleluja`, `allēlūja`；`liber-usualis-1962`, PDF page 32 (printed xxxviii), J example；`allen-greenough-accents`, Section 12 |
+| `magnificat` | `gni` | `perseus-lewis-short`, `entryFree id=n27636`, `key=magnifico`, `magnĭfĭco` 的现在时第三人称单数；`liber-usualis-1962`, PDF page 32 (printed xxxviii), GN example；`allen-greenough-accents`, Section 12 |
+| `misericordia` | `cor` | `perseus-lewis-short`, `entryFree id=n29266`, `key=misericordia`, `mĭsĕrĭcordĭa`；`liber-usualis-1962`, PDF page 32 (printed xxxviii), S example；`allen-greenough-accents`, Section 12 |
+| `benedictus` | `dic` | `perseus-lewis-short`, `entryFree id=n5170`, `key=benedico`, principal part `ctum` 支持该分词；`allen-greenough-accents`, Section 12，`dic` 为闭 penult 的规则推导 |
+| `excelsis` | `cel` | `perseus-lewis-short`, `entryFree id=n16651`, `key=excelsus`, inflection `a, um` 支持该屈折词；`allen-greenough-accents`, Section 12，`cel` 为闭 penult 的规则推导 |
 
 ## 双辅音
 
