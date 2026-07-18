@@ -1,10 +1,13 @@
 from collections.abc import Mapping
-from typing import cast
+from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
 import latintts
-from latintts.domain import PronunciationOverride, ResolutionMethod
+from latintts import pipeline as pipeline_module
+from latintts.domain import Diagnostic, PronunciationOverride, ResolutionMethod, Severity
+from latintts.g2p import G2PResult
 from latintts.pipeline import Pronouncer
 
 
@@ -74,6 +77,61 @@ def test_full_override_stress_must_match_resolved_stress() -> None:
         Pronouncer.default().analyze("Dominus", overrides={0: override})
 
 
+def test_full_override_omits_discarded_g2p_rule_provenance() -> None:
+    override = PronunciationOverride(
+        ipa="ˈo.i",
+        model_phonemes=("ˈ", "o", ".", "i"),
+    )
+
+    token = Pronouncer.default().analyze("Ave", overrides={0: override}).tokens[0]
+
+    assert token.applied_rule_ids == ("disyllable-stress",)
+    assert token.source_ids == ("allen-greenough-accents",)
+    assert not {"simple-a", "simple-v", "simple-e"} & set(token.applied_rule_ids)
+    assert "liber-usualis-1962" not in token.source_ids
+
+
+def test_full_override_preserves_lexicon_stress_provenance() -> None:
+    override = PronunciationOverride(
+        ipa="ˈo.i.u",
+        model_phonemes=("ˈ", "o", ".", "i", ".", "u"),
+    )
+
+    token = Pronouncer.default().analyze("Dominus", overrides={0: override}).tokens[0]
+
+    assert token.applied_rule_ids == ("stress-lexicon",)
+    assert token.source_ids == (
+        "perseus-lewis-short",
+        "allen-greenough-accents",
+    )
+
+
+def test_full_override_keeps_stress_warnings_and_omits_g2p_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_g2p = pipeline_module.ecclesiastical_g2p
+
+    def g2p_with_warning(*args: Any, **kwargs: Any) -> G2PResult:
+        result = real_g2p(*args, **kwargs)
+        warning = Diagnostic(
+            code="DISCARDED_AUTOMATIC_G2P_WARNING",
+            message="warning from discarded automatic phonemes",
+            severity=Severity.WARNING,
+        )
+        return replace(result, warnings=(warning,))
+
+    monkeypatch.setattr(pipeline_module, "ecclesiastical_g2p", g2p_with_warning)
+    override = PronunciationOverride(
+        ipa="ˈo.i.u",
+        model_phonemes=("ˈ", "o", ".", "i", ".", "u"),
+    )
+
+    plan = Pronouncer.default().analyze("Fabula", overrides={0: override})
+
+    assert [warning.code for warning in plan.tokens[0].warnings] == ["PRONUNCIATION_NEEDS_REVIEW"]
+    assert plan.warnings == plan.tokens[0].warnings
+
+
 def test_unknown_stress_warning_reaches_token_and_plan_with_context() -> None:
     plan = Pronouncer.default().analyze("Fabula")
 
@@ -107,6 +165,17 @@ def test_out_of_range_override_stress_error_identifies_token() -> None:
 
     with pytest.raises(ValueError, match=r"token 0 'Ave'.*override stress_index"):
         Pronouncer.default().analyze("Ave", overrides={0: override})
+
+
+@pytest.mark.parametrize("stress_index", [False, 1.0, "1"])
+def test_non_integer_override_stress_error_identifies_token(stress_index: object) -> None:
+    override = PronunciationOverride(stress_index=cast(int, stress_index))
+
+    with pytest.raises(
+        ValueError,
+        match=r"token 0 'Dominus'.*override stress_index must be an integer",
+    ):
+        Pronouncer.default().analyze("Dominus", overrides={0: override})
 
 
 @pytest.mark.parametrize(

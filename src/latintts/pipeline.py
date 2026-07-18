@@ -123,9 +123,24 @@ class Pronouncer:
                 lookup_key=word.lookup_key,
                 exceptions=self.g2p_exceptions,
             )
+            has_full_override = (
+                override is not None
+                and override.ipa is not None
+                and override.model_phonemes is not None
+            )
+            if has_full_override:
+                warning_items = stress.warnings
+                applied_rule_ids = stress.applied_rule_ids
+                source_ids = stress.source_ids
+            else:
+                warning_items = (*stress.warnings, *g2p.warnings)
+                applied_rule_ids = tuple(
+                    dict.fromkeys((*stress.applied_rule_ids, *g2p.applied_rule_ids))
+                )
+                source_ids = tuple(dict.fromkeys((*stress.source_ids, *g2p.source_ids)))
             warnings = tuple(
                 replace(item, source_span=(span.start, span.end), token_index=token_index)
-                for item in (*stress.warnings, *g2p.warnings)
+                for item in warning_items
             )
             if override is not None:
                 method = ResolutionMethod.OVERRIDE
@@ -148,11 +163,9 @@ class Pronouncer:
                 ipa=ipa,
                 model_phonemes=phonemes,
                 resolution_method=method,
-                applied_rule_ids=tuple(
-                    dict.fromkeys((*stress.applied_rule_ids, *g2p.applied_rule_ids))
-                ),
+                applied_rule_ids=applied_rule_ids,
                 normalization_transforms=word.transformations,
-                source_ids=tuple(dict.fromkeys((*stress.source_ids, *g2p.source_ids))),
+                source_ids=source_ids,
                 warnings=warnings,
                 override=override,
             )

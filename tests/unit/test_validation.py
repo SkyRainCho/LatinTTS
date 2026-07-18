@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 
 from latintts.domain import PronunciationOverride
@@ -77,3 +79,11 @@ def test_override_requires_positive_syllable_count() -> None:
 def test_override_rejects_out_of_range_stress_index() -> None:
     with pytest.raises(ValueError, match="override stress_index"):
         validate_override(PronunciationOverride(stress_index=3), syllable_count=3)
+
+
+@pytest.mark.parametrize("stress_index", [False, 1.0, "1"])
+def test_override_rejects_non_integer_stress_index(stress_index: object) -> None:
+    override = PronunciationOverride(stress_index=cast(int, stress_index))
+
+    with pytest.raises(ValueError, match="override stress_index must be an integer"):
+        validate_override(override, syllable_count=3)

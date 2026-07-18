@@ -39,8 +39,11 @@ def validate_override(
         raise ValueError("syllable_count must be positive")
     if override.stress_index is None and override.ipa is None and override.model_phonemes is None:
         raise ValueError("pronunciation override must change at least one field")
-    if override.stress_index is not None and not 0 <= override.stress_index < syllable_count:
-        raise ValueError("override stress_index must point to an existing syllable")
+    if override.stress_index is not None:
+        if type(override.stress_index) is not int:
+            raise ValueError("override stress_index must be an integer")
+        if not 0 <= override.stress_index < syllable_count:
+            raise ValueError("override stress_index must point to an existing syllable")
     if (override.ipa is None) != (override.model_phonemes is None):
         raise ValueError("ipa and model_phonemes must be supplied together")
     if override.model_phonemes is None:
