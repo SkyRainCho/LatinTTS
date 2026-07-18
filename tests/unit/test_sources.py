@@ -5,6 +5,7 @@ from latintts.sources import load_source_registry
 SOURCE_IDS = {
     "allen-greenough-accents",
     "ewtn-ecclesiastical-latin",
+    "iveson-roman-pronunciation-1964",
     "liber-usualis-1962",
     "librivox-public-domain",
     "perseus-lewis-short",
@@ -23,12 +24,17 @@ def test_registry_contains_normative_and_evaluation_sources() -> None:
     sources = load_source_registry()
     assert set(sources) == SOURCE_IDS
     assert sources["liber-usualis-1962"].authority_rank == 1
-    assert all(record.accessed_on == "2026-07-17" for record in sources.values())
+    assert sources["iveson-roman-pronunciation-1964"].accessed_on == "2026-07-18"
+    assert all(
+        record.accessed_on == "2026-07-17"
+        for source_id, record in sources.items()
+        if source_id != "iveson-roman-pronunciation-1964"
+    )
 
 
 def test_registry_has_unique_ids_and_nonempty_usage_terms() -> None:
     sources = load_source_registry()
-    assert len(sources) == 6
+    assert len(sources) == 7
     assert all(record.license_or_terms.strip() for record in sources.values())
     assert all(record.usage_note.strip() for record in sources.values())
 
@@ -37,6 +43,16 @@ def test_perseus_terms_use_current_license_version() -> None:
     terms = load_source_registry()["perseus-lewis-short"].license_or_terms
     assert "CC BY-SA 4.0" in terms
     assert "3.0" not in terms
+
+
+def test_iveson_source_has_the_direct_ph_rule_locator_and_restricted_terms() -> None:
+    source = load_source_registry()["iveson-roman-pronunciation-1964"]
+
+    assert source.authority_rank == 2
+    assert source.locator == "PDF page 1 (printed p. 14), lines 44-46"
+    assert source.license_or_terms == (
+        "Copyrighted journal article; reference use only; do not redistribute page content"
+    )
 
 
 def test_document_defines_canonical_token_and_lookup_layers() -> None:

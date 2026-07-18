@@ -1,19 +1,19 @@
 # 现代罗马教会式拉丁语发音规范基线
 
-状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化、音节划分和来源可追溯的重音解析已实现，G2P 尚未实现。
+状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化、音节划分、来源可追溯的重音解析和罗马教会式 G2P 已实现。
 
 ## 目标与非目标
 
 目标是为现代罗马教会式拉丁语建立确定、可审计的文本前端规范。每条规则应能追溯到来源登记中的稳定 `source_id` 和具体位置，并最终产生音节、重音、IPA 与规范音素。
 
-本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。下述 Unicode 与拼写规范化契约及音节划分已有实现；G2P 尚未实现，未决行为必须显式保留，不能由实现自行猜测。
+本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。下述 Unicode 与拼写规范化契约、音节划分和来源索引 G2P 已有实现；未决行为必须显式保留，不能由实现自行猜测。
 
 ## 来源优先级
 
 发生冲突时按来源登记中的 `authority_rank` 处理：
 
 1. `liber-usualis-1962` 是罗马式礼仪发音的主要规则来源。
-2. `ewtn-ecclesiastical-latin` 仅用于交叉核对解释措辞；`allen-greenough-accents` 提供重音规则；`perseus-lewis-short` 提供词汇级元音数量证据。
+2. `ewtn-ecclesiastical-latin` 仅用于交叉核对解释措辞；`iveson-roman-pronunciation-1964` 为 `ph -> /f/` 提供直接次级证据；`allen-greenough-accents` 提供重音规则；`perseus-lewis-short` 提供词汇级元音数量证据。
 3. `wikimedia-ecclesiastical-pronunciation` 仅是评测音频索引，逐文件核对许可后才能使用。
 4. `librivox-public-domain` 仅是候选语料索引，必须人工筛选读音并核对适用法域。
 
@@ -70,6 +70,7 @@ G2P/音节规则消费展开后的 canonical normalized token：到达本节前�
 | `cc` | `/t.tʃ/` | 前元音前清楚保留闭塞后接 `/tʃ/` | `liber-usualis-1962`, PDF lines 1303-1304 |
 | `sc` | `/ʃ/` | 前元音前 | `liber-usualis-1962`, PDF lines 1305-1306 |
 | `ch` | `/k/` | 包括 `e/i` 前 | `liber-usualis-1962`, PDF lines 1309-1310 |
+| `ph` | `/f/` | 来源明确写作 “PH — as the letter F”；不把 Liber PDF line 1351 的单字母 `P` 冒充直接证据 | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46 |
 | `g` | `/dʒ/` 或 `/g/` | 前元音前为 `/dʒ/`，其他位置为 `/g/` | `liber-usualis-1962`, PDF lines 1311-1314 |
 | `gn` | `/ɲ/` | 采用来源所述意大利语式软音的宽式表示 | `liber-usualis-1962`, PDF lines 1315-1318 |
 | `h` | `/k/` 或不输出 | `nihil`、`mihi` 及其派生词中为 `/k/`，其他位置不输出 | `liber-usualis-1962`, PDF lines 1319-1321 |
@@ -85,6 +86,8 @@ G2P/音节规则消费展开后的 canonical normalized token：到达本节前�
 | `b/d/f/k/l/m/n/p/q/v` | 对应基础辅音 | 阶段 1 保留独立、清楚的辅音发音 | `liber-usualis-1962`, PDF lines 1351-1354 |
 
 元音间 `s` 的完整音位输出在本基线中必须保持 `/s/`。来源的“轻微软化”不等同于已经证明的 `/z/`；只有获得更精确且不冲突的来源后，才能通过冲突决策记录改变该音位。
+
+G2P 扫描器按上表从特殊二合字到单字符执行当前位置最长匹配，并为每个输出音素保留 canonical word source index。它不做整词连续替换；因此 `ecce` 的 `cc` 分别把 `/t/` 归到 `ec`、把 `/t͡ʃ/` 归到 `ce`，输出 `ˈet.t͡ʃe`。`excelsis` 的 `xc` 同理跨 `ex/cel` 归属。macron 只参与 base-letter 折叠而不改变 source index；diaeresis 会阻止 `ae/oe/au/eu/ay`、辅音 `i`、`qu` 和 `ngu` 的合并规则。
 
 ## 音节划分
 
@@ -153,7 +156,7 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 例外必须以词条或受限上下文显式建模，并记录来源：
 
-- `nihil`、`mihi` 及其派生词中的 `h` 输出 `/k/`；其他 `h` 不输出。来源：`liber-usualis-1962`, PDF lines 1319-1321。
+- 打包例外表当前只收录 `nihil`、`mihi`，其中 `h` 输出 `/k/`；其他 `h` 不输出。派生词只有在逐条确认来源并加入例外表后才能获得 `/k/`，扫描器不得仅凭词形猜测。来源：`liber-usualis-1962`, PDF lines 1319-1321。
 - 感叹词 `hei` 的 `ei` 同属一个音节，其他词中的同形序列默认分开。来源：`liber-usualis-1962`, PDF lines 1290-1291。
 - `cui` 通常为两个音节；只有记录到具体赞美诗格律要求时才允许一音节覆盖。来源：`liber-usualis-1962`, PDF lines 1294-1297。
 - `ti` 规则在前一字母为 `s/x/t` 时不触发。来源：`liber-usualis-1962`, PDF lines 1335-1341。
@@ -161,21 +164,21 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 
 ## IPA 与规范音素表
 
-阶段 1 采用宽式 IPA 作为人类可读表示，并以同一符号集作为规范音素表的起点。这是**有来源的工程归一化**：表中来源给出音质、发音方式或重音规则，规范音素则把这些描述映射到稳定的宽式内部类别，并非声称来源逐字使用了相同 IPA。`/e/`、`/o/` 是有来源支持的宽式类别，不声称排除实际朗读中的开闭变体。
+阶段 1 采用宽式 IPA 作为人类可读表示，并以拆分后的同一符号集作为规范音素表的起点。这是**有来源的工程归一化**：表中来源给出音质、发音方式或重音规则，规范音素则把这些描述映射到稳定的宽式内部类别，并非声称来源逐字使用了相同 IPA。`/e/`、`/o/` 是有来源支持的宽式类别，不声称排除实际朗读中的开闭变体。
 
 | 类别 | 规范音素 | 来源 |
 | --- | --- | --- |
 | 元音 | `a e i o u` | `liber-usualis-1962`, PDF lines 1254-1272 |
-| 滑音 | `j` | `liber-usualis-1962`, PDF lines 1322-1324 |
-| 塞音 | `p b t d k g` | `liber-usualis-1962`, PDF lines 1298-1314, 1341-1342, 1351 |
-| 塞擦音 | `ts dz tʃ dʒ` | `liber-usualis-1962`, PDF lines 1301-1304, 1311-1312, 1335-1340, 1350 |
+| 滑音 | `i̯ u̯ j w` | `liber-usualis-1962`, PDF lines 1281-1294, 1322-1324 |
+| 塞音 | `p b t d k ɡ` | `liber-usualis-1962`, PDF lines 1298-1314, 1341-1342, 1351 |
+| 塞擦音 | `t͡s d͡z t͡ʃ d͡ʒ` | `liber-usualis-1962`, PDF lines 1301-1304, 1311-1312, 1335-1340, 1350 |
 | 擦音 | `f v s ʃ` | `liber-usualis-1962`, PDF lines 1305-1306, 1332-1334, 1351 |
-| 鼻音 | `m n ɲ` | `liber-usualis-1962`, PDF lines 1315-1318, 1351 |
+| 鼻音 | `m n ŋ ɲ` | `liber-usualis-1962`, PDF lines 1292-1294, 1315-1318, 1351 |
 | 流音 | `l r` | `liber-usualis-1962`, PDF lines 1325-1331, 1351 |
-| 组合 | `ks kʃ ksk`，以及按顺序保留的双辅音 | `liber-usualis-1962`, PDF lines 1343-1354 |
-| 韵律标记 | IPA 主重音 `ˈ`；音节边界 `.` 仅用于表示，不作为声学音素 | `liber-usualis-1962`, PDF lines 1231-1247；`allen-greenough-accents`, Section 12 |
+| 组合 | `x -> (k, s)`、`xc -> (k, ʃ)`，以及按顺序保留的双辅音；模型 token 不把组合粘成一个音素 | `liber-usualis-1962`, PDF lines 1343-1354 |
+| 韵律标记 | IPA 主重音 `ˈ` 在非首重读音节前替代该处的 `.`，如 `deˈʃen.dit`；模型序列仍显式输出独立 token `"."`, `"ˈ"` | `liber-usualis-1962`, PDF lines 1231-1247；`allen-greenough-accents`, Section 12 |
 
-规范音素输出必须与规则追踪信息分离：规则来源、例外来源和“轻微软化”等朗读注释不能伪装成音素。
+规范音素输出必须与规则追踪信息分离：规则来源、例外来源和“轻微软化”等朗读注释不能伪装成音素。`.` 与 `ˈ` 是模型输入格式的边界/韵律 token，不属于 `PHONEME_INVENTORY`；阶段 1 不实现 Piper 专用映射。
 
 ## 规则覆盖矩阵
 
@@ -191,6 +194,33 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | Unicode 与拼写规范化 | 工程文本契约 | phrase NFC、词级连字展开、lookup 变体和 span 追踪已实现 | 在 G2P 集成中保持四层文本契约 |
 | 词间音变 | 尚无规范规则 | 明确禁用 | 仅在新增不冲突来源后提案 |
 
+### G2P 实现规则与 locator
+
+下表列出阶段 1 当前实现的全部稳定 rule ID。正例只说明规则触发；反例用于锁定最长匹配或例外优先级。一个 locator 没有直接写出某工程 IPA token 时，表中只把来源描述映射到宽式音素，不声称来源使用了 IPA。
+
+| rule IDs | 条件与输出 | 正例 / 反例 | 来源 locator |
+| --- | --- | --- | --- |
+| `simple-a`, `simple-e`, `simple-i`, `simple-o`, `simple-u`, `y-as-i` | 单元音输出 `a/e/i/o/u`；`y -> i` | `pater`, `poëta`, `kyrie` | `liber-usualis-1962`, PDF lines 1254-1272, 1349 |
+| `ae-e`, `oe-e` | 无 diaeresis 的 base-letter `ae/oe -> e` | `caelum`, `poena` / `poëta` | `liber-usualis-1962`, PDF lines 1279-1280 |
+| `au-diphthong`, `eu-diphthong`, `ay-diphthong` | 无 diaeresis 时输出 `a,u̯`、`e,u̯`、`a,i̯` | `lauda`, `euge`, `Raymundus` / `aüla` | `liber-usualis-1962`, PDF lines 1281-1289 |
+| `qu-before-vowel`, `ngu-before-vowel` | 无 diaeresis 时 `qu -> k,w`；`ngu -> ŋ,ɡ,w` | `qui`, `sanguis` / `qüi`, `sangüis` | `liber-usualis-1962`, PDF lines 1292-1294 |
+| `c-before-front-vowel`, `c-hard` | `c` 在 `e/ae/oe/i/y` 前输出 `t͡ʃ`，否则 `k` | `caelum` / `caritas` | `liber-usualis-1962`, PDF lines 1301-1302, 1307-1308 |
+| `cc-before-front-vowel` | 同一前元音环境输出 `t,t͡ʃ`，并按两个 `c` 的 source index 分属音节 | `ecce -> ˈet.t͡ʃe` / `siccus` | `liber-usualis-1962`, PDF lines 1303-1304 |
+| `sc-before-front-vowel` | 同一前元音环境输出 `ʃ` | `descendit` / `scutum` | `liber-usualis-1962`, PDF lines 1305-1306 |
+| `ch-hard` | `ch -> k`，包括 `e/i` 前 | `Cham`, `machina` / 不走 `c-before-front-vowel` | `liber-usualis-1962`, PDF lines 1309-1310 |
+| `g-before-front-vowel`, `g-hard` | `g` 在前元音前输出 `d͡ʒ`，否则 `ɡ` | `regina` / `ego` | `liber-usualis-1962`, PDF lines 1311-1314 |
+| `gn-palatal` | `gn -> ɲ` | `regnum` / 不拆成 `ɡ,n` | `liber-usualis-1962`, PDF lines 1315-1318 |
+| `h-mihi-nihil`, `h-muted` | 仅打包例外或后续逐条确认的例外输出 `k`；普通 `h` 不输出 | `mihi`, `nihil` / `hora` | `liber-usualis-1962`, PDF lines 1319-1321 |
+| `i-consonantal`, `j-consonantal` | 词首接元音或元音间的 `i`，以及显式 `j` 输出 `j`；diaeresis 阻止辅音 `i` | `iam`, `major` / `aïa` | `liber-usualis-1962`, PDF lines 1322-1324 |
+| `simple-r` | `r -> r`，不能在辅音旁省略 | `carnis` | `liber-usualis-1962`, PDF lines 1325-1331 |
+| `simple-s` | 阶段 1 始终输出完整音位 `s` | `misericordia` / 不自动改写为 `z` | `liber-usualis-1962`, PDF lines 1332-1334 |
+| `ti-before-vowel`, `simple-t` | `ti` 后接元音且前一字母不是 `s/x/t` 时输出 `t͡s,i`；否则 `t,i` | `gratia` / `hostia`, `mixtio`, `attia` | `liber-usualis-1962`, PDF lines 1335-1341 |
+| `th-t` | `th -> t` | `Thomas` | `liber-usualis-1962`, PDF line 1342 |
+| `x-ks`, `xc-before-front-vowel` | `x -> k,s`；前元音前 `xc -> k,ʃ`，两个输出按 source index 分属音节 | `exercitus`, `excelsis` / `excussorum` | `liber-usualis-1962`, PDF lines 1343-1348 |
+| `z-dz` | `z -> d͡z` | `zizania` | `liber-usualis-1962`, PDF line 1350 |
+| `simple-b`, `simple-d`, `simple-f`, `simple-k`, `simple-l`, `simple-m`, `simple-n`, `simple-p`, `q-hard`, `simple-v` | 其余基础辅音逐字输出；无后续元音的 `q` 退化为 `k` | 基础拼写 / `qu` 优先走最长匹配 | `liber-usualis-1962`, PDF line 1351 |
+| `ph-f` | `ph -> f` | `phonascus`, `phasma` / 不拆为 `p` 加静音 `h` | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46 |
+
 ## 冲突决策记录
 
 | 日期 | 议题 | 决策 | 依据 |
@@ -199,5 +229,6 @@ penult 的轻重需要词汇数量或音节结构证据。`perseus-lewis-short` 
 | 2026-07-18 | Perseus Lewis and Short 条款版本 | 登记为 `CC BY-SA 4.0`，保留 Perseus 署名、可用性声明及修改回馈要求 | `perseus-lewis-short` 指定目录的当前 `README.md` 许可段；取代过时的 3.0 元数据 |
 | 2026-07-18 | 拼写变体在哪一层归并 | 原始 `surface/source_span` 不变；词级 canonical token 展开 `æ/œ` 并记录 transformation ID；lookup key 再归并 `j/i`、`v/u` | 使 `ae/oe` G2P 规则可消费连字，同时避免全局替换破坏拼写与 span |
 | 2026-07-18 | penult 轻重缺少证据时是否给出确定重音 | 否。仅生成候选并返回 `PRONUNCIATION_NEEDS_REVIEW` | `allen-greenough-accents`, Section 12 需要 penult 轻重；普通拼写不总能提供该证据 |
+| 2026-07-18 | `ph -> /f/` 的直接来源如何补齐 | 使用 Iveson 明确的 `PH — as the letter F`；`ph-f` 只引用该来源，词内其他基础规则仍分别引用 Liber，结果聚合实际命中的来源 | `iveson-roman-pronunciation-1964`, PDF page 1 (printed p. 14), lines 44-46；文首 lines 2-4 说明规则基于罗马省神职人员实际读音 |
 
 后续冲突记录必须包含日期、候选解释、采用结果和精确来源位置。改变既有规范音素属于可审计的规则版本变更。
