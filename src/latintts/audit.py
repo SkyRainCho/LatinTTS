@@ -100,12 +100,21 @@ def _parse_entry(raw: object) -> GoldEntry:
 
 
 def audit_gold_file(path: Path, policy: AuditPolicy = DEFAULT_POLICY) -> AuditReport:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return AuditReport(
+            total=0,
+            category_counts={},
+            errors=(AuditError("FILE_READ_ERROR", f"cannot read gold file: {path}"),),
+        )
+
     known_sources = set(load_source_registry())
     seen_words: set[str] = set()
     counts: Counter[str] = Counter()
     errors: list[AuditError] = []
     total = 0
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
         total += 1

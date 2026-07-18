@@ -7,7 +7,14 @@ from typing import Any
 
 import pytest
 
-from latintts.audit import AuditPolicy, GoldEntry, audit_gold_file, main
+from latintts.audit import (
+    AuditError,
+    AuditPolicy,
+    AuditReport,
+    GoldEntry,
+    audit_gold_file,
+    main,
+)
 
 GOLD_FIXTURE = Path("tests/fixtures/gold_pronunciations.jsonl")
 GOLD_FIELDS = (
@@ -49,8 +56,29 @@ def _error_codes(path: Path) -> list[str]:
     return [error.code for error in report.errors]
 
 
+def _file_read_error(path: Path) -> AuditReport:
+    return AuditReport(
+        total=0,
+        category_counts={},
+        errors=(AuditError("FILE_READ_ERROR", f"cannot read gold file: {path}"),),
+    )
+
+
 def test_gold_entry_has_the_fixed_exact_schema() -> None:
     assert tuple(field.name for field in fields(GoldEntry)) == GOLD_FIELDS
+
+
+def test_missing_file_returns_a_stable_file_read_error(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.jsonl"
+
+    assert audit_gold_file(missing) == _file_read_error(missing)
+
+
+def test_invalid_utf8_returns_a_stable_file_read_error(tmp_path: Path) -> None:
+    fixture = tmp_path / "invalid-utf8.jsonl"
+    fixture.write_bytes(b"\xff\xfe")
+
+    assert audit_gold_file(fixture) == _file_read_error(fixture)
 
 
 def test_gold_fixture_has_unique_approved_source_backed_entries() -> None:
@@ -289,3 +317,32 @@ def test_cli_failure_returns_one_and_prints_errors(
     assert exit_code == 1
     assert "INVALID_ROW: line 1:" in output
     assert "TOTAL_MINIMUM_NOT_MET: 1" in output
+
+
+def test_cli_missing_file_returns_one_without_a_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "missing.jsonl"
+
+    exit_code = main([str(missing)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == f"FILE_READ_ERROR: cannot read gold file: {missing}\n"
+    assert captured.err == ""
+
+
+def test_cli_invalid_utf8_returns_one_without_a_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = tmp_path / "invalid-utf8.jsonl"
+    fixture.write_bytes(b"\xff\xfe")
+
+    exit_code = main([str(fixture)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == f"FILE_READ_ERROR: cannot read gold file: {fixture}\n"
+    assert captured.err == ""
