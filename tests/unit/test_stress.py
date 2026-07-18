@@ -11,17 +11,142 @@ from latintts.syllables import syllabify
 PRONUNCIATION_DOCUMENT = (
     Path(__file__).parents[2] / "docs" / "pronunciation" / "roman-ecclesiastical.md"
 )
-SEED_STRESSES = {
-    "dominus": 0,
-    "regina": 1,
-    "maria": 1,
-    "gratia": 0,
-    "caelum": 0,
-    "alleluia": 2,
-    "magnificat": 1,
-    "misericordia": 3,
-    "benedictus": 2,
-    "excelsis": 1,
+SeedExpectation = tuple[tuple[str, ...], int, tuple[str, ...], tuple[str, ...]]
+SEED_EXPECTATIONS: dict[str, SeedExpectation] = {
+    "dominus": (
+        ("do", "mi", "nus"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n14699",
+            "key=dominus",
+            "orth=dŏmĭnus",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "regina": (
+        ("re", "gi", "na"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n40899",
+            "key=regina",
+            "orth=rēgīna",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "maria": (
+        ("ma", "ri", "a"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n28037",
+            "key=Maria1",
+            "orth=Mărī^a",
+            "sense I.1 Mary",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "gratia": (
+        ("gra", "ti", "a"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n19896",
+            "key=gratia",
+            "orth=grātĭa",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "caelum": (
+        ("cae", "lum"),
+        0,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n6042",
+            "key=caelum2",
+            "orth=caelum",
+            "Allen and Greenough Section 12, disyllables stress the first syllable",
+        ),
+    ),
+    "alleluia": (
+        ("al", "le", "lu", "ia"),
+        2,
+        (
+            "perseus-lewis-short",
+            "liber-usualis-1962",
+            "allen-greenough-accents",
+        ),
+        (
+            "entryFree id=n1926",
+            "key=alleluja",
+            "orth=allēlūja",
+            "PDF page 32 (printed xxxviii), J example",
+            "Latin form is unaccented alleluia",
+            "pronunciation approximation allelóoya supplies the acute stress evidence",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "magnificat": (
+        ("ma", "gni", "fi", "cat"),
+        1,
+        (
+            "perseus-lewis-short",
+            "liber-usualis-1962",
+            "allen-greenough-accents",
+        ),
+        (
+            "entryFree id=n27636",
+            "key=magnifico",
+            "orth=magnĭfĭco",
+            "PDF page 32 (printed xxxviii), GN example",
+            "prints Magníficat = Mah-nyee-fee-caht",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "misericordia": (
+        ("mi", "se", "ri", "cor", "di", "a"),
+        3,
+        (
+            "perseus-lewis-short",
+            "liber-usualis-1962",
+            "allen-greenough-accents",
+        ),
+        (
+            "entryFree id=n29266",
+            "key=misericordia",
+            "orth=mĭsĕrĭcordĭa",
+            "PDF page 32 (printed xxxviii), S example",
+            "prints misericórdia",
+            "Allen and Greenough Section 12",
+        ),
+    ),
+    "benedictus": (
+        ("be", "ne", "dic", "tus"),
+        2,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n5170",
+            "key=benedico",
+            "orth=bĕnĕdīco with principal part ctum",
+            "supports the inflected participle benedictus",
+            "Allen and Greenough Section 12 rule inference",
+            "closed penult dic ends in a consonant",
+        ),
+    ),
+    "excelsis": (
+        ("ex", "cel", "sis"),
+        1,
+        ("perseus-lewis-short", "allen-greenough-accents"),
+        (
+            "entryFree id=n16651",
+            "key=excelsus",
+            "orth=excelsus with inflection a, um",
+            "supports the inflected form excelsis",
+            "Allen and Greenough Section 12 rule inference",
+            "closed penult cel ends in a consonant",
+        ),
+    ),
 }
 
 
@@ -64,21 +189,17 @@ def _load_rows(monkeypatch: pytest.MonkeyPatch, *rows: dict[str, object]) -> Non
 def test_seed_lexicon_has_exact_source_backed_entries() -> None:
     lexicon = load_stress_lexicon()
 
-    assert set(lexicon) == set(SEED_STRESSES)
-    for lookup_key, stress_index in SEED_STRESSES.items():
+    assert set(lexicon) == set(SEED_EXPECTATIONS)
+    for lookup_key, expected in SEED_EXPECTATIONS.items():
+        syllables, stress_index, source_ids, note_fragments = expected
         entry = lexicon[lookup_key]
-        assert entry.syllables == syllabify(lookup_key)
+        assert entry.syllables == syllables == syllabify(lookup_key)
         assert entry.stress_index == stress_index
-        assert entry.source_ids
-        assert entry.note.strip()
+        assert entry.source_ids == source_ids
+        assert all(fragment in entry.note for fragment in note_fragments)
         assert not entry.is_exception
 
-    assert "entryFree id=n14699" in lexicon["dominus"].note
-    assert "entryFree id=n6042" in lexicon["caelum"].note
-    assert "PDF page 32 (printed xxxviii)" in lexicon["alleluia"].note
-    assert "PDF page 32 (printed xxxviii)" in lexicon["magnificat"].note
-    assert "closed penult" in lexicon["benedictus"].note
-    assert "closed penult" in lexicon["excelsis"].note
+    assert "prints allelúia" not in lexicon["alleluia"].note
 
 
 def test_override_wins_over_explicit_stress_and_lexicon() -> None:
@@ -189,6 +310,14 @@ def test_provably_heavy_penult_receives_stress(penult: str) -> None:
     assert decision.stress_index == 1
     assert decision.method is ResolutionMethod.RULE
     assert decision.applied_rule_ids == ("heavy-penult-stress",)
+
+
+def test_diaeresis_breaks_diphthong_for_penult_weight() -> None:
+    decision = resolve_stress("unlisted", ("a", "aë", "re"), {})
+
+    assert decision.stress_index == 0
+    assert decision.method is ResolutionMethod.CANDIDATE
+    assert decision.warnings[0].code == "PRONUNCIATION_NEEDS_REVIEW"
 
 
 def test_unknown_open_penult_returns_review_warning() -> None:

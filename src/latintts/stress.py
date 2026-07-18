@@ -5,6 +5,7 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
+from itertools import pairwise
 
 from latintts.domain import Diagnostic, ResolutionMethod, Severity
 from latintts.sources import load_source_registry
@@ -68,9 +69,15 @@ def load_stress_lexicon() -> dict[str, StressLexiconEntry]:
 
 
 def _is_heavy(syllable: str) -> bool:
-    folded = "".join(unicodedata.normalize("NFD", char)[0] for char in syllable)
+    decomposed = tuple(unicodedata.normalize("NFD", char) for char in syllable)
+    folded = "".join(char[0] for char in decomposed)
     has_macron = any(char in MACRON_VOWELS for char in syllable)
-    has_diphthong = any(pair in folded for pair in ("ae", "oe", "au", "eu", "ay"))
+    has_diphthong = any(
+        first[0] + second[0] in ("ae", "oe", "au", "eu", "ay")
+        and "\u0308" not in first
+        and "\u0308" not in second
+        for first, second in pairwise(decomposed)
+    )
     closes_with_consonant = folded[-1] not in PLAIN_VOWELS
     return has_macron or has_diphthong or closes_with_consonant
 
