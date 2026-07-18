@@ -1,12 +1,12 @@
 # 现代罗马教会式拉丁语发音规范基线
 
-状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化已实现，G2P 尚未实现。
+状态：阶段 1 规则基线。本文记录可追溯的发音政策；词级规范化和音节划分已实现，G2P 尚未实现。
 
 ## 目标与非目标
 
 目标是为现代罗马教会式拉丁语建立确定、可审计的文本前端规范。每条规则应能追溯到来源登记中的稳定 `source_id` 和具体位置，并最终产生音节、重音、IPA 与规范音素。
 
-本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。下述 Unicode 与拼写规范化契约已有实现；音节划分和 G2P 尚未实现，未决行为必须显式保留，不能由实现自行猜测。
+本阶段不覆盖古典拉丁语、地区性教会读音、歌唱时值或声学模型训练，也不从候选录音反推规范。下述 Unicode 与拼写规范化契约及音节划分已有实现；G2P 尚未实现，未决行为必须显式保留，不能由实现自行猜测。
 
 ## 来源优先级
 
@@ -49,6 +49,8 @@
 
 G2P/音节规则消费展开后的 canonical normalized token：到达本节前，`æ` 已展开为 `ae`，`œ` 已展开为 `oe`，并分别保留 `expand-ae-ligature` 或 `expand-oe-ligature` transformation ID。因此连字拼写与双字母拼写走同一条 `ae/oe` 规则，但原始 `surface` 和 `source_span` 不变。
 
+双元音判断逐码位比较 Unicode NFD base letter，而不是只比较字面拼写；因此 `ǣ` 展开所得 canonical `aē` 的 base-letter 序列仍是 `ae`，属于一个双元音核。任一相关元音带 diaeresis 时禁止合并，例如 `poëta -> ("po", "ë", "ta")`。音节边界始终是 canonical token 的 Python code-point 半开区间；`surface` 的原文跨度不在此阶段重算。
+
 | 环境 | 音节与输出政策 | 来源 |
 | --- | --- | --- |
 | 一般相邻元音，包括 `ou`、`ai` | 各保留自己的音质并分属不同音节 | `liber-usualis-1962`, PDF lines 1273-1278 |
@@ -86,13 +88,22 @@ G2P/音节规则消费展开后的 canonical normalized token：到达本节前�
 
 ## 音节划分
 
-| 规则 | 处理 | 来源 |
+音节器只接收 `NormalizedWord.normalized`，不重复规范化，也不读取词典。它先识别音节核，再在相邻音节核之间分配辅音；`syllable_ranges()` 返回 canonical Python code-point 半开区间，`syllabify()` 只按这些区间切片。
+
+| 规则或固定集合 | 处理与例子 | 来源 |
 | --- | --- | --- |
 | 每个音节都完整发音 | 不得吞掉或截短弱 penult，例如不得把 `Domine` 读成 `Domne` | `liber-usualis-1962`, PDF lines 1231-1247 |
-| 元音序列 | 使用“元音、双元音与相邻元音”一节的合并或分离规则 | `liber-usualis-1962`, PDF lines 1254-1297 |
-| 双辅音 | 辅音边界必须可感知，供后续音节器保留 | `liber-usualis-1962`, PDF lines 1352-1354 |
+| 元音核固定集合 | `a e i o u y ā ē ī ō ū ȳ`；附加符号不改变 base-letter 元音身份。`a/e/i/o/u` 与长短政策见元音段，`y` 作为元音 | `liber-usualis-1962`, PDF lines 1254-1272, 1349 |
+| 双元音固定集合 | `ae oe au eu ay`；按 Unicode base letters 比较，diaeresis 打断合并。`caelum -> ("cae", "lum")`、canonical `aēlum -> ("aē", "lum")`、`poëta -> ("po", "ë", "ta")` | `liber-usualis-1962`, PDF lines 1273-1289；Unicode/diaeresis 是 canonical token 工程契约 |
+| 辅音 `i` | 词首接元音或位于两个元音之间时作为下一音节的辅音起始；带 diaeresis 时仍为元音。`alleluia -> ("al", "le", "lu", "ia")` | `liber-usualis-1962`, PDF lines 1322-1324 |
+| `u` 滑音 | `q` 或 `ng` 后且后接元音时不另立音节核；带 diaeresis 时仍为元音，`qüi -> ("qü", "i")`。`qui -> ("qui",)`；来源明确规定的 `cui -> ("cu", "i")` 保持两音节 | `liber-usualis-1962`, PDF lines 1292-1297；diaeresis 是 canonical token 工程契约 |
+| 允许的 onset 固定集合 | `bl br cl cr dr fl fr gl gr pl pr tr qu gu ch ph th gn` 整体进入下一音节，例如 `patris -> ("pa", "tris")`。这是阶段 1 的确定性工程 whitelist；其特殊字母组的发音身份分别按辅音表保留 | `liber-usualis-1962`, PDF lines 1292-1294, 1309-1318, 1342, 1351-1354；`ewtn-ecclesiastical-latin`, pronunciation tables |
+| 单辅音 | 相邻音节核间的单辅音进入下一音节：`ave -> ("a", "ve")`、`gratia -> ("gra", "ti", "a")` | 阶段 1 确定性工程边界政策；元音与辅音身份来自 `liber-usualis-1962`, PDF lines 1254-1354 |
+| 双辅音 | 从中间分开并保留两个辅音位置：`ecce -> ("ec", "ce")` | `liber-usualis-1962`, PDF lines 1352-1354 |
+| 其他多辅音簇 | 仅把允许的最长 onset 后缀移到下一音节，否则只移最后一个辅音：`sanctus -> ("sanc", "tus")` | 阶段 1 确定性工程边界政策；辅音完整发音依据 `liber-usualis-1962`, PDF lines 1351-1354 |
+| 相邻独立元音核 | 核之间没有辅音时直接在两核之间分界：`gratia -> ("gra", "ti", "a")` | `liber-usualis-1962`, PDF lines 1273-1278 |
 
-除上述可直接追溯的边界外，单辅音和多辅音簇如何跨音节分配尚未确定。实现音节器前必须以独立测试和来源补齐，不能从拼写自行推断。
+`syllable_ranges("poëta") == ((0, 2), (2, 3), (3, 5))` 展示 canonical code-point 半开区间契约。无音节核的输入会失败并报告 `word contains no vowel nucleus`；调用方必须先完成词级 canonical 规范化。
 
 ## 重音
 

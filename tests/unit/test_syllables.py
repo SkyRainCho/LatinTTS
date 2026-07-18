@@ -1,0 +1,45 @@
+import pytest
+
+from latintts.normalization import normalize_word
+from latintts.syllables import syllabify, syllable_ranges
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("ave", ("a", "ve")),
+        ("gratia", ("gra", "ti", "a")),
+        ("ecce", ("ec", "ce")),
+        ("sanctus", ("sanc", "tus")),
+        ("patris", ("pa", "tris")),
+        ("caelum", ("cae", "lum")),
+        ("alleluia", ("al", "le", "lu", "ia")),
+        ("cui", ("cu", "i")),
+        ("qui", ("qui",)),
+        ("poëta", ("po", "ë", "ta")),
+    ],
+)
+def test_syllabify_source_backed_examples(word: str, expected: tuple[str, ...]) -> None:
+    assert syllabify(word) == expected
+
+
+def test_syllable_ranges_are_canonical_code_point_half_open_ranges() -> None:
+    assert syllable_ranges("poëta") == ((0, 2), (2, 3), (3, 5))
+
+
+def test_diaeresis_breaks_u_glide() -> None:
+    assert syllabify("qüi") == ("qü", "i")
+
+
+@pytest.mark.parametrize("surface", ["ǣlum", "æ\u0304lum"])
+def test_ligature_surface_forms_have_equivalent_canonical_ranges(surface: str) -> None:
+    canonical = normalize_word(surface).normalized
+
+    assert canonical == "aēlum"
+    assert syllable_ranges(canonical) == ((0, 2), (2, 5))
+    assert syllabify(canonical) == ("aē", "lum")
+
+
+def test_syllable_ranges_rejects_words_without_a_vowel_nucleus() -> None:
+    with pytest.raises(ValueError, match="word contains no vowel nucleus"):
+        syllable_ranges("brrr")
