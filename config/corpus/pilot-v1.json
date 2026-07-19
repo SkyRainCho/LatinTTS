@@ -1,0 +1,44 @@
+{
+  "schema_version": "1",
+  "corpus_version": "corpus-v1",
+  "analysis": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "codec": "pcm_s16le"
+  },
+  "vad": {
+    "backend": "silero-vad",
+    "model_version": "6.2.1",
+    "threshold": 0.5,
+    "min_speech_ms": 250,
+    "min_silence_ms": 100,
+    "window_samples": 512
+  },
+  "pause": {
+    "profile_id": "pause-profile-v1",
+    "minimum_gap_ms": 100,
+    "minimum_gap_count": 4,
+    "separation_ratio": 1.8,
+    "maximum_iterations": 50
+  },
+  "pairing": {
+    "minimum_duration_ratio": 0.65,
+    "maximum_duration_ratio": 1.35,
+    "minimum_score_margin": 0.02
+  },
+  "alignment": {
+    "backend": "mms-ctc",
+    "model_id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
+    "model_revision": "f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+    "language": "lat",
+    "romanize": true,
+    "split_size": "word",
+    "star_frequency": "edges",
+    "window_seconds": 30,
+    "context_seconds": 2,
+    "batch_size": 4,
+    "dtype": "float16",
+    "device": "cuda",
+    "license": "CC-BY-NC-4.0"
+  }
+}
