@@ -40,11 +40,11 @@ Commit subject: `feat: add corpus human review workflow`
 - Followed RED -> GREEN from the required missing-module failure through TextGrid round-trip and
   rejection cases, replay, export, import, CLI, audit ordering, correction, idempotency, conflict,
   containment/hash, nested schema, and transcript-layer regressions.
-- Focused review suites: **137 passed, 3 skipped**. The three focused skips are the
+- Focused review suites: **138 passed, 3 skipped**. The three focused skips are the
   review root/group/file alias tests that require unavailable Windows symlink privilege.
-- Full suite with literal `precision = 2` / `fail_under = 95.00`: **1,304 passed,
-  9 skipped**, total coverage **95.03%** (`5,730` statements, `285` missed);
-  `review.py` coverage is **95.28%**.
+- Full suite with literal `precision = 2` / `fail_under = 95.00`: **1,305 passed,
+  9 skipped**, total coverage **95.01%** (`5,734` statements, `286` missed);
+  `review.py` coverage is **95.21%**.
   All skips are existing Windows tests requiring unavailable file/directory symlink privilege.
 - Ruff check: pass. Ruff format check: 69 files already formatted. Strict `mypy src`: pass.
 - Gold audit: `gold-audit: PASS total=351 errors=0`.
@@ -86,9 +86,12 @@ below are abbreviated Git object IDs:
   correction validation, legal suffix validation, and canonical automatic-pairing reads.
 - `2b4ac1c`: read-only correction-recovery preflight before journal or pairing writes, including
   prospective in-memory journal validation for missing processing transitions.
+- `66c4c51`: whitespace-preserving recovery for a durable correction journal whose processing
+  transition is still missing; the new transition binds and validates the exact durable raw bytes,
+  while planned new journal bytes must be durable before transition persistence.
 
-The final remediation suite collected 1,313 tests: **1,304 passed, 9 skipped**, with
-**95.03% total coverage** (`5,730` statements, `285` missed). Ruff check and format check,
+The final remediation suite collected 1,314 tests: **1,305 passed, 9 skipped**, with
+**95.01% total coverage** (`5,734` statements, `286` missed). Ruff check and format check,
 strict `mypy src`, the gold audit (`gold-audit: PASS total=351 errors=0`), and
 `git diff --check` all pass. The nine skips are Windows-host tests requiring unavailable
 file or directory symlink privilege; three of those are the new review root/group/file

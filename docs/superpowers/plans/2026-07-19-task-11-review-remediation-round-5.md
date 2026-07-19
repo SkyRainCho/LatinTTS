@@ -80,19 +80,19 @@ git commit -m "fix: bind recovery to durable review bytes"
 - Consumes: fresh focused/full test and quality-gate outputs.
 - Produces: actual Task 11 verification statistics and remediation history.
 
-- [ ] **Step 1: Run focused review tests and full coverage suite**
+- [x] **Step 1: Run focused review tests and full coverage suite**
 
 Run review-focused pytest, then full pytest with `--cov-fail-under=95`. Record exact pass/skip counts and coverage.
 
-- [ ] **Step 2: Run quality gates**
+- [x] **Step 2: Run quality gates**
 
 Run Ruff check/format, strict mypy, gold audit, and `git diff --check`.
 
-- [ ] **Step 3: Update the report with actual results**
+- [x] **Step 3: Update the report with actual results**
 
 Record the fifth remediation, RED symptom, GREEN behavior, all test counts, skip reasons, and coverage values.
 
-- [ ] **Step 4: Commit and verify final branch state**
+- [x] **Step 4: Commit and verify final branch state**
 
 ```powershell
 git add .superpowers/sdd/task-11-report.md docs/superpowers/plans/2026-07-19-task-11-review-remediation-round-5.md
