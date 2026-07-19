@@ -44,3 +44,7 @@ allowed-confusables = ["ˈ"]
 python_version = "3.10"
 strict = true
 packages = ["latintts"]
+
+[tool.coverage.report]
+precision = 2
+fail_under = 95.00

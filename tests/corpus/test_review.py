@@ -345,6 +345,17 @@ def test_review_entity_id_is_collision_free_across_recordings_and_group_boundari
     assert len(values) == 4
 
 
+@pytest.mark.parametrize(
+    "args",
+    (("", "group", 1), ("recording", "", 1), ("recording", "group", 3)),
+)
+def test_review_entity_id_rejects_invalid_identity_components(
+    args: tuple[object, object, object],
+) -> None:
+    with pytest.raises(ValueError, match=r"recording_id|repetition_group_id|take_index"):
+        review_module._review_entity_id(*args)  # type: ignore[arg-type]
+
+
 def test_review_event_from_dict_requires_exact_fields() -> None:
     raw = ReviewEvent(
         "1",
@@ -475,6 +486,47 @@ def test_textgrid_reader_converts_critical_truncation_to_value_error(
         read_textgrid(path)
 
 
+def test_textgrid_reader_rejects_missing_word_interval_count(tmp_path: Path) -> None:
+    path = tmp_path / "missing-count.TextGrid"
+    write_textgrid(
+        path,
+        duration_seconds=1.0,
+        take_start=0.0,
+        take_end=1.0,
+        words=(ReviewedWordSpan("Pater", 0.2, 0.8),),
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    count = next(
+        index
+        for index, line in enumerate(lines)
+        if "intervals: size" in line
+        and index > next(item for item, value in enumerate(lines) if 'name = "words"' in value)
+    )
+    path.write_text("\n".join(lines[:count]) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="interval count"):
+        read_textgrid(path)
+
+
+def test_recording_decoder_rejects_non_object_metadata() -> None:
+    with pytest.raises(TypeError, match="metadata"):
+        review_module._decode_recording(
+            {
+                "schema_version": "1",
+                "recording_id": "recording",
+                "relative_path": "raw/spoken/recording.wav",
+                "sha256": "0" * 64,
+                "content_type": "spoken",
+                "title_or_citation": "recording",
+                "speaker_id": "speaker",
+                "rights_id": "rights",
+                "notes": "",
+                "metadata": None,
+                "state": "INGESTED",
+            }
+        )
+
+
 def test_canonical_descendant_accepts_only_direct_unaliased_path(tmp_path: Path) -> None:
     root = tmp_path / "review"
     group = root / "group"
@@ -553,6 +605,30 @@ def test_replay_rejects_invalid_container_and_missing_nested_fields() -> None:
         replay_review_events({"words": []}, (word,))
     with pytest.raises(ValueError, match="word field"):
         replay_review_events({"words": [{}]}, (word,))
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        {"segment_start": 1.0, "segment_end": 1.0},
+        {"review_decision": "maybe"},
+        {"words": {}},
+        {"words": [None]},
+        {"words": [{"text": "", "start_seconds": 0.1, "end_seconds": 0.2}]},
+    ),
+)
+def test_effective_review_value_validator_rejects_each_nested_invariant(
+    values: dict[str, object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        review_module._validate_effective_review_values(values)
+
+
+def test_replay_helpers_reject_invalid_expected_entity_and_absent_top_level_field() -> None:
+    with pytest.raises(TypeError, match="expected_entity_id"):
+        replay_review_events({}, (), expected_entity_id="")
+    with pytest.raises(ValueError, match="absent"):
+        review_module._review_field_value({}, "segment_end")
 
 
 @pytest.mark.parametrize(

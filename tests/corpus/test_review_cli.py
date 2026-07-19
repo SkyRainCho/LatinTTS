@@ -16,7 +16,7 @@ from latintts.corpus import store
 from latintts.corpus.cli import align_corpus, main, pair_corpus
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure
-from latintts.corpus.pairing import pairing_from_dict
+from latintts.corpus.pairing import pairing_from_dict, pairing_to_dict
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.review import (
     ReviewedWordSpan,
@@ -260,13 +260,73 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     assert "&lt;Pater &amp; &quot;Noster&quot;&gt;" in html
 
 
+@pytest.mark.parametrize(
+    "case",
+    (
+        "pairing-row-count",
+        "alignment-row-count",
+        "alignment-identity",
+        "alignment-takes-type",
+        "alignment-take-type",
+        "alignment-duplicate-take",
+        "pairing-review-outcome",
+        "alignment-missing-take",
+        "alignment-take-mismatch",
+        "candidate-missing",
+    ),
+)
+def test_review_export_rejects_strict_pairing_alignment_artifact_drift(
+    tmp_path: Path, case: str
+) -> None:
+    paths, config = _aligned_project(tmp_path)
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    pairing_path = run_directory / "pairing.json"
+    alignment_path = run_directory / "alignment.json"
+    if case == "pairing-row-count":
+        write_jsonl_atomic(pairing_path, ())
+    elif case == "alignment-row-count":
+        write_jsonl_atomic(alignment_path, ())
+    elif case == "candidate-missing":
+        pairing = pairing_from_dict(read_jsonl(pairing_path)[0])
+        take = next(outcome.group.takes[0] for outcome in pairing.groups if outcome.group)
+        paths.resolve_local(take.audio_relative_path).unlink()
+    elif case == "pairing-review-outcome":
+        pairing = pairing_from_dict(read_jsonl(pairing_path)[0])
+        changed = replace(pairing.groups[0], status="review", group=None)
+        pairing = replace(
+            pairing,
+            groups=(changed, *pairing.groups[1:]),
+            integrity_sha256="",
+        )
+        write_jsonl_atomic(pairing_path, (pairing_to_dict(pairing),))
+        alignment = read_jsonl(alignment_path)[0]
+        alignment["pairing_artifact_sha256"] = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+        write_jsonl_atomic(alignment_path, (alignment,))
+    else:
+        alignment = read_jsonl(alignment_path)[0]
+        if case == "alignment-identity":
+            alignment["status"] = "failed"
+        elif case == "alignment-takes-type":
+            alignment["takes"] = {}
+        elif case == "alignment-take-type":
+            alignment["takes"][0] = None
+        elif case == "alignment-duplicate-take":
+            alignment["takes"].append(deepcopy(alignment["takes"][0]))
+        elif case == "alignment-missing-take":
+            alignment["takes"].pop()
+        else:
+            alignment["takes"][0]["unit_id"] = "mismatched-unit"
+        write_jsonl_atomic(alignment_path, (alignment,))
+
+    with pytest.raises((TypeError, ValueError), match=r"pairing|alignment|candidate"):
+        export_review_bundle(paths, config)
+
+
 def test_review_wav_duration_uses_actual_44100hz_frame_count_at_rounding_edge(
     tmp_path: Path,
 ) -> None:
     paths, _ = _set_up(tmp_path)
-    recording = review_module._decode_recording(
-        read_jsonl(paths.manifests / "recordings.jsonl")[0]
-    )
+    recording = review_module._decode_recording(read_jsonl(paths.manifests / "recordings.jsonl")[0])
     recording = replace(
         recording,
         metadata=replace(recording.metadata, sample_rate=44_100),
@@ -303,6 +363,24 @@ def test_review_wav_duration_uses_actual_44100hz_frame_count_at_rounding_edge(
     ) / 44_100
     assert actual_duration == 6 / 44_100
     assert endpoint_rounding_duration == 5 / 44_100
+
+
+@pytest.mark.parametrize("case", ("format", "invalid-container"))
+def test_review_wav_duration_rejects_invalid_trusted_media(tmp_path: Path, case: str) -> None:
+    paths, _ = _set_up(tmp_path)
+    recording = review_module._decode_recording(read_jsonl(paths.manifests / "recordings.jsonl")[0])
+    path = tmp_path / "invalid.wav"
+    if case == "format":
+        with wave.open(str(path), "wb") as writer:
+            writer.setnchannels(recording.metadata.channels)
+            writer.setsampwidth(2)
+            writer.setframerate(recording.metadata.sample_rate)
+            writer.writeframes(b"\0\0")
+    else:
+        path.write_bytes(b"not a wave file")
+
+    with pytest.raises(ValueError, match="WAV"):
+        review_module._review_wav_duration(path, recording)
 
 
 def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
@@ -418,9 +496,7 @@ def test_pairing_correction_retry_recovers_after_event_before_recordings_replace
     run_directory = paths.alignments / "runs" / config.digest / "rec-1"
     assert read_jsonl(recordings_path)[0]["state"] == "SEGMENTED"
     processing_path = run_directory.parent / "processing-events.jsonl"
-    paired_events = [
-        row for row in read_jsonl(processing_path) if row["target_state"] == "PAIRED"
-    ]
+    paired_events = [row for row in read_jsonl(processing_path) if row["target_state"] == "PAIRED"]
     assert len(paired_events) == 1
     bound_review_sha256 = paired_events[0]["input_sha256s"][3]
 
@@ -456,9 +532,7 @@ def test_pairing_correction_retry_recovers_after_journal_before_automatic_pairin
     monkeypatch.setattr(
         review_module,
         "_write_bytes_atomic",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("after review journal")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("after review journal")),
     )
 
     with pytest.raises(RuntimeError, match="after review journal"):
@@ -597,13 +671,84 @@ def test_ordinary_review_import_rejects_invalid_pairing_correction_history(
         )
         rows[0] = event.to_dict()
     else:
-        shutil.copyfile(
-            run_directory / "pairing.json", run_directory / "pairing-automatic.json"
-        )
+        shutil.copyfile(run_directory / "pairing.json", run_directory / "pairing-automatic.json")
     write_jsonl_atomic(review_path, rows)
 
     with pytest.raises(ValueError, match="pairing correction"):
         import_review_bundle(paths, config)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "original-type",
+        "events-type",
+        "identity",
+        "duplicate-unit",
+        "automatic-selected-changed",
+        "corrected-evidence-invalid",
+        "orphan-entity",
+    ),
+)
+def test_pairing_correction_event_validator_rejects_structural_drift(
+    tmp_path: Path, case: str
+) -> None:
+    paths, _, _, run_directory = _corrected_pairing_project(tmp_path)
+    original = pairing_from_dict(read_jsonl(run_directory / "pairing-automatic.json")[0])
+    corrected = pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0])
+    events = tuple(
+        review_module.ReviewEvent.from_dict(row)
+        for row in read_jsonl(paths.manifests / "review.jsonl")
+    )
+    if case == "original-type":
+        original = None  # type: ignore[assignment]
+    elif case == "events-type":
+        events = list(events)  # type: ignore[assignment]
+    elif case == "identity":
+        corrected = replace(corrected, recording_id="different-recording", integrity_sha256="")
+    elif case == "duplicate-unit":
+        corrected = replace(
+            corrected,
+            groups=(*corrected.groups, corrected.groups[0]),
+            integrity_sha256="",
+        )
+    elif case == "automatic-selected-changed":
+        index = next(
+            index for index, outcome in enumerate(original.groups) if outcome.status == "selected"
+        )
+        changed = replace(corrected.groups[index], status="review", group=None)
+        corrected = replace(
+            corrected,
+            groups=(*corrected.groups[:index], changed, *corrected.groups[index + 1 :]),
+            integrity_sha256="",
+        )
+    elif case == "corrected-evidence-invalid":
+        index = next(
+            index for index, outcome in enumerate(original.groups) if outcome.status == "review"
+        )
+        changed = replace(corrected.groups[index], status="review", group=None)
+        corrected = replace(
+            corrected,
+            groups=(*corrected.groups[:index], changed, *corrected.groups[index + 1 :]),
+            integrity_sha256="",
+        )
+    else:
+        prior = events[0]
+        orphan = review_module._new_review_event(
+            "pairing:5:rec-1:6:orphan",
+            "pairing_selected_split",
+            None,
+            prior.after,
+            {
+                "reason": prior.reason,
+                "reviewer": prior.reviewer,
+                "reviewed_at": prior.reviewed_at,
+            },
+        )
+        events = (orphan,)
+
+    with pytest.raises((TypeError, ValueError), match=r"pairing|correction|corrected"):
+        review_module.validate_pairing_correction_events(original, corrected, events)
 
 
 @pytest.mark.parametrize(

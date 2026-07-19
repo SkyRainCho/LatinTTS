@@ -1724,8 +1724,7 @@ def _pairing_review_snapshot_sha256(
         and event.previous_state is CorpusState.SEGMENTED
         and event.target_state is CorpusState.PAIRED
         and len(event.input_sha256s) == 4
-        and event.input_sha256s[:3]
-        == (recording.sha256, automatic_sha256, corrected_sha256)
+        and event.input_sha256s[:3] == (recording.sha256, automatic_sha256, corrected_sha256)
         and event.config_sha256 == config.digest
         and event.tool_versions == tool_versions
         and event.result == "success"
@@ -1901,10 +1900,7 @@ def _validate_existing_pairing_corrections(
         correction_events = validate_pairing_correction_events(automatic, corrected, events)
         legal_event_ids.update(event.review_event_id for event in correction_events)
     for event in events:
-        if (
-            event.field == "pairing_selected_split"
-            and event.review_event_id not in legal_event_ids
-        ):
+        if event.field == "pairing_selected_split" and event.review_event_id not in legal_event_ids:
             raise ValueError("pairing correction history contains an illegal entity")
     return frozenset(legal_event_ids)
 

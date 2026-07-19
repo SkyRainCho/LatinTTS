@@ -1682,9 +1682,7 @@ def pair_corpus(
                     run_directory,
                 )
             except (KeyError, OSError, TypeError, ValueError) as error:
-                raise CorpusFailure(
-                    "CACHE_ARTIFACT_INVALID", "pairing cache is invalid"
-                ) from error
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is invalid") from error
         pairing = pair_recording(
             recording_id,
             windows,
