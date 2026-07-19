@@ -28,11 +28,11 @@
 - Produces a correction recovery state reconstructed from `pairing-automatic.json`, deterministic `pairing_selected_split` events, current corrected `pairing.json`, and any existing processing event.
 - Retry writes only the missing downstream checkpoint and rejects any byte or identity drift.
 
-- [ ] Add failure-injection tests for an exception after corrected `pairing.json` replacement and after processing-event replacement but before `recordings.jsonl` replacement.
-- [ ] Run both tests and verify SEGMENTED retry currently rejects the corrected artifact as stale.
-- [ ] Implement strict checkpoint reconstruction and resume the missing processing/state writes.
-- [ ] Run correction tests and verify both retries reach exactly one PAIRED transition without rewriting review history.
-- [ ] Commit the recovery fix.
+- [x] Add failure-injection tests for an exception after corrected `pairing.json` replacement and after processing-event replacement but before `recordings.jsonl` replacement.
+- [x] Run both tests and verify SEGMENTED retry currently rejects the corrected artifact as stale.
+- [x] Implement strict checkpoint reconstruction and resume the missing processing/state writes.
+- [x] Run correction tests and verify both retries reach exactly one PAIRED transition without rewriting review history.
+- [x] Commit the recovery fix.
 
 ### Task 2: Idempotent repeated pair and immutable review snapshot binding
 
@@ -46,10 +46,10 @@
 - Repeated `pair_corpus()` accepts a human-reviewed selection only after validating the original pairing, deterministic correction events, corrected pairing, and PAIRED processing event.
 - Alignment validates the correction event hash and requires the processing event's fourth input digest to equal an immutable byte prefix of current `review.jsonl`; later valid appended events remain allowed.
 
-- [ ] Add failing repeated-pair, event-ID tamper, prefix tamper, and valid-suffix tests.
-- [ ] Add shared deterministic correction-event and review-prefix validators.
-- [ ] Permit reviewed selection in pairing cache validation only through the validated correction context.
-- [ ] Run pair/align tests and commit.
+- [x] Add failing repeated-pair, event-ID tamper, prefix tamper, and valid-suffix tests.
+- [x] Add shared deterministic correction-event and review-prefix validators.
+- [x] Permit reviewed selection in pairing cache validation only through the validated correction context.
+- [x] Run pair/align tests and commit.
 
 ### Task 3: Validate pairing correction history during normal review import
 
@@ -60,9 +60,9 @@
 **Interfaces:**
 - Normal import reconstructs the exact legal pairing entity/split map from selected recordings' `pairing-automatic.json` artifacts and rejects orphan, duplicate, unsaved, or mismatched correction events.
 
-- [ ] Add parameterized failing histories for orphan identity, duplicate correction, unsaved split, and corrected-pair mismatch.
-- [ ] Implement one strict correction-history validator used before take-event replay.
-- [ ] Run focused tests and commit.
+- [x] Add parameterized failing histories for orphan identity, duplicate correction, unsaved split, and corrected-pair mismatch.
+- [x] Implement one strict correction-history validator used before take-event replay.
+- [x] Run focused tests and commit.
 
 ### Task 4: Frame-derived review duration
 
@@ -75,9 +75,9 @@
 - `_export_review_audio()` returns validated provenance plus duration computed as actual WAV frames divided by trusted sample rate.
 - Export and import compare TextGrid duration to this exact frame-derived value.
 
-- [ ] Add a failing 44.1 kHz test whose 16 kHz boundary conversion rounds by one frame.
-- [ ] Read the trusted WAV header after derivation and use its frame count as the sole duration source.
-- [ ] Run audio/review tests and commit.
+- [x] Add a failing 44.1 kHz test whose 16 kHz boundary conversion rounds by one frame.
+- [x] Read the trusted WAV header after derivation and use its frame count as the sole duration source.
+- [x] Run audio/review tests and commit.
 
 ### Task 5: Literal coverage, report, and final gates
 
@@ -89,11 +89,11 @@
 **Interfaces:**
 - Coverage configuration sets `precision = 2` and `fail_under = 95.00`.
 
-- [ ] Add valuable negative/recovery tests until exact covered statements divided by total statements is at least 95.00%.
-- [ ] Run focused pairing/review/CLI tests.
-- [ ] Run full pytest coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
-- [ ] Update the report with exact two-decimal-or-better coverage and follow-up SHAs; correct entity-ID wording.
-- [ ] Commit documentation/configuration and preserve the worktree without push or merge.
+- [x] Add valuable negative/recovery tests until exact covered statements divided by total statements is at least 95.00%.
+- [x] Run focused pairing/review/CLI tests.
+- [x] Run full pytest coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
+- [x] Update the report with exact two-decimal-or-better coverage and follow-up SHAs; correct entity-ID wording.
+- [x] Commit documentation/configuration and preserve the worktree without push or merge.
 
 ## Self-Review
 

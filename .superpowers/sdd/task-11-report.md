@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete against baseline `33afda0`.
+Complete against baseline commit `33afda0` (abbreviated Git object ID).
 
 Commit subject: `feat: add corpus human review workflow`
 
@@ -39,8 +39,10 @@ Commit subject: `feat: add corpus human review workflow`
 - Followed RED -> GREEN from the required missing-module failure through TextGrid round-trip and
   rejection cases, replay, export, import, CLI, audit ordering, correction, idempotency, conflict,
   containment/hash, nested schema, and transcript-layer regressions.
-- Focused review suite: **54 passed**; `review.py` coverage **95%**.
-- Full suite with `--cov-fail-under=95`: **1220 passed, 6 skipped**, total coverage **95.03%**.
+- Focused review suites: **129 passed**.
+- Full suite with literal `precision = 2` / `fail_under = 95.00`: **1,293 passed,
+  9 skipped**, total coverage **95.01%** (`5,686` statements, `284` missed);
+  `review.py` coverage is **95.16%**.
   All skips are existing Windows tests requiring unavailable file/directory symlink privilege.
 - Ruff check: pass. Ruff format check: 69 files already formatted. Strict `mypy src`: pass.
 - Gold audit: `gold-audit: PASS total=351 errors=0`.
@@ -59,7 +61,8 @@ Commit subject: `feat: add corpus human review workflow`
 
 ## Independent review remediation
 
-All Critical and Important follow-up findings were remediated in focused commits:
+All Critical and Important follow-up findings were remediated in focused commits. Commit IDs
+below are abbreviated Git object IDs:
 
 - `ac8ee4e`: canonical component-walking review paths and bounded TextGrid parsing.
 - `c390e22`: trusted PCM24 review derivation through `extract_review_wav()`, complete
@@ -72,9 +75,14 @@ All Critical and Important follow-up findings were remediated in focused commits
 - `a1e1167`: independent per-recording completion and state advancement.
 - `340e2d3`: correction-schema and human-metadata regression coverage required by the
   repository-wide coverage gate.
+- `04a0ed6`: crash recovery across review-journal, automatic-pairing, corrected-pairing,
+  processing-event, and recording-manifest checkpoints.
+- `d82c52b`: strict repeated-pair validation, deterministic correction-event and immutable-prefix
+  binding, ordinary-import legal entity validation, and actual-WAV-frame review duration.
+- `78a416d`: two-decimal coverage enforcement plus structural and media-boundary regression tests.
 
-The final remediation suite collected 1,260 tests: **1,251 passed, 9 skipped**, with
-**95% total coverage** (`5,534` statements, `298` missed). Ruff check and format check,
+The final remediation suite collected 1,302 tests: **1,293 passed, 9 skipped**, with
+**95.01% total coverage** (`5,686` statements, `284` missed). Ruff check and format check,
 strict `mypy src`, the gold audit (`gold-audit: PASS total=351 errors=0`), and
 `git diff --check` all pass. The nine skips are Windows-host tests requiring unavailable
 file or directory symlink privilege; three of those are the new review root/group/file
