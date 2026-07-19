@@ -399,5 +399,10 @@ class ReviewEvent:
         _require_nonempty_string(self.reviewer, "reviewer")
         _require_timestamp(self.reviewed_at, "reviewed_at")
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> ReviewEvent:
+        require_exact_fields(raw, frozenset(field.name for field in fields(cls)), "review event")
+        return cls(**raw)
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

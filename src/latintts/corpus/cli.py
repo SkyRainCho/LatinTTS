@@ -49,6 +49,7 @@ from latintts.corpus.records import (
     advance_recording,
     require_exact_fields,
 )
+from latintts.corpus.review import export_review_bundle, import_review_bundle
 from latintts.corpus.selection import PilotSelection, select_pilot
 from latintts.corpus.store import (
     persist_recording_transition,
@@ -2036,6 +2037,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
     )
+    export_review_parser = subparsers.add_parser("export-review")
+    export_review_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
+    import_review_parser = subparsers.add_parser("import-review")
+    import_review_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
@@ -2089,6 +2102,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
         return 0
+    if args.command in {"export-review", "import-review"}:
+        paths = CorpusPaths.from_project_root(args.project_root)
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            paths.ensure_layout()
+            if args.command == "export-review":
+                export_review_bundle(paths, config)
+                return 0
+            return 0 if import_review_bundle(paths, config) else 1
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
+        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
     if args.command == "align":
         paths = CorpusPaths.from_project_root(args.project_root)
         config_path = args.config
