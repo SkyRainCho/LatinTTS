@@ -240,6 +240,7 @@ def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
     decision = json.loads(decision_path.read_text(encoding="utf-8"))
     assert decision["schema_version"] == "2"
     assert decision["pairing_selections"][0]["split_sample"] is None
+    assert export_review_bundle(paths, config) == (correction,)
     assert not import_review_bundle(paths, config)
     assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "SEGMENTED"
 
@@ -269,6 +270,94 @@ def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
     groups = export_review_bundle(paths, config)
     assert len(groups) == 3
     assert all(group.name != "pairing-correction" for group in groups)
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "missing-file",
+        "extra-file",
+        "automatic-stale",
+        "decision-identity",
+        "selections-not-list",
+        "row-not-object",
+        "unit-type",
+        "unreviewed-metadata",
+        "split-type",
+        "missing-reason",
+        "reviewed-at-type",
+        "reviewed-at-invalid",
+        "reviewed-at-naive",
+        "unknown-unit",
+    ),
+)
+def test_pairing_correction_rejects_schema_metadata_and_bundle_drift(
+    tmp_path: Path, case: str
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    automatic_path = correction / "automatic.json"
+    decision_path = correction / "decision.json"
+    automatic = json.loads(automatic_path.read_text(encoding="utf-8"))
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    first = decision["pairing_selections"][0]
+    saved_split = automatic["review_units"][0]["candidates"][0]["split_sample"]
+    if case == "missing-file":
+        (correction / "index.html").unlink()
+    elif case == "extra-file":
+        (correction / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+        with pytest.raises(ValueError, match="schema"):
+            export_review_bundle(paths, config)
+        return
+    elif case == "automatic-stale":
+        automatic["recording_id"] = "wrong"
+        automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
+    elif case == "decision-identity":
+        decision["recording_id"] = "wrong"
+    elif case == "selections-not-list":
+        decision["pairing_selections"] = {}
+    elif case == "row-not-object":
+        decision["pairing_selections"][0] = None
+    elif case == "unit-type":
+        first["unit_id"] = 7
+    elif case == "unreviewed-metadata":
+        first["reason"] = "not empty"
+    elif case == "split-type":
+        first.update(
+            split_sample=True,
+            reason="reason",
+            reviewer="owner",
+            reviewed_at="2026-07-19T12:00:00+08:00",
+        )
+    elif case == "missing-reason":
+        first.update(
+            split_sample=saved_split,
+            reviewer="owner",
+            reviewed_at="2026-07-19T12:00:00+08:00",
+        )
+    elif case == "reviewed-at-type":
+        first.update(split_sample=saved_split, reason="reason", reviewer="owner", reviewed_at=7)
+    elif case == "reviewed-at-invalid":
+        first.update(
+            split_sample=saved_split,
+            reason="reason",
+            reviewer="owner",
+            reviewed_at="invalid",
+        )
+    elif case == "reviewed-at-naive":
+        first.update(
+            split_sample=saved_split,
+            reason="reason",
+            reviewer="owner",
+            reviewed_at="2026-07-19T12:00:00",
+        )
+    elif case == "unknown-unit":
+        first["unit_id"] = "unknown-unit"
+    if case not in {"missing-file", "automatic-stale"}:
+        decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+    with pytest.raises((TypeError, ValueError)):
+        import_review_bundle(paths, config)
 
 
 def _set_decisions(
