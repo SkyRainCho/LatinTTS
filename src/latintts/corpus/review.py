@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import wave
 from copy import deepcopy
@@ -192,12 +193,16 @@ def read_textgrid(path: Path) -> ReviewedBoundaries:
     words_name, index = _assignment(lines, index, "name")
     words_start_raw, index = _assignment(lines, index, "xmin")
     words_end_raw, index = _assignment(lines, index, "xmax")
+    if index >= len(lines):
+        raise ValueError("missing TextGrid interval count")
     size_match = re.fullmatch(r"\s*intervals: size = (\d+)", lines[index])
     if size_match is None:
         raise ValueError("invalid TextGrid interval count")
     index += 1
     intervals: list[tuple[float, float, str]] = []
     for interval_index in range(1, int(size_match.group(1)) + 1):
+        if index >= len(lines):
+            raise ValueError("missing TextGrid interval entry")
         if lines[index].strip() != f"intervals [{interval_index}]:":
             raise ValueError("invalid TextGrid interval order")
         index += 1
@@ -541,15 +546,64 @@ def _extract_source_clip(
     return start_frame, end_frame, (end_frame - start_frame) / frame_rate
 
 
+def _require_canonical_descendant(
+    root: Path,
+    target: Path,
+    *,
+    kind: str,
+    require_file: bool = False,
+) -> Path:
+    root_absolute = Path(os.path.abspath(root))
+    target_absolute = Path(os.path.abspath(target))
+    try:
+        relative = target_absolute.relative_to(root_absolute)
+    except ValueError as error:
+        raise ValueError(f"{kind} is outside its canonical root") from error
+    current = root_absolute
+    candidates = [current]
+    for component in relative.parts:
+        current /= component
+        candidates.append(current)
+    for current in candidates:
+        if not current.exists() and not current.is_symlink():
+            continue
+        metadata = os.lstat(current)
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"{kind} path contains an alias or reparse point")
+        if current.resolve() != current:
+            raise ValueError(f"{kind} path is not canonical")
+    if root_absolute.resolve(strict=False) != root_absolute:
+        raise ValueError(f"{kind} root is not canonical")
+    resolved_target = target_absolute.resolve(strict=False)
+    try:
+        resolved_target.relative_to(root_absolute)
+    except ValueError as error:
+        raise ValueError(f"{kind} resolves outside its canonical root") from error
+    if require_file and not target_absolute.is_file():
+        raise ValueError(f"{kind} must be a regular file")
+    return target_absolute
+
+
 def _group_directory(run_directory: Path, group_id: str) -> Path:
     safe_id = require_safe_pairing_id(group_id, "repetition_group_id")
-    review_root = (run_directory / "review").resolve()
-    directory = (review_root / safe_id).resolve()
-    try:
-        directory.relative_to(review_root)
-    except ValueError as error:
-        raise ValueError("review group path escapes review root") from error
-    return directory
+    review_root = _require_canonical_descendant(
+        run_directory, run_directory / "review", kind="review root"
+    )
+    return _require_canonical_descendant(review_root, review_root / safe_id, kind="review group")
+
+
+_BUNDLE_FILES = frozenset(
+    {
+        "index.html",
+        "automatic.json",
+        "decision.json",
+        "take-1.wav",
+        "take-1.TextGrid",
+        "take-2.wav",
+        "take-2.TextGrid",
+    }
+)
 
 
 def _export_group(
@@ -561,20 +615,18 @@ def _export_group(
     source: Path,
     transcript: dict[str, Any],
 ) -> None:
+    _require_canonical_descendant(directory.parent, directory, kind="review group")
     directory.mkdir(parents=True, exist_ok=True)
-    expected_files = {
-        "index.html",
-        "automatic.json",
-        "decision.json",
-        "take-1.wav",
-        "take-1.TextGrid",
-        "take-2.wav",
-        "take-2.TextGrid",
-    }
     existing_files = {item.name for item in directory.iterdir()}
     if existing_files:
-        if existing_files != expected_files or any(
-            not (directory / name).is_file() for name in expected_files
+        if existing_files != _BUNDLE_FILES or any(
+            not _require_canonical_descendant(
+                directory.parent,
+                directory / name,
+                kind="review bundle file",
+                require_file=True,
+            )
+            for name in _BUNDLE_FILES
         ):
             raise ValueError("existing review bundle does not contain the exact file schema")
         return
@@ -694,6 +746,13 @@ def _export_group(
         '<!doctype html>\n<meta charset="utf-8">\n'
         f"<title>{title}</title>\n<h1>{title}</h1>\n<p>{text}</p>\n{items}\n",
     )
+    for name in _BUNDLE_FILES:
+        _require_canonical_descendant(
+            directory.parent,
+            directory / name,
+            kind="review bundle file",
+            require_file=True,
+        )
 
 
 def export_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> tuple[Path, ...]:
@@ -811,18 +870,23 @@ _ALIGNMENT_VERSION_FIELDS = frozenset(
 )
 
 
-def _bundle_file(directory: Path, name: object, expected: str, kind: str) -> Path:
+def _bundle_file(
+    directory: Path,
+    name: object,
+    expected: str,
+    kind: str,
+    *,
+    review_root: Path | None = None,
+) -> Path:
     if name != expected or type(name) is not str:
         raise ValueError(f"review {kind} reference must be {expected}")
-    root = directory.resolve()
-    path = (root / name).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError as error:
-        raise ValueError(f"review {kind} path escapes its bundle") from error
-    if not path.is_file():
-        raise ValueError(f"review {kind} file is missing")
-    return path
+    canonical_root = directory if review_root is None else review_root
+    return _require_canonical_descendant(
+        canonical_root,
+        directory / name,
+        kind=f"review {kind}",
+        require_file=True,
+    )
 
 
 def _validated_automatic_values(raw: object) -> dict[str, Any]:
@@ -1099,7 +1163,21 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
             if outcome.status != "selected" or group is None:
                 raise ValueError("review import requires selected repetition groups")
             directory = _group_directory(run_directory, group.repetition_group_id)
-            automatic_raw = _read_json(directory / "automatic.json")
+            if (
+                not directory.is_dir()
+                or {item.name for item in directory.iterdir()} != _BUNDLE_FILES
+            ):
+                raise ValueError("review bundle does not contain the exact file schema")
+            bundle_paths = {
+                name: _require_canonical_descendant(
+                    directory.parent,
+                    directory / name,
+                    kind="review bundle file",
+                    require_file=True,
+                )
+                for name in _BUNDLE_FILES
+            }
+            automatic_raw = _read_json(bundle_paths["automatic.json"])
             require_exact_fields(automatic_raw, _AUTOMATIC_FIELDS, "review automatic")
             if (
                 automatic_raw["schema_version"] != "1"
@@ -1170,7 +1248,7 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
                 ):
                     raise ValueError("review automatic take identity must be unique")
                 takes_by_index[take_index] = take_raw
-            decision_raw = _read_json(directory / "decision.json")
+            decision_raw = _read_json(bundle_paths["decision.json"])
             require_exact_fields(decision_raw, _DECISION_FIELDS, "review decision file")
             if (
                 decision_raw["schema_version"] != "1"
@@ -1196,7 +1274,11 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
                 }:
                     raise ValueError("review bundle entity identity does not match pairing")
                 audio_path = _bundle_file(
-                    directory, take_raw["audio_file"], f"take-{take.take_index}.wav", "audio"
+                    directory,
+                    take_raw["audio_file"],
+                    f"take-{take.take_index}.wav",
+                    "audio",
+                    review_root=directory.parent,
                 )
                 if take_raw["audio_sha256"] != _digest(audio_path):
                     raise ValueError("review audio hash does not match automatic.json")
@@ -1205,6 +1287,7 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
                     take_raw["textgrid_file"],
                     f"take-{take.take_index}.TextGrid",
                     "TextGrid",
+                    review_root=directory.parent,
                 )
                 result = aligned["alignment_result"]
                 automatic_values = _validate_take_summary(take_raw, take, result, source)

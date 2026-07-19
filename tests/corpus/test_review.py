@@ -331,6 +331,73 @@ def test_textgrid_reader_rejects_each_strict_structure_boundary(
         read_textgrid(path)
 
 
+@pytest.mark.parametrize("cut_marker", ('name = "words"', "intervals: size = 3"))
+def test_textgrid_reader_converts_critical_truncation_to_value_error(
+    tmp_path: Path, cut_marker: str
+) -> None:
+    path = tmp_path / "truncated.TextGrid"
+    write_textgrid(
+        path,
+        duration_seconds=1.0,
+        take_start=0.0,
+        take_end=1.0,
+        words=(ReviewedWordSpan("Pater", 0.2, 0.8),),
+    )
+    lines = path.read_text(encoding="utf-8").splitlines()
+    cut = next(index for index, line in enumerate(lines) if cut_marker in line)
+    if cut_marker.startswith("intervals"):
+        cut += 1
+    path.write_text("\n".join(lines[:cut]) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="TextGrid"):
+        read_textgrid(path)
+
+
+def test_canonical_descendant_accepts_only_direct_unaliased_path(tmp_path: Path) -> None:
+    root = tmp_path / "review"
+    group = root / "group"
+    group.mkdir(parents=True)
+    target = group / "automatic.json"
+    target.write_text("{}", encoding="utf-8")
+
+    assert (
+        review_module._require_canonical_descendant(
+            root, target, kind="review file", require_file=True
+        )
+        == target.absolute()
+    )
+
+
+@pytest.mark.parametrize("alias_level", ("root", "group", "file"))
+def test_canonical_descendant_rejects_alias_at_every_review_level(
+    tmp_path: Path, alias_level: str
+) -> None:
+    canonical = tmp_path / "canonical"
+    canonical_group = canonical / "group"
+    canonical_group.mkdir(parents=True)
+    canonical_file = canonical_group / "automatic.json"
+    canonical_file.write_text("{}", encoding="utf-8")
+    review_root = tmp_path / "review"
+    group = review_root / "group"
+    target = group / "automatic.json"
+    try:
+        if alias_level == "root":
+            review_root.symlink_to(canonical, target_is_directory=True)
+        elif alias_level == "group":
+            review_root.mkdir()
+            group.symlink_to(canonical_group, target_is_directory=True)
+        else:
+            group.mkdir(parents=True)
+            target.symlink_to(canonical_file)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    with pytest.raises(ValueError, match=r"alias|canonical"):
+        review_module._require_canonical_descendant(
+            review_root, target, kind="review file", require_file=True
+        )
+
+
 def test_replay_rejects_invalid_container_and_missing_nested_fields() -> None:
     with pytest.raises(TypeError, match="object"):
         replay_review_events([], ())  # type: ignore[arg-type]
