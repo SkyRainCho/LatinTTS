@@ -5,6 +5,7 @@ import json
 import wave
 from copy import deepcopy
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
@@ -14,14 +15,49 @@ from latintts.corpus.config import CorpusConfig
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.review import (
     ReviewedWordSpan,
-    export_review_bundle,
-    import_review_bundle,
     read_textgrid,
     write_textgrid,
+)
+from latintts.corpus.review import (
+    export_review_bundle as _export_review_bundle,
+)
+from latintts.corpus.review import (
+    import_review_bundle as _import_review_bundle,
 )
 from latintts.corpus.store import read_jsonl, write_jsonl_atomic
 from tests.corpus.test_pair_cli import _segment, _set_up
 from tests.corpus.test_pairing import _audio_command, _FakeAligner
+
+
+def _review_audio_command(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+    destination = Path(command[-1])
+    start = float(command[command.index("-ss") + 1])
+    end = float(command[command.index("-to") + 1])
+    sample_count = round((end - start) * 48_000)
+    with wave.open(str(destination), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(3)
+        writer.setframerate(48_000)
+        writer.writeframes(b"\x01\x00\x00" * sample_count)
+    return CompletedProcess(command, 0, "", "")
+
+
+def export_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> tuple[Path, ...]:
+    return _export_review_bundle(
+        paths,
+        config,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_review_audio_command,
+    )
+
+
+def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
+    return _import_review_bundle(
+        paths,
+        config,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_review_audio_command,
+    )
 
 
 def _aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
@@ -63,9 +99,9 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
         "take-2.TextGrid",
     }
     with wave.open(str(group / "take-1.wav"), "rb") as reader:
-        assert reader.getframerate() == 16_000
+        assert reader.getframerate() == 48_000
         assert reader.getnchannels() == 1
-        assert reader.getsampwidth() == 2
+        assert reader.getsampwidth() == 3
     automatic = json.loads((group / "automatic.json").read_text(encoding="utf-8"))
     assert set(automatic) == {
         "schema_version",
@@ -94,6 +130,7 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     assert automatic["text_layers"]["spoken_text"] == transcript["spoken_text"]
     assert automatic["text_layers"]["normalized_text"] == transcript["normalized_text"]
     assert all(take["audio_sha256"] for take in automatic["takes"])
+    assert all(take["audio_provenance"]["mode"] == "review" for take in automatic["takes"])
     assert all(take["textgrid_sha256"] for take in automatic["takes"])
     decision = json.loads((group / "decision.json").read_text(encoding="utf-8"))
     assert set(decision) == {
@@ -264,8 +301,12 @@ def test_export_review_is_idempotent_without_overwriting_human_files(tmp_path: P
     assert grid_path.read_bytes() == grid_bytes
 
 
-def test_review_cli_exports_and_imports_complete_human_decisions(tmp_path: Path) -> None:
+def test_review_cli_exports_and_imports_complete_human_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     paths, config = _aligned_project(tmp_path)
+    monkeypatch.setattr("latintts.corpus.review.subprocess.run", _review_audio_command)
+    monkeypatch.setattr("latintts.corpus.cli._ffmpeg_version", lambda: "ffmpeg-test-1")
     assert main(["--project-root", str(tmp_path), "export-review"]) == 0
     groups = tuple(
         sorted((paths.alignments / "runs" / config.digest / "rec-1" / "review").iterdir())
@@ -363,6 +404,27 @@ def test_import_review_rejects_tampered_history_and_nested_automatic_schema(
     automatic["takes"][0]["quality_metrics"]["unexpected"] = True
     automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
     with pytest.raises(ValueError, match="exact fields"):
+        import_review_bundle(paths, config)
+
+
+def test_import_review_rebuilds_trusted_clip_instead_of_trusting_edited_hash(
+    tmp_path: Path,
+) -> None:
+    paths, config = _aligned_project(tmp_path)
+    group = export_review_bundle(paths, config)[0]
+    audio_path = group / "take-1.wav"
+    with wave.open(str(audio_path), "rb") as reader:
+        parameters = reader.getparams()
+        frame_count = reader.getnframes()
+    with wave.open(str(audio_path), "wb") as writer:
+        writer.setparams(parameters)
+        writer.writeframes(b"\x02\x00\x00" * frame_count)
+    automatic_path = group / "automatic.json"
+    automatic = json.loads(automatic_path.read_text(encoding="utf-8"))
+    automatic["takes"][0]["audio_sha256"] = hashlib.sha256(audio_path.read_bytes()).hexdigest()
+    automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"audio|provenance|trusted"):
         import_review_bundle(paths, config)
 
 

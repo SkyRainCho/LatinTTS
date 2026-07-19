@@ -6,9 +6,10 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
+import subprocess
 import tempfile
-import wave
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from latintts.corpus.alignment import AlignmentResult, WordSpan, result_from_dict
+from latintts.corpus.audio import DerivedAudio, RunCommand, extract_review_wav
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusState
 from latintts.corpus.pairing import (
@@ -510,9 +512,7 @@ def _alignment_by_take(
     return decoded
 
 
-def _extract_source_clip(
-    source: Path, destination: Path, *, start_seconds: float, end_seconds: float
-) -> tuple[int, int, float]:
+def _copy_file_atomic(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         dir=destination.parent, prefix=f".{destination.name}."
@@ -520,30 +520,32 @@ def _extract_source_clip(
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        with wave.open(str(source), "rb") as reader:
-            frame_rate = reader.getframerate()
-            start_frame = round(start_seconds * frame_rate)
-            end_frame = round(end_seconds * frame_rate)
-            if start_frame < 0 or end_frame <= start_frame or end_frame > reader.getnframes():
-                raise ValueError("selected take bounds exceed source audio")
-            reader.setpos(start_frame)
-            frames = reader.readframes(end_frame - start_frame)
-            with wave.open(str(temporary), "wb") as writer:
-                writer.setparams(
-                    (
-                        reader.getnchannels(),
-                        reader.getsampwidth(),
-                        frame_rate,
-                        end_frame - start_frame,
-                        "NONE",
-                        "not compressed",
-                    )
-                )
-                writer.writeframes(frames)
+        shutil.copyfile(source, temporary)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return start_frame, end_frame, (end_frame - start_frame) / frame_rate
+
+
+def _export_review_audio(
+    recording: RecordingRecord,
+    paths: CorpusPaths,
+    destination: Path,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    ffmpeg_version: str,
+    run_command: RunCommand,
+) -> DerivedAudio:
+    derived = extract_review_wav(
+        recording,
+        paths,
+        start_seconds,
+        end_seconds,
+        ffmpeg_version=ffmpeg_version,
+        run_command=run_command,
+    )
+    _copy_file_atomic(paths.resolve_local(derived.relative_path), destination)
+    return derived
 
 
 def _require_canonical_descendant(
@@ -609,11 +611,13 @@ _BUNDLE_FILES = frozenset(
 def _export_group(
     directory: Path,
     recording: RecordingRecord,
-    pairing: PairingRecording,
     group: RepetitionGroup,
     alignment: dict[tuple[str, int], dict[str, Any]],
-    source: Path,
     transcript: dict[str, Any],
+    paths: CorpusPaths,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand,
 ) -> None:
     _require_canonical_descendant(directory.parent, directory, kind="review group")
     directory.mkdir(parents=True, exist_ok=True)
@@ -637,12 +641,20 @@ def _export_group(
         result = row["alignment_result"]
         audio_name = f"take-{take.take_index}.wav"
         textgrid_name = f"take-{take.take_index}.TextGrid"
-        start_frame, end_frame, duration = _extract_source_clip(
-            source,
+        start_seconds = take.start_sample / 16_000
+        end_seconds = take.end_sample / 16_000
+        derived = _export_review_audio(
+            recording,
+            paths,
             directory / audio_name,
-            start_seconds=take.start_sample / 16_000,
-            end_seconds=take.end_sample / 16_000,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
         )
+        start_frame = round(start_seconds * recording.metadata.sample_rate)
+        end_frame = round(end_seconds * recording.metadata.sample_rate)
+        duration = (end_frame - start_frame) / recording.metadata.sample_rate
         write_textgrid(
             directory / textgrid_name,
             duration_seconds=duration,
@@ -671,7 +683,8 @@ def _export_group(
                 "source_start_sample": start_frame,
                 "source_end_sample": end_frame,
                 "audio_file": audio_name,
-                "audio_sha256": _digest(directory / audio_name),
+                "audio_sha256": derived.sha256,
+                "audio_provenance": derived.to_dict(),
                 "textgrid_file": textgrid_name,
                 "textgrid_sha256": _digest(directory / textgrid_name),
                 "candidate_audio_sha256": take.audio_sha256,
@@ -755,9 +768,18 @@ def _export_group(
         )
 
 
-def export_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> tuple[Path, ...]:
+def export_review_bundle(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str | None = None,
+    run_command: RunCommand | None = None,
+) -> tuple[Path, ...]:
     if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
         raise TypeError("export_review_bundle requires CorpusPaths and CorpusConfig")
+    if not isinstance(ffmpeg_version, str) or not ffmpeg_version.strip():
+        raise ValueError("export_review_bundle requires ffmpeg_version")
+    command = subprocess.run if run_command is None else run_command
     selection = _load_selection(paths)
     transcripts = _load_transcript_layers(paths, selection)
     recording_rows = read_jsonl(paths.manifests / "recordings.jsonl")
@@ -786,11 +808,12 @@ def export_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> tuple[Path
             _export_group(
                 directory,
                 recording,
-                pairing,
                 outcome.group,
                 alignment,
-                source,
                 transcripts[recording_id],
+                paths,
+                ffmpeg_version=ffmpeg_version,
+                run_command=command,
             )
             exported.append(directory)
     return tuple(exported)
@@ -842,6 +865,7 @@ _AUTOMATIC_TAKE_FIELDS = frozenset(
         "source_end_sample",
         "audio_file",
         "audio_sha256",
+        "audio_provenance",
         "textgrid_file",
         "textgrid_sha256",
         "candidate_audio_sha256",
@@ -1058,7 +1082,7 @@ def _validate_take_summary(
     raw: dict[str, Any],
     take: TakeCandidate,
     result: AlignmentResult,
-    source: Path,
+    recording: RecordingRecord,
 ) -> dict[str, Any]:
     candidate_scores = raw["candidate_scores"]
     quality = raw["quality_metrics"]
@@ -1094,8 +1118,7 @@ def _validate_take_summary(
         raise ValueError("review warnings do not match alignment")
     if raw["candidate_audio_sha256"] != take.audio_sha256:
         raise ValueError("review candidate audio hash does not match pairing")
-    with wave.open(str(source), "rb") as reader:
-        frame_rate = reader.getframerate()
+    frame_rate = recording.metadata.sample_rate
     expected_start = round(take.start_sample / 16_000 * frame_rate)
     expected_end = round(take.end_sample / 16_000 * frame_rate)
     if raw["source_start_sample"] != expected_start or raw["source_end_sample"] != expected_end:
@@ -1119,9 +1142,45 @@ def _validate_take_summary(
     return automatic
 
 
-def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
+def _validate_trusted_review_audio(
+    raw: dict[str, Any],
+    audio_path: Path,
+    recording: RecordingRecord,
+    take: TakeCandidate,
+    paths: CorpusPaths,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand,
+) -> None:
+    provenance_raw = raw["audio_provenance"]
+    if type(provenance_raw) is not dict:
+        raise TypeError("review audio_provenance must be an object")
+    provenance = DerivedAudio.from_dict(provenance_raw)
+    trusted = extract_review_wav(
+        recording,
+        paths,
+        take.start_sample / 16_000,
+        take.end_sample / 16_000,
+        ffmpeg_version=ffmpeg_version,
+        cached=provenance,
+        run_command=run_command,
+    )
+    if raw["audio_sha256"] != trusted.sha256 or _digest(audio_path) != trusted.sha256:
+        raise ValueError("review audio does not match the trusted source-derived clip")
+
+
+def import_review_bundle(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str | None = None,
+    run_command: RunCommand | None = None,
+) -> bool:
     if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
         raise TypeError("import_review_bundle requires CorpusPaths and CorpusConfig")
+    if not isinstance(ffmpeg_version, str) or not ffmpeg_version.strip():
+        raise ValueError("import_review_bundle requires ffmpeg_version")
+    command = subprocess.run if run_command is None else run_command
     selection = _load_selection(paths)
     transcripts = _load_transcript_layers(paths, selection)
     recordings_path = paths.manifests / "recordings.jsonl"
@@ -1282,6 +1341,15 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
                 )
                 if take_raw["audio_sha256"] != _digest(audio_path):
                     raise ValueError("review audio hash does not match automatic.json")
+                _validate_trusted_review_audio(
+                    take_raw,
+                    audio_path,
+                    recording,
+                    take,
+                    paths,
+                    ffmpeg_version=ffmpeg_version,
+                    run_command=command,
+                )
                 textgrid_path = _bundle_file(
                     directory,
                     take_raw["textgrid_file"],
@@ -1290,7 +1358,7 @@ def import_review_bundle(paths: CorpusPaths, config: CorpusConfig) -> bool:
                     review_root=directory.parent,
                 )
                 result = aligned["alignment_result"]
-                automatic_values = _validate_take_summary(take_raw, take, result, source)
+                automatic_values = _validate_take_summary(take_raw, take, result, recording)
                 boundaries = read_textgrid(textgrid_path)
                 if boundaries.duration_seconds != automatic_values["segment_end"]:
                     raise ValueError("review TextGrid duration differs from automatic audio")

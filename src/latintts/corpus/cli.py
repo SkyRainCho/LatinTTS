@@ -2111,9 +2111,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = CorpusConfig.load(config_path)
             paths.ensure_layout()
             if args.command == "export-review":
-                export_review_bundle(paths, config)
+                export_review_bundle(paths, config, ffmpeg_version=_ffmpeg_version())
                 return 0
-            return 0 if import_review_bundle(paths, config) else 1
+            return 0 if import_review_bundle(paths, config, ffmpeg_version=_ffmpeg_version()) else 1
         except CorpusFailure as error:
             print(f"{error.code}: {error}", file=sys.stderr)
             return 1

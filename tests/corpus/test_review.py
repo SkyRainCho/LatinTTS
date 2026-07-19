@@ -1,9 +1,14 @@
+import hashlib
+import wave
+from dataclasses import replace
 from pathlib import Path
+from subprocess import CompletedProcess
 
 import pytest
 
 from latintts.corpus import review as review_module
 from latintts.corpus.alignment import WordSpan
+from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.records import ReviewEvent
 from latintts.corpus.review import (
     ReviewedWordSpan,
@@ -11,6 +16,55 @@ from latintts.corpus.review import (
     replay_review_events,
     write_textgrid,
 )
+from tests.corpus.factories import recording
+
+
+def _opaque_source_transcoder(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+    start = float(command[command.index("-ss") + 1])
+    end = float(command[command.index("-to") + 1])
+    with wave.open(command[-1], "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(3)
+        writer.setframerate(48_000)
+        writer.writeframes(b"\x01\x00\x00" * round((end - start) * 48_000))
+    return CompletedProcess(command, 0, "", "")
+
+
+@pytest.mark.parametrize(("extension", "codec"), [("flac", "flac"), ("mp3", "mp3")])
+def test_export_review_audio_transcodes_lossless_and_lossy_raw_sources(
+    tmp_path: Path, extension: str, codec: str
+) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    source = paths.raw_spoken / f"rec-1.{extension}"
+    source.write_bytes(f"opaque-{extension}-fixture".encode())
+    base = recording("rec-1", 2.0)
+    record = replace(
+        base,
+        relative_path=f"raw/spoken/rec-1.{extension}",
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        metadata=replace(base.metadata, codec=codec),
+    )
+    destination = tmp_path / f"review-{extension}.wav"
+
+    provenance = review_module._export_review_audio(
+        record,
+        paths,
+        destination,
+        start_seconds=0.25,
+        end_seconds=1.25,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_opaque_source_transcoder,
+    )
+
+    assert provenance.source_relative_path.endswith(f".{extension}")
+    assert provenance.sha256 == hashlib.sha256(destination.read_bytes()).hexdigest()
+    with wave.open(str(destination), "rb") as reader:
+        assert (reader.getframerate(), reader.getnchannels(), reader.getsampwidth()) == (
+            48_000,
+            1,
+            3,
+        )
 
 
 def test_textgrid_round_trip_preserves_take_and_word_boundaries(tmp_path: Path) -> None:
