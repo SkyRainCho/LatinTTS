@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from latintts.corpus.alignment import result_to_dict
 from latintts.corpus.audio import DerivedAudio, RunCommand, derive_analysis_audio
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
@@ -26,8 +27,16 @@ from latintts.corpus.inventory import (
     write_intake_skeleton,
 )
 from latintts.corpus.mms_alignment import create_alignment_backend
+from latintts.corpus.pairing import (
+    PairingBackend,
+    PairingParameters,
+    load_selected_alignments,
+    map_text_units,
+    pair_recording,
+    pairing_from_dict,
+)
 from latintts.corpus.paths import CorpusPaths
-from latintts.corpus.pauses import PauseAnalysis, classify_pauses
+from latintts.corpus.pauses import PauseAnalysis, PauseInterval, classify_pauses
 from latintts.corpus.records import (
     AudioMetadata,
     ProcessingEvent,
@@ -45,6 +54,7 @@ from latintts.corpus.store import (
     write_jsonl_atomic,
 )
 from latintts.corpus.transcripts import (
+    SpokenUnit,
     TextCandidate,
     TranscriptInputError,
     TranscriptRecord,
@@ -93,6 +103,9 @@ _PAUSE_FIELDS = frozenset(
         "minimum_cluster_size",
         "maximum_cluster_imbalance_ratio",
     }
+)
+_PAIRING_FIELDS = frozenset(
+    {"minimum_duration_ratio", "maximum_duration_ratio", "minimum_score_margin"}
 )
 _SEGMENT_FIELDS = frozenset(
     {
@@ -1245,6 +1258,385 @@ def segment_corpus(
     return all_successful
 
 
+def _validate_pairing_config(config: CorpusConfig) -> PairingParameters:
+    _validate_segmentation_config(config)
+    raw = config.raw["pairing"]
+    if type(raw) is not dict or set(raw) != _PAIRING_FIELDS:
+        raise ValueError("pairing config must contain exact fields")
+    return PairingParameters(
+        raw["minimum_duration_ratio"],
+        raw["maximum_duration_ratio"],
+        raw["minimum_score_margin"],
+    )
+
+
+def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[SpokenUnit, ...]:
+    require_exact_fields(
+        raw,
+        frozenset(field.name for field in fields(TranscriptRecord)),
+        "transcript row",
+    )
+    if (
+        raw["schema_version"] != "1"
+        or raw["recording_id"] != recording_id
+        or raw["state"] != "TRANSCRIPT_CONFIRMED"
+        or type(raw["spoken_text"]) is not str
+        or not raw["spoken_text"]
+    ):
+        raise ValueError("transcript identity or state is invalid for pairing")
+    units_raw = raw["spoken_units"]
+    if type(units_raw) is not list or not units_raw:
+        raise TypeError("transcript spoken_units must be a non-empty array")
+    expected = frozenset(field.name for field in fields(SpokenUnit))
+    units: list[SpokenUnit] = []
+    for unit_raw in units_raw:
+        if type(unit_raw) is not dict:
+            raise TypeError("spoken unit must be an object")
+        require_exact_fields(unit_raw, expected, "spoken unit")
+        units.append(SpokenUnit(**unit_raw))
+    if "\n".join(unit.text for unit in units) != raw["spoken_text"]:
+        raise ValueError("spoken units do not exactly reconstruct spoken_text")
+    plan = raw["pronunciation_plan"]
+    if type(plan) is not dict or type(plan.get("tokens")) is not list:
+        raise TypeError("transcript pronunciation plan is invalid")
+    if units[-1].token_end_index != len(plan["tokens"]):
+        raise ValueError("spoken unit token ranges do not cover pronunciation plan")
+    return tuple(units)
+
+
+def _load_pairing_segmentation(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    record: RecordingRecord,
+    transcript_sha256: str,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand,
+) -> tuple[DerivedAudio, tuple[SpeechInterval, ...], PauseAnalysis, str]:
+    result_path = (
+        paths.alignments / "runs" / config.digest / record.recording_id / "segmentation.json"
+    )
+    rows = read_jsonl(result_path)
+    if len(rows) != 1:
+        raise ValueError("segmentation cache must contain exactly one result")
+    row = rows[0]
+    if type(row.get("analysis_audio")) is not dict:
+        raise TypeError("segmentation analysis_audio must be an object")
+    analysis = DerivedAudio.from_dict(row["analysis_audio"])
+    cached_analysis = derive_analysis_audio(
+        record,
+        paths,
+        config,
+        ffmpeg_version=ffmpeg_version,
+        cached=analysis,
+        run_command=run_command,
+    )
+    vad_parameters, pause_parameters = _validate_segmentation_config(config)
+    vad_raw = row.get("vad")
+    if type(vad_raw) is not dict or type(vad_raw.get("model_sha256")) is not str:
+        raise TypeError("segmentation VAD provenance is invalid")
+    if not _validate_result_row(
+        row,
+        record=record,
+        config=config,
+        analysis=cached_analysis,
+        transcript_sha256=transcript_sha256,
+        model_sha256=vad_raw["model_sha256"],
+        vad_parameters=vad_parameters,
+        pause_parameters=pause_parameters,
+    ):
+        raise ValueError("pairing requires successful pause classification")
+    vad_result = _decode_cached_vad(vad_raw)
+    pause_raw = row["pause"]
+    intervals_raw = pause_raw["intervals"]
+    if type(intervals_raw) is not list:
+        raise TypeError("segmentation pause intervals must be an array")
+    pauses = tuple(PauseInterval(**item) for item in intervals_raw)
+    analysis_result = PauseAnalysis(
+        pauses,
+        pause_raw["threshold_seconds"],
+        pause_raw["short_median_seconds"],
+        pause_raw["long_median_seconds"],
+    )
+    return (
+        cached_analysis,
+        vad_result.speech_intervals,
+        analysis_result,
+        hashlib.sha256(result_path.read_bytes()).hexdigest(),
+    )
+
+
+def _expected_cached_transition(
+    record: RecordingRecord,
+    previous_state: CorpusState,
+    target_state: CorpusState,
+    *,
+    input_sha256s: tuple[str, ...],
+    config_sha256: str,
+    tool_versions: tuple[str, ...],
+) -> ProcessingEvent:
+    prior = replace(record, state=previous_state)
+    _, event = advance_recording(
+        prior,
+        target_state,
+        input_sha256s=input_sha256s,
+        config_sha256=config_sha256,
+        tool_versions=tool_versions,
+        started_at="1970-01-01T00:00:00+00:00",
+        finished_at="1970-01-01T00:00:00+00:00",
+        result="success",
+    )
+    return event
+
+
+def _persist_stage_transition(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    recordings: tuple[RecordingRecord, ...],
+    index: int,
+    target_state: CorpusState,
+    *,
+    input_sha256s: tuple[str, ...],
+    tool_versions: tuple[str, ...],
+) -> tuple[RecordingRecord, ...]:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    advanced, event = advance_recording(
+        recordings[index],
+        target_state,
+        input_sha256s=input_sha256s,
+        config_sha256=config.digest,
+        tool_versions=tool_versions,
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    updated = (*recordings[:index], advanced, *recordings[index + 1 :])
+    persist_recording_transition(
+        recordings_path=paths.manifests / "recordings.jsonl",
+        events_path=paths.alignments / "runs" / config.digest / "processing-events.jsonl",
+        recordings=updated,
+        event=event,
+    )
+    return updated
+
+
+def pair_corpus(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    backend: PairingBackend,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand = subprocess.run,
+) -> bool:
+    parameters = _validate_pairing_config(config)
+    selection = _load_selection(paths.manifests / "pilot-selection.json")
+    recordings = _load_recordings(paths)
+    by_id = {record.recording_id: (index, record) for index, record in enumerate(recordings)}
+    transcript_rows = read_jsonl(paths.manifests / "transcripts.jsonl")
+    transcript_by_id = {row.get("recording_id"): row for row in transcript_rows}
+    if len(transcript_by_id) != len(transcript_rows) or set(transcript_by_id) != set(
+        selection.recording_ids
+    ):
+        raise ValueError("transcripts must exactly match pilot selection")
+    current = recordings
+    for recording_id, inventory_hash in zip(
+        selection.recording_ids, selection.inventory_hashes, strict=True
+    ):
+        item = by_id.get(recording_id)
+        if item is None:
+            raise ValueError("pilot selection recording is missing")
+        index, original = item
+        record = current[index]
+        if record.sha256 != inventory_hash:
+            raise ValueError("pilot selection hash does not match recording")
+        if record.content_type != "spoken":
+            raise ValueError("pair accepts only spoken pilot recordings")
+        if record.state not in {CorpusState.SEGMENTED, CorpusState.PAIRED}:
+            raise ValueError("pair requires SEGMENTED or PAIRED recording state")
+        transcript_raw = transcript_by_id[recording_id]
+        assert isinstance(transcript_raw, dict)
+        units = _decode_spoken_units(transcript_raw, recording_id)
+        transcript_sha256 = hashlib.sha256(transcript_raw["spoken_text"].encode()).hexdigest()
+        analysis, speech, pause_analysis, segmentation_sha256 = _load_pairing_segmentation(
+            paths,
+            config,
+            original,
+            transcript_sha256,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        )
+        windows = map_text_units(
+            units,
+            speech,
+            pause_analysis,
+            preserve_missing_take_candidates=True,
+        )
+        pairing = pair_recording(
+            recording_id,
+            windows,
+            analysis,
+            paths,
+            backend,
+            segmentation_artifact_sha256=segmentation_sha256,
+            config_sha256=config.digest,
+            pairing_parameters=parameters,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        )
+        pairing_path = paths.alignments / "runs" / config.digest / recording_id / "pairing.json"
+        pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+        inputs = (record.sha256, segmentation_sha256, pairing_sha256)
+        tools = ("two-take-pairing-v1", "mms-ctc==0.3.0")
+        if record.state is CorpusState.SEGMENTED:
+            current = _persist_stage_transition(
+                paths,
+                config,
+                current,
+                index,
+                CorpusState.PAIRED,
+                input_sha256s=inputs,
+                tool_versions=tools,
+            )
+        else:
+            event = _expected_cached_transition(
+                record,
+                CorpusState.SEGMENTED,
+                CorpusState.PAIRED,
+                input_sha256s=inputs,
+                config_sha256=config.digest,
+                tool_versions=tools,
+            )
+            events = read_jsonl(
+                paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+            )
+            if not processing_event_exists(events, event):
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "PAIRED recording lacks durable transition event"
+                )
+        if len(pairing.groups) != len(windows):
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing does not cover every unit")
+    return True
+
+
+def _alignment_row(
+    pairing_path: Path,
+    pairing: Any,
+    paths: CorpusPaths,
+    backend: PairingBackend,
+) -> dict[str, Any]:
+    selected = load_selected_alignments(pairing, paths, backend)
+    issues = [
+        {"unit_id": outcome.unit_id, "issue_code": outcome.issue_code}
+        for outcome in pairing.groups
+        if outcome.status == "review"
+    ]
+    pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+    takes = [
+        {
+            "repetition_group_id": item.repetition_group_id,
+            "unit_id": item.unit_id,
+            "take_index": item.take.take_index,
+            "audio_sha256": item.take.audio_sha256,
+            "alignment_cache_key": item.take.alignment_cache_key,
+            "alignment_result": result_to_dict(item.result),
+        }
+        for item in selected
+    ]
+    take_identity = [
+        (item.take.alignment_cache_key, item.result.integrity_sha256) for item in selected
+    ]
+    return {
+        "schema_version": "1",
+        "recording_id": pairing.recording_id,
+        "status": "complete_with_issues" if issues else "success",
+        "config_sha256": pairing.config_sha256,
+        "pairing_artifact_sha256": pairing_sha256,
+        "pairing_cache_key": pairing.cache_key,
+        "takes": takes,
+        "issues": issues,
+        "cache_key": _canonical_digest(
+            {
+                "schema_version": "1",
+                "recording_id": pairing.recording_id,
+                "config_sha256": pairing.config_sha256,
+                "pairing_artifact_sha256": pairing_sha256,
+                "takes": take_identity,
+                "issues": issues,
+            }
+        ),
+    }
+
+
+def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBackend) -> bool:
+    _validate_pairing_config(config)
+    selection = _load_selection(paths.manifests / "pilot-selection.json")
+    recordings = _load_recordings(paths)
+    by_id = {record.recording_id: (index, record) for index, record in enumerate(recordings)}
+    current = recordings
+    for recording_id in selection.recording_ids:
+        item = by_id.get(recording_id)
+        if item is None:
+            raise ValueError("pilot selection recording is missing")
+        index, _ = item
+        record = current[index]
+        if record.content_type != "spoken":
+            raise ValueError("align accepts only spoken pilot recordings")
+        if record.state not in {CorpusState.PAIRED, CorpusState.ALIGNED}:
+            raise ValueError("align requires PAIRED or ALIGNED recording state")
+        run_directory = paths.alignments / "runs" / config.digest / recording_id
+        pairing_path = run_directory / "pairing.json"
+        pairing_rows = read_jsonl(pairing_path)
+        if len(pairing_rows) != 1:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is missing")
+        try:
+            pairing = pairing_from_dict(pairing_rows[0])
+            if pairing.recording_id != recording_id or pairing.config_sha256 != config.digest:
+                raise ValueError("pairing identity does not match align request")
+            expected = _alignment_row(pairing_path, pairing, paths, backend)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            raise CorpusFailure(
+                "CACHE_ARTIFACT_INVALID", "selected alignment cache is invalid"
+            ) from error
+        alignment_path = run_directory / "alignment.json"
+        if alignment_path.exists():
+            rows = read_jsonl(alignment_path)
+            if len(rows) != 1 or rows[0] != expected:
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "alignment artifact is invalid")
+        else:
+            write_jsonl_atomic(alignment_path, (expected,))
+        pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+        alignment_sha256 = hashlib.sha256(alignment_path.read_bytes()).hexdigest()
+        inputs = (record.sha256, pairing_sha256, alignment_sha256)
+        tools = ("cached-word-alignment-v1", "mms-ctc==0.3.0")
+        if record.state is CorpusState.PAIRED:
+            current = _persist_stage_transition(
+                paths,
+                config,
+                current,
+                index,
+                CorpusState.ALIGNED,
+                input_sha256s=inputs,
+                tool_versions=tools,
+            )
+        else:
+            event = _expected_cached_transition(
+                record,
+                CorpusState.PAIRED,
+                CorpusState.ALIGNED,
+                input_sha256s=inputs,
+                config_sha256=config.digest,
+                tool_versions=tools,
+            )
+            events = read_jsonl(
+                paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+            )
+            if not processing_event_exists(events, event):
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "ALIGNED recording lacks durable transition event"
+                )
+    return True
+
+
 def _ffmpeg_version() -> str:
     try:
         completed = subprocess.run(
@@ -1490,8 +1882,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
     )
+    pair_parser = subparsers.add_parser("pair")
+    pair_parser.add_argument("--allow-download", action="store_true")
+    pair_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
     align_parser = subparsers.add_parser("align")
-    align_parser.add_argument("--smoke-test", action="store_true", required=True)
+    align_parser.add_argument("--smoke-test", action="store_true")
     align_parser.add_argument("--allow-download", action="store_true")
     align_parser.add_argument(
         "--config",
@@ -1559,15 +1958,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = CorpusConfig.load(config_path)
             paths.ensure_layout()
-            return alignment_smoke_test(
-                paths,
+            if args.smoke_test:
+                return alignment_smoke_test(
+                    paths,
+                    config,
+                    cache_dir=paths.local_data / "cache" / "huggingface",
+                    local_files_only=not args.allow_download,
+                )
+            alignment_backend = create_alignment_backend(
                 config,
                 cache_dir=paths.local_data / "cache" / "huggingface",
                 local_files_only=not args.allow_download,
             )
+            return 0 if align_corpus(paths, config, alignment_backend) else 1
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
         except (OSError, ValueError) as error:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
+    if args.command == "pair":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            paths.ensure_layout()
+            pair_backend = create_alignment_backend(
+                config,
+                cache_dir=paths.local_data / "cache" / "huggingface",
+                local_files_only=not args.allow_download,
+            )
+            successful = pair_corpus(
+                paths,
+                config,
+                pair_backend,
+                ffmpeg_version=_ffmpeg_version(),
+            )
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
+        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
+        return 0 if successful else 1
     if args.command == "segment":
         paths = CorpusPaths.from_project_root(args.project_root)
         config_path = args.config
@@ -1577,7 +2012,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = CorpusConfig.load(config_path)
             vad, _ = _validate_segmentation_config(config)
             paths.ensure_layout()
-            backend = SileroVadBackend(
+            vad_backend = SileroVadBackend(
                 threshold=vad["threshold"],
                 neg_threshold=vad["neg_threshold"],
                 min_speech_duration_ms=vad["min_speech_duration_ms"],
@@ -1592,7 +2027,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             successful = segment_corpus(
                 paths,
                 config,
-                backend,
+                vad_backend,
                 ffmpeg_version=_ffmpeg_version(),
             )
         except CorpusFailure as error:
