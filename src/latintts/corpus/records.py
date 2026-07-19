@@ -304,6 +304,31 @@ class ProcessingEvent:
         if self.result != "success" or type(self.result) is not str:
             raise ValueError("result must be success")
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> ProcessingEvent:
+        require_exact_fields(
+            raw,
+            frozenset(field.name for field in fields(cls)),
+            "processing event",
+        )
+        if type(raw["input_sha256s"]) is not list:
+            raise TypeError("processing event input_sha256s must be an array")
+        if type(raw["tool_versions"]) is not list:
+            raise TypeError("processing event tool_versions must be an array")
+        return cls(
+            schema_version=raw["schema_version"],
+            event_id=raw["event_id"],
+            recording_id=raw["recording_id"],
+            previous_state=CorpusState(raw["previous_state"]),
+            target_state=CorpusState(raw["target_state"]),
+            input_sha256s=tuple(raw["input_sha256s"]),
+            config_sha256=raw["config_sha256"],
+            tool_versions=tuple(raw["tool_versions"]),
+            started_at=raw["started_at"],
+            finished_at=raw["finished_at"],
+            result=raw["result"],
+        )
+
     def to_dict(self) -> dict[str, Any]:
         raw = asdict(self)
         raw["previous_state"] = self.previous_state.value
@@ -334,8 +359,6 @@ def advance_recording(
         "inputs": input_sha256s,
         "config": config_sha256,
         "tools": tool_versions,
-        "started_at": started_at,
-        "finished_at": finished_at,
         "result": result,
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))

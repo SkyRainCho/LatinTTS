@@ -81,39 +81,59 @@ def processing_event_exists(
     existing_events: tuple[dict[str, Any], ...],
     event: ProcessingEvent,
 ) -> bool:
-    event_ids = [existing_event.get("event_id") for existing_event in existing_events]
+    decoded_events = tuple(ProcessingEvent.from_dict(row) for row in existing_events)
+    event_ids = [existing_event.event_id for existing_event in decoded_events]
     if len(event_ids) != len(set(event_ids)):
         raise ValueError("processing events contain duplicate event_id")
-    event_row = event.to_dict()
+    semantic_keys = [
+        (
+            existing_event.recording_id,
+            existing_event.previous_state,
+            existing_event.target_state,
+            existing_event.input_sha256s,
+            existing_event.config_sha256,
+            existing_event.tool_versions,
+            existing_event.result,
+        )
+        for existing_event in decoded_events
+    ]
+    if len(semantic_keys) != len(set(semantic_keys)):
+        raise ValueError("processing events contain duplicate semantic transition")
+    last_target_by_recording: dict[str, object] = {}
+    for existing_event in decoded_events:
+        last_target = last_target_by_recording.get(existing_event.recording_id)
+        if last_target is not None and existing_event.previous_state is not last_target:
+            raise ValueError("invalid processing event state chain")
+        last_target_by_recording[existing_event.recording_id] = existing_event.target_state
+    event_semantics = (
+        event.recording_id,
+        event.previous_state,
+        event.target_state,
+        event.input_sha256s,
+        event.config_sha256,
+        event.tool_versions,
+        event.result,
+    )
     matching_ids = [
         existing_event
-        for existing_event in existing_events
-        if existing_event.get("event_id") == event.event_id
+        for existing_event in decoded_events
+        if existing_event.event_id == event.event_id
     ]
-    if matching_ids and matching_ids[0] != event_row:
-        raise ValueError("existing processing event conflicts with transition event")
-    transition_fields = (
-        "recording_id",
-        "previous_state",
-        "target_state",
-        "input_sha256s",
-        "config_sha256",
-        "tool_versions",
-        "result",
-    )
     matching_transitions = [
         existing_event
-        for existing_event in existing_events
-        if all(existing_event.get(field) == event_row[field] for field in transition_fields)
+        for existing_event, semantics in zip(decoded_events, semantic_keys, strict=True)
+        if semantics == event_semantics
     ]
-    if len(matching_transitions) > 1:
-        raise ValueError("processing events contain duplicate semantic transition")
+    if matching_ids and not matching_transitions:
+        raise ValueError("existing processing event conflicts with transition event")
+    if matching_transitions and matching_transitions[0].event_id != event.event_id:
+        raise ValueError("semantic transition uses a different event_id")
     same_state_transitions = [
         existing_event
-        for existing_event in existing_events
-        if existing_event.get("recording_id") == event.recording_id
-        and existing_event.get("previous_state") == event.previous_state.value
-        and existing_event.get("target_state") == event.target_state.value
+        for existing_event in decoded_events
+        if existing_event.recording_id == event.recording_id
+        and existing_event.previous_state is event.previous_state
+        and existing_event.target_state is event.target_state
     ]
     if same_state_transitions and not matching_transitions:
         raise ValueError("existing processing event conflicts with transition inputs")

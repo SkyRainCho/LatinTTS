@@ -151,6 +151,85 @@ def test_persist_transition_recovers_manifest_without_duplicate_event(tmp_path: 
 
 
 @pytest.mark.parametrize(
+    ("case", "match"),
+    (
+        ("missing-field", "exact fields"),
+        ("unknown-field", "exact fields"),
+        ("illegal-enum", "not a valid CorpusState"),
+        ("illegal-hash", "SHA-256"),
+        ("illegal-time", "timezone-aware ISO datetime"),
+    ),
+)
+def test_processing_event_recovery_rejects_malformed_history_rows(
+    case: str,
+    match: str,
+) -> None:
+    _, _, event = _transition()
+    row = event.to_dict()
+    if case == "missing-field":
+        del row["schema_version"]
+    elif case == "unknown-field":
+        row["unexpected"] = True
+    elif case == "illegal-enum":
+        row["target_state"] = "UNKNOWN"
+    elif case == "illegal-hash":
+        row["config_sha256"] = "not-a-hash"
+    elif case == "illegal-time":
+        row["started_at"] = "2026-07-19T10:00:00"
+
+    with pytest.raises((TypeError, ValueError), match=match):
+        store.processing_event_exists((row,), event)
+
+
+def test_processing_event_recovery_rejects_same_semantics_with_different_id() -> None:
+    _, _, event = _transition()
+    row = event.to_dict()
+    row["event_id"] = "state-different-id"
+
+    with pytest.raises(ValueError, match=r"semantic transition.*different event_id"):
+        store.processing_event_exists((row,), event)
+
+
+def test_processing_event_recovery_rejects_same_id_with_conflicting_semantics() -> None:
+    _, _, event = _transition()
+    row = event.to_dict()
+    row["config_sha256"] = "c" * 64
+
+    with pytest.raises(ValueError, match="conflicts with transition event"):
+        store.processing_event_exists((row,), event)
+
+
+def test_processing_event_recovery_rejects_invalid_history_chain_order() -> None:
+    _, inventoried, _ = _transition()
+    ready, ready_event = advance_recording(
+        inventoried,
+        CorpusState.TEXT_CANDIDATES_READY,
+        input_sha256s=(inventoried.sha256,),
+        config_sha256="b" * 64,
+        tool_versions=("prepare-text=test",),
+        started_at="2026-07-19T10:00:02+08:00",
+        finished_at="2026-07-19T10:00:03+08:00",
+        result="success",
+    )
+    _, confirmed_event = advance_recording(
+        ready,
+        CorpusState.TRANSCRIPT_CONFIRMED,
+        input_sha256s=(inventoried.sha256, "c" * 64),
+        config_sha256="b" * 64,
+        tool_versions=("prepare-text=test",),
+        started_at="2026-07-19T10:00:04+08:00",
+        finished_at="2026-07-19T10:00:05+08:00",
+        result="success",
+    )
+
+    with pytest.raises(ValueError, match="invalid processing event state chain"):
+        store.processing_event_exists(
+            (confirmed_event.to_dict(), ready_event.to_dict()),
+            ready_event,
+        )
+
+
+@pytest.mark.parametrize(
     ("scenario", "match"),
     [
         ("target_missing", "target manifest.*exactly one"),
