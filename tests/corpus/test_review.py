@@ -527,6 +527,26 @@ def test_recording_decoder_rejects_non_object_metadata() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("payload", "digest_payload", "match"),
+    (
+        (b'{"entity":1}', b'{"entity":1}', "complete JSONL line"),
+        (b'{"entity":1}\n', b"different\n", "immutable journal prefix"),
+        (b"\xff\n", b"\xff\n", "UTF-8"),
+        (b"\n", b"\n", "blank line"),
+        (b"{\n", b"{\n", "invalid JSON"),
+    ),
+)
+def test_review_snapshot_decoder_rejects_noncanonical_prefix_bytes(
+    tmp_path: Path, payload: bytes, digest_payload: bytes, match: str
+) -> None:
+    path = tmp_path / "review.jsonl"
+    path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match=match):
+        review_module._review_snapshot_rows(path, hashlib.sha256(digest_payload).hexdigest())
+
+
 def test_canonical_descendant_accepts_only_direct_unaliased_path(tmp_path: Path) -> None:
     root = tmp_path / "review"
     group = root / "group"

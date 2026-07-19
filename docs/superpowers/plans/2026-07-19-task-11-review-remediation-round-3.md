@@ -63,9 +63,9 @@
 
 - [x] Add a failing canonical-path regression using a mocked reparse attribute on the automatic artifact path.
 - [x] Validate `pairing-automatic.json` with `_require_canonical_descendant()` before every repeated-pair/align read.
-- [ ] Change report wording from “original WAV” to “original source audio” and record abbreviated remediation commit IDs plus exact final coverage.
-- [ ] Run full pytest coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
-- [ ] Commit documentation and preserve the worktree without push or merge.
+- [x] Change report wording from “original WAV” to “original source audio” and record abbreviated remediation commit IDs plus exact final coverage.
+- [x] Run full pytest coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
+- [x] Commit documentation and preserve the worktree without push or merge.
 
 ## Self-Review
 

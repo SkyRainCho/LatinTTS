@@ -12,7 +12,8 @@ Commit subject: `feat: add corpus human review workflow`
   explicit empty gap intervals, quote escaping, and a strict reader that rejects schema drift,
   invalid/overlapping/out-of-range intervals, duplicate interval indexes, and tier changes.
 - Added review bundle export beneath each recording's canonical alignment run. Every repetition
-  group receives two clips decoded directly from the original WAV without loudness processing,
+  group receives two clips decoded directly from the original source audio without loudness
+  processing,
   two TextGrids, `automatic.json`, initialized per-take `decision.json`, and an HTML listening page
   with escaped human-controlled text.
 - Bound bundle summaries back to the strict Task 10 pairing/alignment artifacts, original and
@@ -39,10 +40,10 @@ Commit subject: `feat: add corpus human review workflow`
 - Followed RED -> GREEN from the required missing-module failure through TextGrid round-trip and
   rejection cases, replay, export, import, CLI, audit ordering, correction, idempotency, conflict,
   containment/hash, nested schema, and transcript-layer regressions.
-- Focused review suites: **129 passed**.
-- Full suite with literal `precision = 2` / `fail_under = 95.00`: **1,293 passed,
-  9 skipped**, total coverage **95.01%** (`5,686` statements, `284` missed);
-  `review.py` coverage is **95.16%**.
+- Focused review suites: **139 passed**.
+- Full suite with literal `precision = 2` / `fail_under = 95.00`: **1,303 passed,
+  9 skipped**, total coverage **95.06%** (`5,707` statements, `282` missed);
+  `review.py` coverage is **95.45%**.
   All skips are existing Windows tests requiring unavailable file/directory symlink privilege.
 - Ruff check: pass. Ruff format check: 69 files already formatted. Strict `mypy src`: pass.
 - Gold audit: `gold-audit: PASS total=351 errors=0`.
@@ -80,9 +81,11 @@ below are abbreviated Git object IDs:
 - `d82c52b`: strict repeated-pair validation, deterministic correction-event and immutable-prefix
   binding, ordinary-import legal entity validation, and actual-WAV-frame review duration.
 - `78a416d`: two-decimal coverage enforcement plus structural and media-boundary regression tests.
+- `885000c`: exact processing-event-bound review prefix decoding, prefix-local deterministic
+  correction validation, legal suffix validation, and canonical automatic-pairing reads.
 
-The final remediation suite collected 1,302 tests: **1,293 passed, 9 skipped**, with
-**95.01% total coverage** (`5,686` statements, `284` missed). Ruff check and format check,
+The final remediation suite collected 1,312 tests: **1,303 passed, 9 skipped**, with
+**95.06% total coverage** (`5,707` statements, `282` missed). Ruff check and format check,
 strict `mypy src`, the gold audit (`gold-audit: PASS total=351 errors=0`), and
 `git diff --check` all pass. The nine skips are Windows-host tests requiring unavailable
 file or directory symlink privilege; three of those are the new review root/group/file
