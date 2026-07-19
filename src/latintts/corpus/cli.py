@@ -5,14 +5,18 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import fields, replace
+from contextlib import suppress
+from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from latintts.corpus.audio import DerivedAudio, RunCommand, derive_analysis_audio
+from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.inventory import (
     InventoryInputError,
@@ -20,6 +24,7 @@ from latintts.corpus.inventory import (
     write_intake_skeleton,
 )
 from latintts.corpus.paths import CorpusPaths
+from latintts.corpus.pauses import PauseAnalysis, classify_pauses
 from latintts.corpus.records import (
     AudioMetadata,
     ProcessingEvent,
@@ -44,10 +49,31 @@ from latintts.corpus.transcripts import (
     build_transcript,
     compare_asr_observation,
 )
+from latintts.corpus.vad import (
+    SileroVadBackend,
+    SpeechInterval,
+    VadBackend,
+    VadFrame,
+    VadResult,
+)
 from latintts.domain import PronunciationOverride
 
 _PREPARE_TEXT_CONFIG_SHA256 = hashlib.sha256(b"latintts-prepare-text-v1").hexdigest()
 _OVERRIDE_FIELDS = frozenset({"stress_index", "ipa", "model_phonemes"})
+_SILERO_VERSION = "6.2.1"
+_SEGMENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "recording_id",
+        "status",
+        "issue_code",
+        "config_sha256",
+        "input_sha256s",
+        "analysis_audio",
+        "vad",
+        "pause",
+    }
+)
 
 
 def _doctor(project_root: Path) -> int:
@@ -656,6 +682,498 @@ def _prepare_text(paths: CorpusPaths) -> None:
         )
 
 
+def _canonical_digest(raw: object) -> str:
+    canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    if _canonical_digest(config.raw) != config.digest:
+        raise ValueError("corpus config digest does not match its parameters")
+    analysis = config.raw["analysis"]
+    vad = config.raw["vad"]
+    pause = config.raw["pause"]
+    if analysis != {"sample_rate": 16000, "channels": 1, "codec": "pcm_s16le"}:
+        raise ValueError("segment analysis config must be 16 kHz mono PCM16")
+    if type(vad) is not dict or set(vad) != {
+        "backend",
+        "model_version",
+        "threshold",
+        "min_speech_ms",
+        "min_silence_ms",
+        "window_samples",
+    }:
+        raise ValueError("VAD config must contain exact fields")
+    if vad["backend"] != "silero-vad" or vad["model_version"] != _SILERO_VERSION:
+        raise ValueError("VAD config must pin silero-vad 6.2.1")
+    SileroVadBackend(
+        threshold=vad["threshold"],
+        min_speech_ms=vad["min_speech_ms"],
+        min_silence_ms=vad["min_silence_ms"],
+        window_samples=vad["window_samples"],
+    )
+    if type(pause) is not dict or set(pause) != {
+        "profile_id",
+        "minimum_gap_ms",
+        "minimum_gap_count",
+        "separation_ratio",
+        "maximum_iterations",
+    }:
+        raise ValueError("pause config must contain exact fields")
+    if pause["profile_id"] != "pause-profile-v1":
+        raise ValueError("pause config must pin pause-profile-v1")
+    # Exercise the same parameter validator without requiring eligible gaps.
+    with suppress(CorpusFailure):
+        classify_pauses(
+            (),
+            sample_rate=16000,
+            minimum_gap_ms=pause["minimum_gap_ms"],
+            minimum_gap_count=pause["minimum_gap_count"],
+            separation_ratio=pause["separation_ratio"],
+            maximum_iterations=pause["maximum_iterations"],
+        )
+    return vad, pause
+
+
+def _load_segment_inputs(
+    paths: CorpusPaths,
+) -> tuple[tuple[RecordingRecord, ...], dict[str, str]]:
+    selection = _load_selection(paths.manifests / "pilot-selection.json")
+    recordings = _load_recordings(paths)
+    by_id = {record.recording_id: record for record in recordings}
+    pilot: list[RecordingRecord] = []
+    for recording_id, expected_hash in zip(
+        selection.recording_ids, selection.inventory_hashes, strict=True
+    ):
+        record = by_id.get(recording_id)
+        if record is None or record.sha256 != expected_hash:
+            raise ValueError("pilot selection does not match recordings.jsonl")
+        if record.content_type != "spoken":
+            raise ValueError("segment accepts only spoken pilot recordings")
+        if record.state not in {CorpusState.TRANSCRIPT_CONFIRMED, CorpusState.SEGMENTED}:
+            raise ValueError("pilot recording must be TRANSCRIPT_CONFIRMED or SEGMENTED")
+        if (
+            not recording_id
+            or recording_id in {".", ".."}
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                for character in recording_id
+            )
+        ):
+            raise ValueError("recording_id is unsafe for the segmentation run path")
+        pilot.append(record)
+    transcripts_path = paths.manifests / "transcripts.jsonl"
+    if not transcripts_path.exists():
+        raise ValueError("missing required manifest: transcripts.jsonl")
+    transcript_rows = read_jsonl(transcripts_path)
+    transcript_by_id: dict[str, str] = {}
+    for row in transcript_rows:
+        transcript_recording_id = row.get("recording_id")
+        spoken_text = row.get("spoken_text")
+        if (
+            not isinstance(transcript_recording_id, str)
+            or not isinstance(spoken_text, str)
+            or not spoken_text
+            or row.get("state") != "TRANSCRIPT_CONFIRMED"
+        ):
+            raise ValueError("transcripts.jsonl contains an invalid confirmed transcript")
+        if transcript_recording_id in transcript_by_id:
+            raise ValueError("transcripts.jsonl contains duplicate recording_id")
+        transcript_by_id[transcript_recording_id] = spoken_text
+    if set(transcript_by_id) != set(selection.recording_ids):
+        raise ValueError("transcripts must exactly match pilot selection recording IDs")
+    return recordings, transcript_by_id
+
+
+def _validate_vad_result(result: VadResult, *, sample_count: int, window_samples: int) -> None:
+    if type(result) is not VadResult:
+        raise TypeError("VAD backend must return VadResult")
+    if type(result.frames) is not tuple or type(result.speech_intervals) is not tuple:
+        raise TypeError("VAD frames and speech intervals must be tuples")
+    if (
+        result.backend != "silero-vad"
+        or result.model_version != _SILERO_VERSION
+        or result.sample_rate != 16000
+    ):
+        raise ValueError("VAD result backend, version, or sample rate does not match config")
+    expected_starts = tuple(range(0, sample_count, window_samples))
+    if tuple(frame.start_sample for frame in result.frames) != expected_starts:
+        raise ValueError("VAD frames do not cover consecutive analysis sample windows")
+    if any(type(frame) is not VadFrame for frame in result.frames):
+        raise TypeError("VAD frames must contain VadFrame values")
+    previous_end = 0
+    for interval in result.speech_intervals:
+        if type(interval) is not SpeechInterval:
+            raise TypeError("VAD speech intervals must contain SpeechInterval values")
+        if interval.end_sample > sample_count:
+            raise ValueError("VAD speech interval exceeds analysis sample bounds")
+        if interval.start_sample < previous_end:
+            raise ValueError("VAD speech intervals must be ordered and non-overlapping")
+        previous_end = interval.end_sample
+
+
+def _pause_analysis(result: VadResult, pause: dict[str, Any]) -> PauseAnalysis:
+    return classify_pauses(
+        result.speech_intervals,
+        sample_rate=result.sample_rate,
+        minimum_gap_ms=pause["minimum_gap_ms"],
+        minimum_gap_count=pause["minimum_gap_count"],
+        separation_ratio=pause["separation_ratio"],
+        maximum_iterations=pause["maximum_iterations"],
+    )
+
+
+def _segmentation_row(
+    *,
+    record: RecordingRecord,
+    config: CorpusConfig,
+    analysis: DerivedAudio,
+    transcript_sha256: str,
+    vad_result: VadResult,
+    vad_parameters: dict[str, Any],
+    pause_parameters: dict[str, Any],
+    pause_analysis: PauseAnalysis | None,
+) -> dict[str, Any]:
+    failure = pause_analysis is None
+    return {
+        "schema_version": "1",
+        "recording_id": record.recording_id,
+        "status": "failure" if failure else "success",
+        "issue_code": "PAUSE_CLASSES_AMBIGUOUS" if failure else None,
+        "config_sha256": config.digest,
+        "input_sha256s": [record.sha256, analysis.sha256, transcript_sha256],
+        "analysis_audio": analysis.to_dict(),
+        "vad": {
+            "backend": vad_result.backend,
+            "model_version": vad_result.model_version,
+            "sample_rate": vad_result.sample_rate,
+            "parameters": vad_parameters,
+            "parameters_sha256": _canonical_digest(vad_parameters),
+            "frames": [asdict(frame) for frame in vad_result.frames],
+            "speech_intervals": [asdict(interval) for interval in vad_result.speech_intervals],
+        },
+        "pause": {
+            "profile_id": pause_parameters["profile_id"],
+            "parameters": pause_parameters,
+            "parameters_sha256": _canonical_digest(pause_parameters),
+            "intervals": []
+            if pause_analysis is None
+            else [asdict(interval) for interval in pause_analysis.pauses],
+            "threshold_seconds": None
+            if pause_analysis is None
+            else pause_analysis.threshold_seconds,
+            "short_median_seconds": None
+            if pause_analysis is None
+            else pause_analysis.short_median_seconds,
+            "long_median_seconds": None
+            if pause_analysis is None
+            else pause_analysis.long_median_seconds,
+        },
+    }
+
+
+def _decode_cached_vad(raw: object) -> VadResult:
+    if type(raw) is not dict or set(raw) != {
+        "backend",
+        "model_version",
+        "sample_rate",
+        "parameters",
+        "parameters_sha256",
+        "frames",
+        "speech_intervals",
+    }:
+        raise ValueError("cached VAD result must contain exact fields")
+    if type(raw["frames"]) is not list or type(raw["speech_intervals"]) is not list:
+        raise TypeError("cached VAD arrays are invalid")
+    return VadResult(
+        raw["backend"],
+        raw["model_version"],
+        raw["sample_rate"],
+        tuple(VadFrame(**frame) for frame in raw["frames"]),
+        tuple(SpeechInterval(**interval) for interval in raw["speech_intervals"]),
+    )
+
+
+def _validate_result_row(
+    raw: dict[str, Any],
+    *,
+    record: RecordingRecord,
+    config: CorpusConfig,
+    analysis: DerivedAudio,
+    transcript_sha256: str,
+    vad_parameters: dict[str, Any],
+    pause_parameters: dict[str, Any],
+) -> bool:
+    if set(raw) != _SEGMENT_FIELDS:
+        raise ValueError("segmentation result must contain exact fields")
+    if (
+        raw["schema_version"] != "1"
+        or raw["recording_id"] != record.recording_id
+        or raw["config_sha256"] != config.digest
+        or raw["input_sha256s"] != [record.sha256, analysis.sha256, transcript_sha256]
+        or raw["analysis_audio"] != analysis.to_dict()
+    ):
+        raise ValueError("segmentation result identity or provenance does not match")
+    vad_raw = raw["vad"]
+    vad_result = _decode_cached_vad(vad_raw)
+    if vad_raw["parameters"] != vad_parameters or vad_raw["parameters_sha256"] != _canonical_digest(
+        vad_parameters
+    ):
+        raise ValueError("cached VAD parameters do not match")
+    assert analysis.metrics is not None
+    _validate_vad_result(
+        vad_result,
+        sample_count=analysis.metrics.sample_count,
+        window_samples=vad_parameters["window_samples"],
+    )
+    pause_raw = raw["pause"]
+    if type(pause_raw) is not dict or set(pause_raw) != {
+        "profile_id",
+        "parameters",
+        "parameters_sha256",
+        "intervals",
+        "threshold_seconds",
+        "short_median_seconds",
+        "long_median_seconds",
+    }:
+        raise ValueError("cached pause result must contain exact fields")
+    if (
+        pause_raw["profile_id"] != "pause-profile-v1"
+        or pause_raw["parameters"] != pause_parameters
+        or pause_raw["parameters_sha256"] != _canonical_digest(pause_parameters)
+    ):
+        raise ValueError("cached pause parameters do not match")
+    try:
+        expected_pause = _pause_analysis(vad_result, pause_parameters)
+    except CorpusFailure as error:
+        if (
+            error.code != "PAUSE_CLASSES_AMBIGUOUS"
+            or raw["status"] != "failure"
+            or raw["issue_code"] != error.code
+            or pause_raw["intervals"] != []
+            or any(
+                pause_raw[field] is not None
+                for field in (
+                    "threshold_seconds",
+                    "short_median_seconds",
+                    "long_median_seconds",
+                )
+            )
+        ):
+            raise ValueError("cached pause failure does not match VAD evidence") from error
+        return False
+    expected = _segmentation_row(
+        record=record,
+        config=config,
+        analysis=analysis,
+        transcript_sha256=transcript_sha256,
+        vad_result=vad_result,
+        vad_parameters=vad_parameters,
+        pause_parameters=pause_parameters,
+        pause_analysis=expected_pause,
+    )
+    if raw != expected:
+        raise ValueError("cached successful segmentation does not match VAD evidence")
+    return True
+
+
+def _transition_segmented(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    recordings: tuple[RecordingRecord, ...],
+    index: int,
+    input_sha256s: tuple[str, ...],
+) -> tuple[RecordingRecord, ...]:
+    record = recordings[index]
+    timestamp = datetime.now(timezone.utc).isoformat()
+    segmented, event = advance_recording(
+        record,
+        CorpusState.SEGMENTED,
+        input_sha256s=input_sha256s,
+        config_sha256=config.digest,
+        tool_versions=("silero-vad==6.2.1", "pause-profile-v1"),
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    updated = (*recordings[:index], segmented, *recordings[index + 1 :])
+    persist_recording_transition(
+        recordings_path=paths.manifests / "recordings.jsonl",
+        events_path=paths.alignments / "runs" / config.digest / "processing-events.jsonl",
+        recordings=updated,
+        event=event,
+    )
+    return updated
+
+
+def segment_corpus(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    backend: VadBackend,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand = subprocess.run,
+) -> bool:
+    vad_parameters, pause_parameters = _validate_segmentation_config(config)
+    recordings, transcripts = _load_segment_inputs(paths)
+    current = recordings
+    all_successful = True
+    for recording_id in _load_selection(paths.manifests / "pilot-selection.json").recording_ids:
+        index = next(
+            item for item, record in enumerate(current) if record.recording_id == recording_id
+        )
+        record = current[index]
+        transcript_sha256 = hashlib.sha256(
+            transcripts[record.recording_id].encode("utf-8")
+        ).hexdigest()
+        result_path = (
+            paths.alignments / "runs" / config.digest / record.recording_id / "segmentation.json"
+        )
+        if result_path.exists():
+            try:
+                rows = read_jsonl(result_path)
+                if len(rows) != 1:
+                    raise ValueError("segmentation cache must contain exactly one result")
+                cached_analysis_raw = rows[0].get("analysis_audio")
+                if type(cached_analysis_raw) is not dict:
+                    raise ValueError("segmentation cache lacks analysis provenance")
+                cached_analysis = DerivedAudio.from_dict(cached_analysis_raw)
+                analysis = derive_analysis_audio(
+                    record,
+                    paths,
+                    config,
+                    ffmpeg_version=ffmpeg_version,
+                    cached=cached_analysis,
+                    run_command=run_command,
+                )
+                successful = _validate_result_row(
+                    rows[0],
+                    record=record,
+                    config=config,
+                    analysis=analysis,
+                    transcript_sha256=transcript_sha256,
+                    vad_parameters=vad_parameters,
+                    pause_parameters=pause_parameters,
+                )
+            except (KeyError, TypeError, ValueError, CorpusFailure) as error:
+                if isinstance(error, CorpusFailure) and error.code == "ALIGNER_UNAVAILABLE":
+                    raise
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "cached segmentation result is invalid"
+                ) from error
+            if successful:
+                if record.state is CorpusState.TRANSCRIPT_CONFIRMED:
+                    current = _transition_segmented(
+                        paths,
+                        config,
+                        current,
+                        index,
+                        (record.sha256, analysis.sha256, transcript_sha256),
+                    )
+                elif record.state is CorpusState.SEGMENTED:
+                    timestamp = "1970-01-01T00:00:00+00:00"
+                    prior = replace(record, state=CorpusState.TRANSCRIPT_CONFIRMED)
+                    _, expected_event = advance_recording(
+                        prior,
+                        CorpusState.SEGMENTED,
+                        input_sha256s=(record.sha256, analysis.sha256, transcript_sha256),
+                        config_sha256=config.digest,
+                        tool_versions=("silero-vad==6.2.1", "pause-profile-v1"),
+                        started_at=timestamp,
+                        finished_at=timestamp,
+                        result="success",
+                    )
+                    events_path = (
+                        paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+                    )
+                    events = read_jsonl(events_path) if events_path.exists() else ()
+                    if not processing_event_exists(events, expected_event):
+                        raise CorpusFailure(
+                            "CACHE_ARTIFACT_INVALID",
+                            "SEGMENTED recording lacks its durable transition event",
+                        )
+            else:
+                if record.state is not CorpusState.TRANSCRIPT_CONFIRMED:
+                    raise CorpusFailure(
+                        "CACHE_ARTIFACT_INVALID",
+                        "failed segmentation cannot accompany SEGMENTED state",
+                    )
+                all_successful = False
+            continue
+        if record.state is CorpusState.SEGMENTED:
+            raise CorpusFailure(
+                "CACHE_ARTIFACT_INVALID", "SEGMENTED recording lacks segmentation result"
+            )
+        analysis = derive_analysis_audio(
+            record,
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        )
+        assert analysis.metrics is not None
+        vad_result = backend.analyze(paths.local_data / Path(*analysis.relative_path.split("/")))
+        _validate_vad_result(
+            vad_result,
+            sample_count=analysis.metrics.sample_count,
+            window_samples=vad_parameters["window_samples"],
+        )
+        try:
+            pauses = _pause_analysis(vad_result, pause_parameters)
+        except CorpusFailure as error:
+            if error.code != "PAUSE_CLASSES_AMBIGUOUS":
+                raise
+            pauses = None
+        row = _segmentation_row(
+            record=record,
+            config=config,
+            analysis=analysis,
+            transcript_sha256=transcript_sha256,
+            vad_result=vad_result,
+            vad_parameters=vad_parameters,
+            pause_parameters=pause_parameters,
+            pause_analysis=pauses,
+        )
+        _validate_result_row(
+            row,
+            record=record,
+            config=config,
+            analysis=analysis,
+            transcript_sha256=transcript_sha256,
+            vad_parameters=vad_parameters,
+            pause_parameters=pause_parameters,
+        )
+        write_jsonl_atomic(result_path, (row,))
+        if pauses is None:
+            all_successful = False
+            continue
+        current = _transition_segmented(
+            paths,
+            config,
+            current,
+            index,
+            (record.sha256, analysis.sha256, transcript_sha256),
+        )
+    return all_successful
+
+
+def _ffmpeg_version() -> str:
+    try:
+        completed = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            check=True,
+            encoding="utf-8",
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "ffmpeg version is unavailable") from error
+    first_line = completed.stdout.splitlines()[0] if completed.stdout.splitlines() else ""
+    if not first_line.strip():
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "ffmpeg version output is empty")
+    return first_line.strip()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare the local LatinTTS corpus")
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -669,6 +1187,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepare_text_parser = subparsers.add_parser("prepare-text")
     prepare_text_parser.add_argument("--init", action="store_true")
     prepare_text_parser.add_argument("--replace", action="store_true")
+    segment_parser = subparsers.add_parser("segment")
+    segment_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
@@ -722,4 +1246,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
         return 0
+    if args.command == "segment":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        paths.ensure_layout()
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            vad = config.raw["vad"]
+            backend = SileroVadBackend(
+                threshold=vad["threshold"],
+                min_speech_ms=vad["min_speech_ms"],
+                min_silence_ms=vad["min_silence_ms"],
+                window_samples=vad["window_samples"],
+            )
+            successful = segment_corpus(
+                paths,
+                config,
+                backend,
+                ffmpeg_version=_ffmpeg_version(),
+            )
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
+        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
+        return 0 if successful else 1
     raise AssertionError(args.command)
