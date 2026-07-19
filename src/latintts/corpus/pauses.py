@@ -34,12 +34,15 @@ def _validate_parameters(
     minimum_gap_count: int,
     separation_ratio: float,
     maximum_iterations: int,
+    minimum_cluster_size: int,
+    maximum_cluster_imbalance_ratio: float,
 ) -> None:
     for value, name, lower_bound in (
         (sample_rate, "sample_rate", 1),
         (minimum_gap_ms, "minimum_gap_ms", 0),
         (minimum_gap_count, "minimum_gap_count", 1),
         (maximum_iterations, "maximum_iterations", 1),
+        (minimum_cluster_size, "minimum_cluster_size", 2),
     ):
         if type(value) is not int:
             raise TypeError(f"{name} must be an integer")
@@ -49,6 +52,12 @@ def _validate_parameters(
         raise TypeError("separation_ratio must be a number")
     if not math.isfinite(separation_ratio) or separation_ratio <= 1:
         raise ValueError("separation_ratio must be finite and greater than one")
+    if type(maximum_cluster_imbalance_ratio) not in (int, float):
+        raise TypeError("maximum_cluster_imbalance_ratio must be a number")
+    if not math.isfinite(maximum_cluster_imbalance_ratio) or maximum_cluster_imbalance_ratio < 1:
+        raise ValueError("maximum_cluster_imbalance_ratio must be finite and at least one")
+    if minimum_gap_count < minimum_cluster_size * 2:
+        raise ValueError("minimum_gap_count must allow two minimum-size clusters")
 
 
 def classify_pauses(
@@ -59,6 +68,8 @@ def classify_pauses(
     minimum_gap_count: int,
     separation_ratio: float,
     maximum_iterations: int,
+    minimum_cluster_size: int,
+    maximum_cluster_imbalance_ratio: float,
 ) -> PauseAnalysis:
     _validate_parameters(
         sample_rate,
@@ -66,6 +77,8 @@ def classify_pauses(
         minimum_gap_count,
         separation_ratio,
         maximum_iterations,
+        minimum_cluster_size,
+        maximum_cluster_imbalance_ratio,
     )
     if type(speech) is not tuple or any(
         type(interval) is not SpeechInterval for interval in speech
@@ -102,6 +115,11 @@ def classify_pauses(
             break
         labels, centers = next_labels, next_centers
     assert labels is not None
+    cluster_sizes = [labels.count(cluster) for cluster in range(2)]
+    if min(cluster_sizes) < minimum_cluster_size:
+        raise CorpusFailure("PAUSE_CLASSES_AMBIGUOUS", "pause cluster size is unreliable")
+    if max(cluster_sizes) / min(cluster_sizes) > maximum_cluster_imbalance_ratio:
+        raise CorpusFailure("PAUSE_CLASSES_AMBIGUOUS", "pause clusters are imbalanced")
 
     medians = [
         statistics.median(

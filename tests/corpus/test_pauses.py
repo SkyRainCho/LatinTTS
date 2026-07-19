@@ -15,6 +15,8 @@ def _classify(speech: tuple[SpeechInterval, ...]):
         minimum_gap_count=4,
         separation_ratio=1.8,
         maximum_iterations=50,
+        minimum_cluster_size=2,
+        maximum_cluster_imbalance_ratio=3.0,
     )
 
 
@@ -94,6 +96,8 @@ def test_classify_pauses_rejects_overlapping_or_unsorted_speech() -> None:
         ({"minimum_gap_count": 0}, "minimum_gap_count"),
         ({"separation_ratio": 1.0}, "separation_ratio"),
         ({"maximum_iterations": 0}, "maximum_iterations"),
+        ({"maximum_cluster_imbalance_ratio": 0.5}, "maximum_cluster_imbalance_ratio"),
+        ({"minimum_cluster_size": 3}, "minimum_gap_count"),
     ),
 )
 def test_classify_pauses_validates_parameters(kwargs: dict[str, int | float], message: str) -> None:
@@ -103,6 +107,8 @@ def test_classify_pauses_validates_parameters(kwargs: dict[str, int | float], me
         "minimum_gap_count": 4,
         "separation_ratio": 1.8,
         "maximum_iterations": 50,
+        "minimum_cluster_size": 2,
+        "maximum_cluster_imbalance_ratio": 3.0,
     }
     parameters.update(kwargs)
 
@@ -124,6 +130,8 @@ def test_classify_pauses_rejects_wrong_parameter_types(overrides: dict[str, obje
         "minimum_gap_count": 4,
         "separation_ratio": 1.8,
         "maximum_iterations": 50,
+        "minimum_cluster_size": 2,
+        "maximum_cluster_imbalance_ratio": 3.0,
     }
     parameters.update(overrides)
 
@@ -140,6 +148,8 @@ def test_classify_pauses_requires_tuple_of_intervals() -> None:
             minimum_gap_count=4,
             separation_ratio=1.8,
             maximum_iterations=50,
+            minimum_cluster_size=2,
+            maximum_cluster_imbalance_ratio=3.0,
         )
 
 
@@ -152,3 +162,38 @@ def test_classify_pauses_rejects_two_clusters_below_separation_ratio() -> None:
 
     with pytest.raises(CorpusFailure, match="not separated"):
         _classify(tuple(speech))
+
+
+def test_classify_pauses_rejects_singleton_outlier_cluster() -> None:
+    gap_sizes = (200, 210, 220, 10000)
+    speech = [SpeechInterval(0, 1000)]
+    for gap in gap_sizes:
+        start = speech[-1].end_sample + gap
+        speech.append(SpeechInterval(start, start + 1000))
+
+    with pytest.raises(CorpusFailure, match="cluster size") as error:
+        _classify(tuple(speech))
+
+    assert error.value.code == "PAUSE_CLASSES_AMBIGUOUS"
+
+
+def test_classify_pauses_rejects_excessive_cluster_imbalance() -> None:
+    gap_sizes = (200, 220, 2000, 2100, 2200, 2300, 2400, 2500)
+    speech = [SpeechInterval(0, 1000)]
+    for gap in gap_sizes:
+        start = speech[-1].end_sample + gap
+        speech.append(SpeechInterval(start, start + 1000))
+
+    with pytest.raises(CorpusFailure, match="imbalanced") as error:
+        classify_pauses(
+            tuple(speech),
+            sample_rate=1000,
+            minimum_gap_ms=100,
+            minimum_gap_count=4,
+            separation_ratio=1.8,
+            maximum_iterations=50,
+            minimum_cluster_size=2,
+            maximum_cluster_imbalance_ratio=2.0,
+        )
+
+    assert error.value.code == "PAUSE_CLASSES_AMBIGUOUS"

@@ -10,8 +10,14 @@
     "backend": "silero-vad",
     "model_version": "6.2.1",
     "threshold": 0.5,
-    "min_speech_ms": 250,
-    "min_silence_ms": 100,
+    "neg_threshold": 0.35,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 100,
+    "max_speech_duration_s": 60.0,
+    "speech_pad_ms": 30,
+    "min_silence_at_max_speech": 98,
+    "use_max_poss_sil_at_max_speech": true,
+    "sample_rate": 16000,
     "window_samples": 512
   },
   "pause": {
@@ -19,7 +25,9 @@
     "minimum_gap_ms": 100,
     "minimum_gap_count": 4,
     "separation_ratio": 1.8,
-    "maximum_iterations": 50
+    "maximum_iterations": 50,
+    "minimum_cluster_size": 2,
+    "maximum_cluster_imbalance_ratio": 3.0
   },
   "pairing": {
     "minimum_duration_ratio": 0.65,

@@ -61,6 +61,36 @@ from latintts.domain import PronunciationOverride
 _PREPARE_TEXT_CONFIG_SHA256 = hashlib.sha256(b"latintts-prepare-text-v1").hexdigest()
 _OVERRIDE_FIELDS = frozenset({"stress_index", "ipa", "model_phonemes"})
 _SILERO_VERSION = "6.2.1"
+_CONFIG_FIELDS = frozenset(
+    {"schema_version", "corpus_version", "analysis", "vad", "pause", "pairing", "alignment"}
+)
+_VAD_FIELDS = frozenset(
+    {
+        "backend",
+        "model_version",
+        "threshold",
+        "neg_threshold",
+        "min_speech_duration_ms",
+        "min_silence_duration_ms",
+        "max_speech_duration_s",
+        "speech_pad_ms",
+        "min_silence_at_max_speech",
+        "use_max_poss_sil_at_max_speech",
+        "sample_rate",
+        "window_samples",
+    }
+)
+_PAUSE_FIELDS = frozenset(
+    {
+        "profile_id",
+        "minimum_gap_ms",
+        "minimum_gap_count",
+        "separation_ratio",
+        "maximum_iterations",
+        "minimum_cluster_size",
+        "maximum_cluster_imbalance_ratio",
+    }
+)
 _SEGMENT_FIELDS = frozenset(
     {
         "schema_version",
@@ -68,6 +98,7 @@ _SEGMENT_FIELDS = frozenset(
         "status",
         "issue_code",
         "config_sha256",
+        "cache_key",
         "input_sha256s",
         "analysis_audio",
         "vad",
@@ -687,7 +718,24 @@ def _canonical_digest(raw: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _segmentation_cache_key(
+    recording_id: str,
+    config_sha256: str,
+    input_sha256s: list[str],
+) -> str:
+    return _canonical_digest(
+        {
+            "schema_version": "1",
+            "recording_id": recording_id,
+            "config_sha256": config_sha256,
+            "input_sha256s": input_sha256s,
+        }
+    )
+
+
 def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    if type(config.raw) is not dict or set(config.raw) != _CONFIG_FIELDS:
+        raise ValueError("corpus config must contain exact top-level fields")
     if _canonical_digest(config.raw) != config.digest:
         raise ValueError("corpus config digest does not match its parameters")
     analysis = config.raw["analysis"]
@@ -695,30 +743,23 @@ def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any],
     pause = config.raw["pause"]
     if analysis != {"sample_rate": 16000, "channels": 1, "codec": "pcm_s16le"}:
         raise ValueError("segment analysis config must be 16 kHz mono PCM16")
-    if type(vad) is not dict or set(vad) != {
-        "backend",
-        "model_version",
-        "threshold",
-        "min_speech_ms",
-        "min_silence_ms",
-        "window_samples",
-    }:
+    if type(vad) is not dict or set(vad) != _VAD_FIELDS:
         raise ValueError("VAD config must contain exact fields")
     if vad["backend"] != "silero-vad" or vad["model_version"] != _SILERO_VERSION:
         raise ValueError("VAD config must pin silero-vad 6.2.1")
     SileroVadBackend(
         threshold=vad["threshold"],
-        min_speech_ms=vad["min_speech_ms"],
-        min_silence_ms=vad["min_silence_ms"],
+        neg_threshold=vad["neg_threshold"],
+        min_speech_duration_ms=vad["min_speech_duration_ms"],
+        min_silence_duration_ms=vad["min_silence_duration_ms"],
+        max_speech_duration_s=vad["max_speech_duration_s"],
+        speech_pad_ms=vad["speech_pad_ms"],
+        min_silence_at_max_speech=vad["min_silence_at_max_speech"],
+        use_max_poss_sil_at_max_speech=vad["use_max_poss_sil_at_max_speech"],
+        sample_rate=vad["sample_rate"],
         window_samples=vad["window_samples"],
     )
-    if type(pause) is not dict or set(pause) != {
-        "profile_id",
-        "minimum_gap_ms",
-        "minimum_gap_count",
-        "separation_ratio",
-        "maximum_iterations",
-    }:
+    if type(pause) is not dict or set(pause) != _PAUSE_FIELDS:
         raise ValueError("pause config must contain exact fields")
     if pause["profile_id"] != "pause-profile-v1":
         raise ValueError("pause config must pin pause-profile-v1")
@@ -731,6 +772,8 @@ def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any],
             minimum_gap_count=pause["minimum_gap_count"],
             separation_ratio=pause["separation_ratio"],
             maximum_iterations=pause["maximum_iterations"],
+            minimum_cluster_size=pause["minimum_cluster_size"],
+            maximum_cluster_imbalance_ratio=pause["maximum_cluster_imbalance_ratio"],
         )
     return vad, pause
 
@@ -785,7 +828,13 @@ def _load_segment_inputs(
     return recordings, transcript_by_id
 
 
-def _validate_vad_result(result: VadResult, *, sample_count: int, window_samples: int) -> None:
+def _validate_vad_result(
+    result: VadResult,
+    *,
+    sample_count: int,
+    window_samples: int,
+    model_sha256: str,
+) -> None:
     if type(result) is not VadResult:
         raise TypeError("VAD backend must return VadResult")
     if type(result.frames) is not tuple or type(result.speech_intervals) is not tuple:
@@ -793,14 +842,18 @@ def _validate_vad_result(result: VadResult, *, sample_count: int, window_samples
     if (
         result.backend != "silero-vad"
         or result.model_version != _SILERO_VERSION
+        or result.model_sha256 != model_sha256
         or result.sample_rate != 16000
     ):
-        raise ValueError("VAD result backend, version, or sample rate does not match config")
-    expected_starts = tuple(range(0, sample_count, window_samples))
-    if tuple(frame.start_sample for frame in result.frames) != expected_starts:
-        raise ValueError("VAD frames do not cover consecutive analysis sample windows")
+        raise ValueError("VAD result backend, model identity, or sample rate does not match")
     if any(type(frame) is not VadFrame for frame in result.frames):
         raise TypeError("VAD frames must contain VadFrame values")
+    expected_bounds = tuple(
+        (start, min(start + window_samples, sample_count))
+        for start in range(0, sample_count, window_samples)
+    )
+    if tuple((frame.start_sample, frame.end_sample) for frame in result.frames) != expected_bounds:
+        raise ValueError("VAD frames do not cover consecutive analysis sample windows")
     previous_end = 0
     for interval in result.speech_intervals:
         if type(interval) is not SpeechInterval:
@@ -820,6 +873,8 @@ def _pause_analysis(result: VadResult, pause: dict[str, Any]) -> PauseAnalysis:
         minimum_gap_count=pause["minimum_gap_count"],
         separation_ratio=pause["separation_ratio"],
         maximum_iterations=pause["maximum_iterations"],
+        minimum_cluster_size=pause["minimum_cluster_size"],
+        maximum_cluster_imbalance_ratio=pause["maximum_cluster_imbalance_ratio"],
     )
 
 
@@ -835,17 +890,25 @@ def _segmentation_row(
     pause_analysis: PauseAnalysis | None,
 ) -> dict[str, Any]:
     failure = pause_analysis is None
+    input_sha256s = [
+        record.sha256,
+        analysis.sha256,
+        transcript_sha256,
+        vad_result.model_sha256,
+    ]
     return {
         "schema_version": "1",
         "recording_id": record.recording_id,
         "status": "failure" if failure else "success",
         "issue_code": "PAUSE_CLASSES_AMBIGUOUS" if failure else None,
         "config_sha256": config.digest,
-        "input_sha256s": [record.sha256, analysis.sha256, transcript_sha256],
+        "cache_key": _segmentation_cache_key(record.recording_id, config.digest, input_sha256s),
+        "input_sha256s": input_sha256s,
         "analysis_audio": analysis.to_dict(),
         "vad": {
             "backend": vad_result.backend,
             "model_version": vad_result.model_version,
+            "model_sha256": vad_result.model_sha256,
             "sample_rate": vad_result.sample_rate,
             "parameters": vad_parameters,
             "parameters_sha256": _canonical_digest(vad_parameters),
@@ -876,6 +939,7 @@ def _decode_cached_vad(raw: object) -> VadResult:
     if type(raw) is not dict or set(raw) != {
         "backend",
         "model_version",
+        "model_sha256",
         "sample_rate",
         "parameters",
         "parameters_sha256",
@@ -888,6 +952,7 @@ def _decode_cached_vad(raw: object) -> VadResult:
     return VadResult(
         raw["backend"],
         raw["model_version"],
+        raw["model_sha256"],
         raw["sample_rate"],
         tuple(VadFrame(**frame) for frame in raw["frames"]),
         tuple(SpeechInterval(**interval) for interval in raw["speech_intervals"]),
@@ -901,16 +966,20 @@ def _validate_result_row(
     config: CorpusConfig,
     analysis: DerivedAudio,
     transcript_sha256: str,
+    model_sha256: str,
     vad_parameters: dict[str, Any],
     pause_parameters: dict[str, Any],
 ) -> bool:
     if set(raw) != _SEGMENT_FIELDS:
         raise ValueError("segmentation result must contain exact fields")
+    expected_input_sha256s = [record.sha256, analysis.sha256, transcript_sha256, model_sha256]
     if (
         raw["schema_version"] != "1"
         or raw["recording_id"] != record.recording_id
         or raw["config_sha256"] != config.digest
-        or raw["input_sha256s"] != [record.sha256, analysis.sha256, transcript_sha256]
+        or raw["cache_key"]
+        != _segmentation_cache_key(record.recording_id, config.digest, expected_input_sha256s)
+        or raw["input_sha256s"] != expected_input_sha256s
         or raw["analysis_audio"] != analysis.to_dict()
     ):
         raise ValueError("segmentation result identity or provenance does not match")
@@ -925,6 +994,7 @@ def _validate_result_row(
         vad_result,
         sample_count=analysis.metrics.sample_count,
         window_samples=vad_parameters["window_samples"],
+        model_sha256=model_sha256,
     )
     pause_raw = raw["pause"]
     if type(pause_raw) is not dict or set(pause_raw) != {
@@ -1016,6 +1086,13 @@ def segment_corpus(
 ) -> bool:
     vad_parameters, pause_parameters = _validate_segmentation_config(config)
     recordings, transcripts = _load_segment_inputs(paths)
+    model_sha256 = backend.model_sha256
+    if (
+        not isinstance(model_sha256, str)
+        or len(model_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in model_sha256)
+    ):
+        raise ValueError("VAD backend model_sha256 must be a lowercase SHA-256 digest")
     current = recordings
     all_successful = True
     for recording_id in _load_selection(paths.manifests / "pilot-selection.json").recording_ids:
@@ -1052,6 +1129,7 @@ def segment_corpus(
                     config=config,
                     analysis=analysis,
                     transcript_sha256=transcript_sha256,
+                    model_sha256=model_sha256,
                     vad_parameters=vad_parameters,
                     pause_parameters=pause_parameters,
                 )
@@ -1068,7 +1146,7 @@ def segment_corpus(
                         config,
                         current,
                         index,
-                        (record.sha256, analysis.sha256, transcript_sha256),
+                        (record.sha256, analysis.sha256, transcript_sha256, model_sha256),
                     )
                 elif record.state is CorpusState.SEGMENTED:
                     timestamp = "1970-01-01T00:00:00+00:00"
@@ -1076,7 +1154,12 @@ def segment_corpus(
                     _, expected_event = advance_recording(
                         prior,
                         CorpusState.SEGMENTED,
-                        input_sha256s=(record.sha256, analysis.sha256, transcript_sha256),
+                        input_sha256s=(
+                            record.sha256,
+                            analysis.sha256,
+                            transcript_sha256,
+                            model_sha256,
+                        ),
                         config_sha256=config.digest,
                         tool_versions=("silero-vad==6.2.1", "pause-profile-v1"),
                         started_at=timestamp,
@@ -1117,6 +1200,7 @@ def segment_corpus(
             vad_result,
             sample_count=analysis.metrics.sample_count,
             window_samples=vad_parameters["window_samples"],
+            model_sha256=model_sha256,
         )
         try:
             pauses = _pause_analysis(vad_result, pause_parameters)
@@ -1140,6 +1224,7 @@ def segment_corpus(
             config=config,
             analysis=analysis,
             transcript_sha256=transcript_sha256,
+            model_sha256=model_sha256,
             vad_parameters=vad_parameters,
             pause_parameters=pause_parameters,
         )
@@ -1152,7 +1237,7 @@ def segment_corpus(
             config,
             current,
             index,
-            (record.sha256, analysis.sha256, transcript_sha256),
+            (record.sha256, analysis.sha256, transcript_sha256, model_sha256),
         )
     return all_successful
 
@@ -1248,17 +1333,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "segment":
         paths = CorpusPaths.from_project_root(args.project_root)
-        paths.ensure_layout()
         config_path = args.config
         if not config_path.is_absolute():
             config_path = args.project_root / config_path
         try:
             config = CorpusConfig.load(config_path)
-            vad = config.raw["vad"]
+            vad, _ = _validate_segmentation_config(config)
+            paths.ensure_layout()
             backend = SileroVadBackend(
                 threshold=vad["threshold"],
-                min_speech_ms=vad["min_speech_ms"],
-                min_silence_ms=vad["min_silence_ms"],
+                neg_threshold=vad["neg_threshold"],
+                min_speech_duration_ms=vad["min_speech_duration_ms"],
+                min_silence_duration_ms=vad["min_silence_duration_ms"],
+                max_speech_duration_s=vad["max_speech_duration_s"],
+                speech_pad_ms=vad["speech_pad_ms"],
+                min_silence_at_max_speech=vad["min_silence_at_max_speech"],
+                use_max_poss_sil_at_max_speech=vad["use_max_poss_sil_at_max_speech"],
+                sample_rate=vad["sample_rate"],
                 window_samples=vad["window_samples"],
             )
             successful = segment_corpus(

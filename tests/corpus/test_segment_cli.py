@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import wave
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -20,18 +21,35 @@ from latintts.corpus.store import read_jsonl, write_jsonl_atomic
 from latintts.corpus.vad import SpeechInterval, VadFrame, VadResult
 from tests.corpus.factories import recording
 
+_MODEL_SHA256 = hashlib.sha256(b"fake-silero-weight").hexdigest()
+
 
 class _FakeVad:
-    def __init__(self, speech: tuple[SpeechInterval, ...]) -> None:
+    def __init__(
+        self,
+        speech: tuple[SpeechInterval, ...],
+        model_sha256: str = _MODEL_SHA256,
+    ) -> None:
         self.speech = speech
+        self.model_sha256 = model_sha256
         self.calls = 0
 
     def analyze(self, audio_path: Path) -> VadResult:
         self.calls += 1
         with wave.open(str(audio_path), "rb") as handle:
             sample_count = handle.getnframes()
-        frames = tuple(VadFrame(start, 0.8) for start in range(0, sample_count, 512))
-        return VadResult("silero-vad", "6.2.1", 16000, frames, self.speech)
+        frames = tuple(
+            VadFrame(start, min(start + 512, sample_count), 0.8)
+            for start in range(0, sample_count, 512)
+        )
+        return VadResult(
+            "silero-vad",
+            "6.2.1",
+            self.model_sha256,
+            16000,
+            frames,
+            self.speech,
+        )
 
 
 def _sha256(path: Path) -> str:
@@ -135,8 +153,30 @@ def test_segment_writes_auditable_result_advances_state_and_reuses_it(tmp_path: 
     assert result["config_sha256"] == config.digest
     assert result["vad"]["backend"] == "silero-vad"
     assert result["vad"]["model_version"] == "6.2.1"
-    assert result["vad"]["parameters"] == config.raw["vad"]
-    assert result["pause"]["parameters"] == config.raw["pause"]
+    assert result["vad"]["model_sha256"] == _MODEL_SHA256
+    assert result["vad"]["parameters"] == {
+        "backend": "silero-vad",
+        "model_version": "6.2.1",
+        "threshold": 0.5,
+        "neg_threshold": 0.35,
+        "min_speech_duration_ms": 250,
+        "min_silence_duration_ms": 100,
+        "max_speech_duration_s": 60.0,
+        "speech_pad_ms": 30,
+        "min_silence_at_max_speech": 98,
+        "use_max_poss_sil_at_max_speech": True,
+        "sample_rate": 16000,
+        "window_samples": 512,
+    }
+    assert result["pause"]["parameters"] == {
+        "profile_id": "pause-profile-v1",
+        "minimum_gap_ms": 100,
+        "minimum_gap_count": 4,
+        "separation_ratio": 1.8,
+        "maximum_iterations": 50,
+        "minimum_cluster_size": 2,
+        "maximum_cluster_imbalance_ratio": 3.0,
+    }
     assert (
         result["vad"]["parameters_sha256"]
         == hashlib.sha256(
@@ -153,7 +193,20 @@ def test_segment_writes_auditable_result_advances_state_and_reuses_it(tmp_path: 
         result["analysis_audio"]["source_sha256"],
         result["analysis_audio"]["sha256"],
         hashlib.sha256(b"Pater noster").hexdigest(),
+        _MODEL_SHA256,
     ]
+    cache_identity = {
+        "schema_version": "1",
+        "recording_id": "rec-1",
+        "config_sha256": config.digest,
+        "input_sha256s": result["input_sha256s"],
+    }
+    assert (
+        result["cache_key"]
+        == hashlib.sha256(
+            json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
     assert [pause["kind"] for pause in result["pause"]["intervals"]] == [
         "short",
         "long",
@@ -267,12 +320,13 @@ def test_segment_rejects_invalid_vad_sample_boundaries(tmp_path: Path) -> None:
     ("result", "message"),
     (
         (object(), "VadResult"),
-        (VadResult("other", "6.2.1", 16000, (), ()), "does not match"),
-        (VadResult("silero-vad", "6.2.1", 16000, (), ()), "consecutive"),
+        (VadResult("other", "6.2.1", _MODEL_SHA256, 16000, (), ()), "does not match"),
+        (VadResult("silero-vad", "6.2.1", _MODEL_SHA256, 16000, (), ()), "consecutive"),
         (
             VadResult(
                 "silero-vad",
                 "6.2.1",
+                _MODEL_SHA256,
                 16000,
                 (SimpleNamespace(start_sample=0),),  # type: ignore[arg-type]
                 (),
@@ -283,8 +337,9 @@ def test_segment_rejects_invalid_vad_sample_boundaries(tmp_path: Path) -> None:
             VadResult(
                 "silero-vad",
                 "6.2.1",
+                _MODEL_SHA256,
                 16000,
-                (VadFrame(0, 0.5),),
+                (VadFrame(0, 10, 0.5),),
                 (SimpleNamespace(start_sample=0, end_sample=1),),  # type: ignore[arg-type]
             ),
             "SpeechInterval",
@@ -293,8 +348,9 @@ def test_segment_rejects_invalid_vad_sample_boundaries(tmp_path: Path) -> None:
             VadResult(
                 "silero-vad",
                 "6.2.1",
+                _MODEL_SHA256,
                 16000,
-                (VadFrame(0, 0.5),),
+                (VadFrame(0, 10, 0.5),),
                 (SpeechInterval(5, 8), SpeechInterval(2, 4)),
             ),
             "ordered",
@@ -303,7 +359,12 @@ def test_segment_rejects_invalid_vad_sample_boundaries(tmp_path: Path) -> None:
 )
 def test_segmentation_validates_backend_contract(result: object, message: str) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
-        _validate_vad_result(result, sample_count=10, window_samples=512)  # type: ignore[arg-type]
+        _validate_vad_result(  # type: ignore[arg-type]
+            result,
+            sample_count=10,
+            window_samples=512,
+            model_sha256=_MODEL_SHA256,
+        )
 
 
 def test_segmentation_rejects_frame_type_name_impostor() -> None:
@@ -311,26 +372,38 @@ def test_segmentation_rejects_frame_type_name_impostor() -> None:
     result = VadResult(
         "silero-vad",
         "6.2.1",
+        _MODEL_SHA256,
         16000,
         (impostor,),  # type: ignore[arg-type]
         (),
     )
 
     with pytest.raises(TypeError, match="VadFrame"):
-        _validate_vad_result(result, sample_count=10, window_samples=512)
+        _validate_vad_result(
+            result,
+            sample_count=10,
+            window_samples=512,
+            model_sha256=_MODEL_SHA256,
+        )
 
 
 def test_segmentation_requires_immutable_vad_sequences() -> None:
     result = VadResult(
         "silero-vad",
         "6.2.1",
+        _MODEL_SHA256,
         16000,
-        [VadFrame(0, 0.5)],  # type: ignore[arg-type]
+        [VadFrame(0, 10, 0.5)],  # type: ignore[arg-type]
         [],  # type: ignore[arg-type]
     )
 
     with pytest.raises(TypeError, match="tuples"):
-        _validate_vad_result(result, sample_count=10, window_samples=512)
+        _validate_vad_result(
+            result,
+            sample_count=10,
+            window_samples=512,
+            model_sha256=_MODEL_SHA256,
+        )
 
 
 def test_segment_rejects_tampered_cached_result(tmp_path: Path) -> None:
@@ -358,6 +431,31 @@ def test_segment_rejects_tampered_cached_result(tmp_path: Path) -> None:
         )
 
     assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_segment_cache_rejects_changed_model_weight(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    backend = _FakeVad(_speech())
+    assert segment_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_transform,
+    )
+
+    changed_backend = _FakeVad(_speech(), "1" * 64)
+    with pytest.raises(CorpusFailure) as error:
+        segment_corpus(
+            paths,
+            config,
+            changed_backend,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_transform,
+        )
+
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+    assert changed_backend.calls == 0
 
 
 @pytest.mark.parametrize(("successful", "exit_code"), ((True, 0), (False, 1)))
@@ -529,3 +627,53 @@ def test_segment_cli_maps_failures(
 
     assert main(["--project-root", str(tmp_path), "segment"]) == exit_code
     assert capsys.readouterr().err.startswith(prefix)
+
+
+@pytest.mark.parametrize(
+    ("section", "mutation"),
+    (
+        ("vad", ("delete", "neg_threshold", None)),
+        ("vad", ("set", "unknown", True)),
+        ("vad", ("set", "threshold", "high")),
+        ("pause", ("delete", "minimum_cluster_size", None)),
+        ("pause", ("set", "unknown", True)),
+        ("pause", ("set", "maximum_cluster_imbalance_ratio", "many")),
+    ),
+)
+def test_segment_cli_rejects_nested_config_without_output_mutation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    section: str,
+    mutation: tuple[str, str, object],
+) -> None:
+    raw = json.loads(
+        (Path(__file__).parents[2] / "config" / "corpus" / "pilot-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    invalid = deepcopy(raw)
+    action, field, value = mutation
+    if action == "delete":
+        del invalid[section][field]
+    else:
+        invalid[section][field] = value
+    config_path = tmp_path / "invalid.json"
+    config_path.write_text(json.dumps(invalid), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "--project-root",
+                str(tmp_path),
+                "segment",
+                "--config",
+                str(config_path),
+            ]
+        )
+        == 2
+    )
+
+    error = capsys.readouterr().err
+    assert error.startswith("MANIFEST_SCHEMA_MISMATCH:")
+    assert "Traceback" not in error
+    assert not (tmp_path / "local-data").exists()
