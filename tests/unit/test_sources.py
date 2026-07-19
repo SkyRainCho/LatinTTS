@@ -19,6 +19,7 @@ SOURCE_IDS = {
 PRONUNCIATION_DOCUMENT = (
     Path(__file__).parents[2] / "docs" / "pronunciation" / "roman-ecclesiastical.md"
 )
+GOLD_FIXTURE_DOCUMENT = Path(__file__).parents[1] / "fixtures" / "README.md"
 
 
 def _load_pronunciation_document() -> str:
@@ -192,6 +193,35 @@ def test_document_defines_version_and_phoneme_rendering_contracts() -> None:
         "重读音节边界用 `ˈ` 取代 `.`",
     )
     assert all(contract in document for contract in required_contracts)
+
+
+def test_document_defines_gold_as_a_human_reviewed_regression_anchor() -> None:
+    document = _load_pronunciation_document()
+    required_contracts = (
+        "gold 集成测试是回归锚点和变更检测器",
+        "不是发音正确性的独立证明",
+        "禁止从当前 `Pronouncer` 输出自动重写",
+        "人工对照受影响规则的规范来源",
+        "重新审核所有受影响词条",
+    )
+    assert all(contract in document for contract in required_contracts)
+
+
+def test_gold_fixture_document_marks_ipa_as_human_verified() -> None:
+    assert GOLD_FIXTURE_DOCUMENT.is_file()
+    document = GOLD_FIXTURE_DOCUMENT.read_text(encoding="utf-8")
+
+    assert "`ipa`: human-verified, not pipeline-derived" in document
+    assert '`review_state="approved"`' in document
+    assert "不能用 `Pronouncer` 当前输出自动生成" in document
+
+
+def test_document_resolves_the_equal_rank_liber_source_scopes() -> None:
+    document = _load_pronunciation_document()
+
+    assert "相同的 `authority_rank=1` 不构成可互相覆盖的平局" in document
+    assert "1962 发音规则节选决定规则语义" in document
+    assert "1961 全扫描只决定正文出现与印刷 acute 证据" in document
 
 
 def test_canonical_phoneme_rows_cite_registered_sources() -> None:
