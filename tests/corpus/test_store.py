@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,64 @@ def test_persist_transition_keeps_event_when_recordings_replace_fails(
 
     assert read_jsonl(events_path) == (event.to_dict(),)
     assert read_jsonl(recordings_path)[0]["state"] == "DISCOVERED"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "match"),
+    [
+        ("target_missing", "target manifest.*exactly one"),
+        ("target_duplicate", "target manifest.*exactly one"),
+        ("target_state", "target_state"),
+        ("existing_missing", "existing manifest.*exactly one"),
+        ("existing_state", "previous_state"),
+    ],
+)
+def test_persist_transition_preflights_manifest_consistency_before_event_append(
+    tmp_path: Path, scenario: str, match: str
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    existing = original
+    targets = (updated,)
+    if scenario == "target_missing":
+        targets = (replace(updated, recording_id="rec-other"),)
+    elif scenario == "target_duplicate":
+        targets = (updated, updated)
+    elif scenario == "target_state":
+        targets = (original,)
+    elif scenario == "existing_missing":
+        existing = replace(original, recording_id="rec-other")
+    elif scenario == "existing_state":
+        existing = updated
+    write_jsonl_atomic(recordings_path, (existing.to_dict(),))
+
+    with pytest.raises(ValueError, match=match):
+        store.persist_recording_transition(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=targets,
+            event=event,
+        )
+
+    assert not events_path.exists()
+    assert read_jsonl(recordings_path) == (existing.to_dict(),)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_read_jsonl_rejects_nonstandard_numeric_constants(tmp_path: Path, constant: str) -> None:
+    path = tmp_path / "nonstandard.jsonl"
+    path.write_text(f'{{"value":{constant}}}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"non-standard JSON constant.*{constant}"):
+        read_jsonl(path)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_write_jsonl_rejects_nonfinite_numbers_without_replacing_existing(
+    tmp_path: Path, value: float
+) -> None:
+    path = tmp_path / "finite-only.jsonl"
+    write_jsonl_atomic(path, ({"value": 1.0},))
+    with pytest.raises(ValueError):
+        write_jsonl_atomic(path, ({"value": value},))
+    assert read_jsonl(path) == ({"value": 1.0},)
