@@ -2,12 +2,65 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from dataclasses import asdict, dataclass, fields, replace
+from datetime import date, datetime
 from typing import Any, Literal
 
 from latintts.corpus.domain import CorpusState, require_transition
 
 UnknownBool = bool | Literal["unknown"]
+ProcessingResult = Literal["success"]
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_nonempty_string(value: object, field: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+
+
+def _require_schema_version(value: object) -> None:
+    if value != "1" or type(value) is not str:
+        raise ValueError("schema_version must be '1'")
+
+
+def _require_sha256(value: object, field: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+
+
+def _require_positive_int(value: object, field: str) -> None:
+    if type(value) is not int:
+        raise TypeError(f"{field} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{field} must be positive")
+
+
+def _require_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a timezone-aware ISO datetime")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be a timezone-aware ISO datetime") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be a timezone-aware ISO datetime")
+    return parsed
+
+
+def _require_iso_date_or_datetime(value: object, field: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be an ISO date or timezone-aware datetime")
+    try:
+        if len(value) == 10:
+            date.fromisoformat(value)
+            return
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO date or timezone-aware datetime") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be an ISO date or timezone-aware datetime")
 
 
 def require_exact_fields(raw: dict[str, Any], fields: frozenset[str], record: str) -> None:
@@ -30,19 +83,32 @@ class RightsRecord:
     basis: str
     notes: str
 
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.rights_id, "rights_id")
+        _require_nonempty_string(self.owner_id, "owner_id")
+        _require_nonempty_string(self.speaker_id, "speaker_id")
+        boolean_fields = (
+            self.allow_local_processing,
+            self.allow_model_training,
+            self.allow_internal_evaluation,
+        )
+        if any(type(value) is not bool for value in boolean_fields):
+            raise TypeError("rights authorization fields must be booleans")
+        release_fields = (
+            self.allow_raw_release,
+            self.allow_segment_release,
+            self.allow_model_release,
+        )
+        if any(not (type(value) is bool or value == "unknown") for value in release_fields):
+            raise TypeError("rights release fields must be booleans or unknown")
+        _require_iso_date_or_datetime(self.authorized_at, "authorized_at")
+        _require_nonempty_string(self.basis, "basis")
+        if not isinstance(self.notes, str):
+            raise TypeError("notes must be a string")
+
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> RightsRecord:
         require_exact_fields(raw, frozenset(field.name for field in fields(cls)), "rights row")
-        boolean_fields = (
-            "allow_local_processing",
-            "allow_model_training",
-            "allow_internal_evaluation",
-        )
-        if any(type(raw[name]) is not bool for name in boolean_fields):
-            raise TypeError("rights authorization fields must be booleans")
-        release_fields = ("allow_raw_release", "allow_segment_release", "allow_model_release")
-        if any(raw[name] not in (True, False, "unknown") for name in release_fields):
-            raise TypeError("rights release fields must be booleans or unknown")
         return cls(**raw)
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,6 +123,14 @@ class IntakeRow:
     rights_id: str
     notes: str
 
+    def __post_init__(self) -> None:
+        _require_nonempty_string(self.relative_path, "relative_path")
+        _require_nonempty_string(self.title_or_citation, "title_or_citation")
+        _require_nonempty_string(self.speaker_id, "speaker_id")
+        _require_nonempty_string(self.rights_id, "rights_id")
+        if not isinstance(self.notes, str):
+            raise TypeError("notes must be a string")
+
 
 @dataclass(frozen=True, slots=True)
 class AudioMetadata:
@@ -65,6 +139,17 @@ class AudioMetadata:
     channels: int
     codec: str
     bit_rate: int | None
+
+    def __post_init__(self) -> None:
+        if type(self.duration_seconds) not in (int, float):
+            raise TypeError("duration_seconds must be a number")
+        if not math.isfinite(self.duration_seconds) or self.duration_seconds <= 0:
+            raise ValueError("duration_seconds must be finite and positive")
+        _require_positive_int(self.sample_rate, "sample_rate")
+        _require_positive_int(self.channels, "channels")
+        _require_nonempty_string(self.codec, "codec")
+        if self.bit_rate is not None:
+            _require_positive_int(self.bit_rate, "bit_rate")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +165,23 @@ class RecordingRecord:
     notes: str
     metadata: AudioMetadata
     state: CorpusState
+
+    def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version)
+        _require_nonempty_string(self.recording_id, "recording_id")
+        _require_nonempty_string(self.relative_path, "relative_path")
+        _require_sha256(self.sha256, "sha256")
+        if self.content_type not in ("spoken", "sung") or not isinstance(self.content_type, str):
+            raise ValueError("content_type must be spoken or sung")
+        _require_nonempty_string(self.title_or_citation, "title_or_citation")
+        _require_nonempty_string(self.speaker_id, "speaker_id")
+        _require_nonempty_string(self.rights_id, "rights_id")
+        if not isinstance(self.notes, str):
+            raise TypeError("notes must be a string")
+        if type(self.metadata) is not AudioMetadata:
+            raise TypeError("metadata must be AudioMetadata")
+        if type(self.state) is not CorpusState:
+            raise TypeError("state must be CorpusState")
 
     def to_dict(self) -> dict[str, Any]:
         raw = asdict(self)
@@ -99,7 +201,32 @@ class ProcessingEvent:
     tool_versions: tuple[str, ...]
     started_at: str
     finished_at: str
-    result: str
+    result: ProcessingResult
+
+    def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version)
+        _require_nonempty_string(self.event_id, "event_id")
+        _require_nonempty_string(self.recording_id, "recording_id")
+        if type(self.previous_state) is not CorpusState:
+            raise TypeError("previous_state must be CorpusState")
+        if type(self.target_state) is not CorpusState:
+            raise TypeError("target_state must be CorpusState")
+        require_transition(self.previous_state, self.target_state)
+        if type(self.input_sha256s) is not tuple or not self.input_sha256s:
+            raise ValueError("input_sha256s must be a non-empty tuple")
+        for digest in self.input_sha256s:
+            _require_sha256(digest, "input_sha256s")
+        _require_sha256(self.config_sha256, "config_sha256")
+        if type(self.tool_versions) is not tuple or not self.tool_versions:
+            raise ValueError("tool_versions must be a non-empty tuple")
+        for tool_version in self.tool_versions:
+            _require_nonempty_string(tool_version, "tool_versions")
+        started_at = _require_timestamp(self.started_at, "started_at")
+        finished_at = _require_timestamp(self.finished_at, "finished_at")
+        if finished_at < started_at:
+            raise ValueError("finished_at must not precede started_at")
+        if self.result != "success" or type(self.result) is not str:
+            raise ValueError("result must be success")
 
     def to_dict(self) -> dict[str, Any]:
         raw = asdict(self)
@@ -119,8 +246,10 @@ def advance_recording(
     tool_versions: tuple[str, ...],
     started_at: str,
     finished_at: str,
-    result: str,
+    result: ProcessingResult,
 ) -> tuple[RecordingRecord, ProcessingEvent]:
+    if type(target) is not CorpusState:
+        raise TypeError("target must be CorpusState")
     require_transition(record.state, target)
     identity = {
         "recording_id": record.recording_id,
@@ -161,6 +290,15 @@ class ReviewEvent:
     reason: str
     reviewer: str
     reviewed_at: str
+
+    def __post_init__(self) -> None:
+        _require_schema_version(self.schema_version)
+        _require_nonempty_string(self.review_event_id, "review_event_id")
+        _require_nonempty_string(self.entity_id, "entity_id")
+        _require_nonempty_string(self.field, "field")
+        _require_nonempty_string(self.reason, "reason")
+        _require_nonempty_string(self.reviewer, "reviewer")
+        _require_timestamp(self.reviewed_at, "reviewed_at")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
