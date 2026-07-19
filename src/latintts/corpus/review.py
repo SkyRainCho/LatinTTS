@@ -647,6 +647,32 @@ def _group_directory(run_directory: Path, group_id: str) -> Path:
     return _require_canonical_descendant(review_root, review_root / safe_id, kind="review group")
 
 
+def _review_entity_id(recording_id: str, group_id: str, take_index: int) -> str:
+    if type(recording_id) is not str or not recording_id:
+        raise ValueError("recording_id must be non-empty for review entity identity")
+    if type(group_id) is not str or not group_id:
+        raise ValueError("repetition_group_id must be non-empty for review entity identity")
+    if take_index not in (1, 2) or type(take_index) is not int:
+        raise ValueError("review entity take_index must be one or two")
+    return f"review:{len(recording_id)}:{recording_id}:{len(group_id)}:{group_id}:take:{take_index}"
+
+
+def _artifact_binding(
+    run_directory: Path,
+    pairing: PairingRecording,
+    alignment: dict[str, Any],
+    config: CorpusConfig,
+) -> dict[str, str]:
+    return {
+        "config_sha256": config.digest,
+        "pairing_artifact_sha256": _digest(run_directory / "pairing.json"),
+        "pairing_cache_key": pairing.cache_key,
+        "pairing_integrity_sha256": pairing.integrity_sha256,
+        "alignment_artifact_sha256": _digest(run_directory / "alignment.json"),
+        "alignment_cache_key": alignment["cache_key"],
+    }
+
+
 _BUNDLE_FILES = frozenset(
     {
         "index.html",
@@ -667,6 +693,7 @@ def _export_group(
     alignment: dict[tuple[str, int], dict[str, Any]],
     transcript: dict[str, Any],
     paths: CorpusPaths,
+    artifact_binding: dict[str, str],
     *,
     ffmpeg_version: str,
     run_command: RunCommand,
@@ -714,7 +741,9 @@ def _export_group(
             take_end=duration,
             words=result.words,
         )
-        entity_id = f"{group.repetition_group_id}-take-{take.take_index}"
+        entity_id = _review_entity_id(
+            recording.recording_id, group.repetition_group_id, take.take_index
+        )
         automatic_values = {
             "segment_start": 0.0,
             "segment_end": duration,
@@ -740,6 +769,14 @@ def _export_group(
                 "textgrid_file": textgrid_name,
                 "textgrid_sha256": _digest(directory / textgrid_name),
                 "candidate_audio_sha256": take.audio_sha256,
+                "take_provenance": {
+                    "source_start_sample": take.start_sample,
+                    "source_end_sample": take.end_sample,
+                    "candidate_audio_relative_path": take.audio_relative_path,
+                    "candidate_audio_sha256": take.audio_sha256,
+                    "alignment_cache_key": take.alignment_cache_key,
+                    "alignment_integrity_sha256": take.alignment_integrity_sha256,
+                },
                 "candidate_scores": {
                     "alignment_score": take.alignment_score,
                     "coverage": take.coverage,
@@ -775,6 +812,7 @@ def _export_group(
         "repetition_group_id": group.repetition_group_id,
         "unit_id": group.unit_id,
         "source_audio": {"relative_path": recording.relative_path, "sha256": recording.sha256},
+        "artifact_binding": artifact_binding,
         "text_layers": {
             "title_or_citation": recording.title_or_citation,
             "source_text": transcript["source_text"],
@@ -853,6 +891,7 @@ def export_review_bundle(
             raise ValueError("source audio reference or hash is invalid")
         run_directory, pairing, artifact = _load_pairing_and_alignment(paths, config, recording)
         alignment = _alignment_by_take(pairing, artifact, paths)
+        binding = _artifact_binding(run_directory, pairing, artifact, config)
         for outcome in pairing.groups:
             if outcome.group is None:
                 raise ValueError("review export requires selected repetition groups")
@@ -864,6 +903,7 @@ def export_review_bundle(
                 alignment,
                 transcripts[recording_id],
                 paths,
+                binding,
                 ffmpeg_version=ffmpeg_version,
                 run_command=command,
             )
@@ -905,6 +945,7 @@ _AUTOMATIC_FIELDS = frozenset(
         "repetition_group_id",
         "unit_id",
         "source_audio",
+        "artifact_binding",
         "text_layers",
         "takes",
     }
@@ -921,6 +962,7 @@ _AUTOMATIC_TAKE_FIELDS = frozenset(
         "textgrid_file",
         "textgrid_sha256",
         "candidate_audio_sha256",
+        "take_provenance",
         "candidate_scores",
         "quality_metrics",
         "warnings",
@@ -942,6 +984,26 @@ _ALIGNMENT_VERSION_FIELDS = frozenset(
         "model_revision",
         "model_license",
         "alignment_transform_version",
+    }
+)
+_ARTIFACT_BINDING_FIELDS = frozenset(
+    {
+        "config_sha256",
+        "pairing_artifact_sha256",
+        "pairing_cache_key",
+        "pairing_integrity_sha256",
+        "alignment_artifact_sha256",
+        "alignment_cache_key",
+    }
+)
+_TAKE_PROVENANCE_FIELDS = frozenset(
+    {
+        "source_start_sample",
+        "source_end_sample",
+        "candidate_audio_relative_path",
+        "candidate_audio_sha256",
+        "alignment_cache_key",
+        "alignment_integrity_sha256",
     }
 )
 
@@ -1170,6 +1232,19 @@ def _validate_take_summary(
         raise ValueError("review warnings do not match alignment")
     if raw["candidate_audio_sha256"] != take.audio_sha256:
         raise ValueError("review candidate audio hash does not match pairing")
+    take_provenance = raw["take_provenance"]
+    if type(take_provenance) is not dict:
+        raise TypeError("review take_provenance must be an object")
+    require_exact_fields(take_provenance, _TAKE_PROVENANCE_FIELDS, "review take provenance")
+    if take_provenance != {
+        "source_start_sample": take.start_sample,
+        "source_end_sample": take.end_sample,
+        "candidate_audio_relative_path": take.audio_relative_path,
+        "candidate_audio_sha256": take.audio_sha256,
+        "alignment_cache_key": take.alignment_cache_key,
+        "alignment_integrity_sha256": take.alignment_integrity_sha256,
+    }:
+        raise ValueError("review take provenance does not match pairing and alignment")
     frame_rate = recording.metadata.sample_rate
     expected_start = round(take.start_sample / 16_000 * frame_rate)
     expected_end = round(take.end_sample / 16_000 * frame_rate)
@@ -1308,6 +1383,12 @@ def import_review_bundle(
                 "sha256": recording.sha256,
             }:
                 raise ValueError("review source audio identity does not match recording")
+            binding_raw = automatic_raw["artifact_binding"]
+            if type(binding_raw) is not dict:
+                raise TypeError("review artifact_binding must be an object")
+            require_exact_fields(binding_raw, _ARTIFACT_BINDING_FIELDS, "review artifact binding")
+            if binding_raw != _artifact_binding(run_directory, pairing, artifact, config):
+                raise ValueError("review artifact binding is stale or does not match")
             text_layers = automatic_raw["text_layers"]
             if type(text_layers) is not dict:
                 raise TypeError("review text_layers must be an object")
@@ -1377,11 +1458,15 @@ def import_review_bundle(
             for take in group.takes:
                 take_raw = takes_by_index[take.take_index]
                 aligned = decoded_alignment[(group.repetition_group_id, take.take_index)]
-                entity_id = f"{group.repetition_group_id}-take-{take.take_index}"
+                entity_id = _review_entity_id(
+                    recording_id, group.repetition_group_id, take.take_index
+                )
+                if entity_id in expected_entities:
+                    raise ValueError("review pairing contains a duplicate global entity identity")
                 expected_entities.add(entity_id)
                 if take_raw["entity_id"] != entity_id or set(decision_by_entity) != {
-                    f"{group.repetition_group_id}-take-1",
-                    f"{group.repetition_group_id}-take-2",
+                    _review_entity_id(recording_id, group.repetition_group_id, 1),
+                    _review_entity_id(recording_id, group.repetition_group_id, 2),
                 }:
                     raise ValueError("review bundle entity identity does not match pairing")
                 audio_path = _bundle_file(

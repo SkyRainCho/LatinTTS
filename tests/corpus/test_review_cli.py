@@ -109,6 +109,7 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
         "repetition_group_id",
         "unit_id",
         "source_audio",
+        "artifact_binding",
         "text_layers",
         "takes",
     }
@@ -131,6 +132,10 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     assert automatic["text_layers"]["normalized_text"] == transcript["normalized_text"]
     assert all(take["audio_sha256"] for take in automatic["takes"])
     assert all(take["audio_provenance"]["mode"] == "review" for take in automatic["takes"])
+    assert all(
+        take["take_provenance"]["candidate_audio_relative_path"] for take in automatic["takes"]
+    )
+    assert automatic["artifact_binding"]["alignment_artifact_sha256"]
     assert all(take["textgrid_sha256"] for take in automatic["takes"])
     decision = json.loads((group / "decision.json").read_text(encoding="utf-8"))
     assert set(decision) == {
@@ -426,6 +431,21 @@ def test_import_review_rebuilds_trusted_clip_instead_of_trusting_edited_hash(
     automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"audio|provenance|trusted"):
+        import_review_bundle(paths, config)
+
+
+def test_import_review_rejects_bundle_after_exact_alignment_artifact_bytes_change(
+    tmp_path: Path,
+) -> None:
+    paths, config = _aligned_project(tmp_path)
+    export_review_bundle(paths, config)
+    alignment_path = paths.alignments / "runs" / config.digest / "rec-1" / "alignment.json"
+    alignment_path.write_text(
+        alignment_path.read_text(encoding="utf-8").rstrip("\n") + " \n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"artifact|stale|binding"):
         import_review_bundle(paths, config)
 
 

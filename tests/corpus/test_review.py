@@ -334,6 +334,17 @@ def test_review_replay_rejects_single_entity_history_for_another_expected_take()
         )
 
 
+def test_review_entity_id_is_collision_free_across_recordings_and_group_boundaries() -> None:
+    values = {
+        review_module._review_entity_id("ab", "c", 1),
+        review_module._review_entity_id("a", "bc", 1),
+        review_module._review_entity_id("ab", "c", 2),
+        review_module._review_entity_id("other", "c", 1),
+    }
+
+    assert len(values) == 4
+
+
 def test_review_event_from_dict_requires_exact_fields() -> None:
     raw = ReviewEvent(
         "1",
