@@ -132,6 +132,24 @@ def test_persist_transition_keeps_event_when_recordings_replace_fails(
     assert read_jsonl(recordings_path)[0]["state"] == "DISCOVERED"
 
 
+def test_persist_transition_recovers_manifest_without_duplicate_event(tmp_path: Path) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    write_jsonl_atomic(recordings_path, (original.to_dict(),))
+    write_jsonl_atomic(events_path, (event.to_dict(),))
+
+    store.persist_recording_transition(
+        recordings_path=recordings_path,
+        events_path=events_path,
+        recordings=(updated,),
+        event=event,
+    )
+
+    assert read_jsonl(events_path) == (event.to_dict(),)
+    assert read_jsonl(recordings_path) == (updated.to_dict(),)
+
+
 @pytest.mark.parametrize(
     ("scenario", "match"),
     [

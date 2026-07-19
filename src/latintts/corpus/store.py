@@ -77,6 +77,49 @@ def append_jsonl_event(path: Path, row: dict[str, Any]) -> None:
     write_jsonl_atomic(path, (*existing, row))
 
 
+def processing_event_exists(
+    existing_events: tuple[dict[str, Any], ...],
+    event: ProcessingEvent,
+) -> bool:
+    event_ids = [existing_event.get("event_id") for existing_event in existing_events]
+    if len(event_ids) != len(set(event_ids)):
+        raise ValueError("processing events contain duplicate event_id")
+    event_row = event.to_dict()
+    matching_ids = [
+        existing_event
+        for existing_event in existing_events
+        if existing_event.get("event_id") == event.event_id
+    ]
+    if matching_ids and matching_ids[0] != event_row:
+        raise ValueError("existing processing event conflicts with transition event")
+    transition_fields = (
+        "recording_id",
+        "previous_state",
+        "target_state",
+        "input_sha256s",
+        "config_sha256",
+        "tool_versions",
+        "result",
+    )
+    matching_transitions = [
+        existing_event
+        for existing_event in existing_events
+        if all(existing_event.get(field) == event_row[field] for field in transition_fields)
+    ]
+    if len(matching_transitions) > 1:
+        raise ValueError("processing events contain duplicate semantic transition")
+    same_state_transitions = [
+        existing_event
+        for existing_event in existing_events
+        if existing_event.get("recording_id") == event.recording_id
+        and existing_event.get("previous_state") == event.previous_state.value
+        and existing_event.get("target_state") == event.target_state.value
+    ]
+    if same_state_transitions and not matching_transitions:
+        raise ValueError("existing processing event conflicts with transition inputs")
+    return bool(matching_ids or matching_transitions)
+
+
 def persist_recording_transition(
     *,
     recordings_path: Path,
@@ -126,7 +169,9 @@ def persist_recording_transition(
                 raise ValueError("event recording may change only state")
         elif target_row != existing_row:
             raise ValueError("non-event recording must remain unchanged")
-    append_jsonl_event(events_path, event.to_dict())
+    existing_events = read_jsonl(events_path) if events_path.exists() else ()
+    if not processing_event_exists(existing_events, event):
+        append_jsonl_event(events_path, event.to_dict())
     try:
         write_jsonl_atomic(recordings_path, target_rows)
     except Exception as error:

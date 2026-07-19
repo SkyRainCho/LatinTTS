@@ -6,6 +6,7 @@ import importlib.util
 import json
 import shutil
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import fields, replace
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from latintts.corpus.inventory import (
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.records import (
     AudioMetadata,
+    ProcessingEvent,
     RecordingRecord,
     SourceCandidateIntake,
     TranscriptIntakeRow,
@@ -30,10 +32,12 @@ from latintts.corpus.records import (
 from latintts.corpus.selection import PilotSelection, select_pilot
 from latintts.corpus.store import (
     persist_recording_transition,
+    processing_event_exists,
     read_jsonl,
     write_jsonl_atomic,
 )
 from latintts.corpus.transcripts import (
+    TextCandidate,
     TranscriptInputError,
     TranscriptRecord,
     build_text_candidate,
@@ -152,14 +156,29 @@ def _transcript_intake_skeleton(recording_id: str) -> dict[str, Any]:
     ).to_dict()
 
 
-def _init_transcript_intake(paths: CorpusPaths) -> None:
+def _init_transcript_intake(paths: CorpusPaths, *, replace_existing: bool) -> None:
     selection_path = paths.manifests / "pilot-selection.json"
     if not selection_path.exists():
         raise TranscriptInputError("missing required manifest: pilot-selection.json")
     selection = _load_selection(selection_path)
+    intake_path = paths.manifests / "transcript-intake.jsonl"
+    expected_rows = tuple(
+        _transcript_intake_skeleton(recording_id) for recording_id in selection.recording_ids
+    )
+    if intake_path.exists():
+        try:
+            existing_rows = read_jsonl(intake_path)
+        except ValueError as error:
+            raise TranscriptInputError(
+                f"existing transcript-intake.jsonl is invalid: {error}"
+            ) from error
+        if existing_rows == expected_rows:
+            return
+        if not replace_existing:
+            raise TranscriptInputError("existing transcript-intake.jsonl differs; use --replace")
     write_jsonl_atomic(
-        paths.manifests / "transcript-intake.jsonl",
-        (_transcript_intake_skeleton(recording_id) for recording_id in selection.recording_ids),
+        intake_path,
+        expected_rows,
     )
 
 
@@ -190,6 +209,19 @@ def _read_local_text(paths: CorpusPaths, relative_path: str, field: str) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         raise TranscriptInputError(f"unable to read {field} as UTF-8: {error}") from error
+
+
+def _pronunciation_review_path(paths: CorpusPaths, recording_id: str) -> Path:
+    slug = hashlib.sha256(recording_id.encode("utf-8")).hexdigest()
+    manifests = paths.manifests.resolve()
+    destination = (paths.manifests / f"pronunciation-review-{slug}.json").resolve()
+    try:
+        destination.relative_to(manifests)
+    except ValueError as error:
+        raise TranscriptInputError("pronunciation review path escapes manifests") from error
+    if destination.parent != manifests:
+        raise TranscriptInputError("pronunciation review path must be directly beneath manifests")
+    return destination
 
 
 def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -252,9 +284,7 @@ def _parse_pronunciation_overrides(
         if ipa is not None and not isinstance(ipa, str):
             raise TranscriptInputError("override ipa must be a string or null")
         if phonemes is not None:
-            if type(phonemes) is not list or any(
-                not isinstance(item, str) for item in phonemes
-            ):
+            if type(phonemes) is not list or any(not isinstance(item, str) for item in phonemes):
                 raise TranscriptInputError(
                     "override model_phonemes must be an array of strings or null"
                 )
@@ -268,7 +298,7 @@ def _parse_pronunciation_overrides(
 def _validate_source_candidates(
     paths: CorpusPaths,
     row: TranscriptIntakeRow,
-) -> tuple[tuple[Any, ...], str]:
+) -> tuple[tuple[TextCandidate, ...], str]:
     if not row.source_candidates:
         raise TranscriptInputError("source_candidates must contain at least one candidate")
     selected = tuple(candidate for candidate in row.source_candidates if candidate.selected)
@@ -354,25 +384,30 @@ def _advance_transcript_recordings(
         )
         spoken_hash = hashlib.sha256(transcript.spoken_text.encode("utf-8")).hexdigest()
         timestamp = datetime.now(timezone.utc).isoformat()
-        ready_record, ready_event = advance_recording(
-            record,
-            CorpusState.TEXT_CANDIDATES_READY,
-            input_sha256s=candidate_hashes,
-            config_sha256=_PREPARE_TEXT_CONFIG_SHA256,
-            tool_versions=("latintts-prepare-text-v1",),
-            started_at=timestamp,
-            finished_at=timestamp,
-            result="success",
-        )
-        ready_records = (*current[:index], ready_record, *current[index + 1 :])
-        persist_recording_transition(
-            recordings_path=recordings_path,
-            events_path=events_path,
-            recordings=ready_records,
-            event=ready_event,
-        )
+        if record.state is CorpusState.INVENTORIED:
+            ready_record, ready_event = advance_recording(
+                record,
+                CorpusState.TEXT_CANDIDATES_READY,
+                input_sha256s=candidate_hashes,
+                config_sha256=_PREPARE_TEXT_CONFIG_SHA256,
+                tool_versions=("latintts-prepare-text-v1",),
+                started_at=timestamp,
+                finished_at=timestamp,
+                result="success",
+            )
+            ready_records = (*current[:index], ready_record, *current[index + 1 :])
+            persist_recording_transition(
+                recordings_path=recordings_path,
+                events_path=events_path,
+                recordings=ready_records,
+                event=ready_event,
+            )
+            current = ready_records
+            record = ready_record
+        if record.state is CorpusState.TRANSCRIPT_CONFIRMED:
+            continue
         confirmed_record, confirmed_event = advance_recording(
-            ready_record,
+            record,
             CorpusState.TRANSCRIPT_CONFIRMED,
             input_sha256s=(*candidate_hashes, spoken_hash),
             config_sha256=_PREPARE_TEXT_CONFIG_SHA256,
@@ -382,9 +417,9 @@ def _advance_transcript_recordings(
             result="success",
         )
         confirmed_records = (
-            *ready_records[:index],
+            *current[:index],
             confirmed_record,
-            *ready_records[index + 1 :],
+            *current[index + 1 :],
         )
         persist_recording_transition(
             recordings_path=recordings_path,
@@ -393,6 +428,103 @@ def _advance_transcript_recordings(
             event=confirmed_event,
         )
         current = confirmed_records
+
+
+def _expected_transcript_events(
+    record: RecordingRecord,
+    transcript: TranscriptRecord,
+) -> tuple[ProcessingEvent, ProcessingEvent]:
+    candidate_hashes = tuple(candidate.source_sha256 for candidate in transcript.source_candidates)
+    spoken_hash = hashlib.sha256(transcript.spoken_text.encode("utf-8")).hexdigest()
+    timestamp = "1970-01-01T00:00:00+00:00"
+    inventoried = replace(record, state=CorpusState.INVENTORIED)
+    ready, ready_event = advance_recording(
+        inventoried,
+        CorpusState.TEXT_CANDIDATES_READY,
+        input_sha256s=candidate_hashes,
+        config_sha256=_PREPARE_TEXT_CONFIG_SHA256,
+        tool_versions=("latintts-prepare-text-v1",),
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    _, confirmed_event = advance_recording(
+        ready,
+        CorpusState.TRANSCRIPT_CONFIRMED,
+        input_sha256s=(*candidate_hashes, spoken_hash),
+        config_sha256=_PREPARE_TEXT_CONFIG_SHA256,
+        tool_versions=("latintts-prepare-text-v1", "ecclesiastical-roman-v1"),
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    return ready_event, confirmed_event
+
+
+def _preflight_transcript_events(
+    paths: CorpusPaths,
+    records: tuple[RecordingRecord, ...],
+    transcripts: tuple[TranscriptRecord, ...],
+) -> None:
+    events_path = paths.alignments / "runs" / "prepare-text" / "processing-events.jsonl"
+    existing_events = read_jsonl(events_path) if events_path.exists() else ()
+    for record, transcript in zip(records, transcripts, strict=True):
+        ready_event, confirmed_event = _expected_transcript_events(record, transcript)
+        ready_exists = processing_event_exists(existing_events, ready_event)
+        confirmed_exists = processing_event_exists(existing_events, confirmed_event)
+        if confirmed_exists and not ready_exists:
+            raise TranscriptInputError(
+                f"recording {record.recording_id} confirmed event lacks ready predecessor"
+            )
+        if (
+            record.state
+            in {
+                CorpusState.TEXT_CANDIDATES_READY,
+                CorpusState.TRANSCRIPT_CONFIRMED,
+            }
+            and not ready_exists
+        ):
+            raise TranscriptInputError(
+                f"recording {record.recording_id} state lacks durable ready event"
+            )
+        if record.state is CorpusState.TRANSCRIPT_CONFIRMED and not confirmed_exists:
+            raise TranscriptInputError(
+                f"recording {record.recording_id} state lacks durable confirmed event"
+            )
+
+
+def _is_controlled_pronunciation_resolution(
+    existing: dict[str, Any],
+    proposed: dict[str, Any],
+) -> bool:
+    existing_facts = {key: value for key, value in existing.items() if key != "pronunciation_plan"}
+    proposed_facts = {key: value for key, value in proposed.items() if key != "pronunciation_plan"}
+    if proposed_facts != existing_facts:
+        return False
+    existing_plan = existing["pronunciation_plan"]
+    proposed_plan = proposed["pronunciation_plan"]
+    for key in ("schema_version", "rule_version", "original_text", "normalized_text"):
+        if proposed_plan[key] != existing_plan[key]:
+            return False
+    existing_warnings = Counter(existing_plan["warning_codes"])
+    proposed_warnings = Counter(proposed_plan["warning_codes"])
+    if not proposed_warnings < existing_warnings:
+        return False
+    existing_tokens = existing_plan["tokens"]
+    proposed_tokens = proposed_plan["tokens"]
+    if len(proposed_tokens) != len(existing_tokens):
+        return False
+    for existing_token, proposed_token in zip(
+        existing_tokens,
+        proposed_tokens,
+        strict=True,
+    ):
+        token_warnings = Counter(existing_token["warning_codes"])
+        if not token_warnings and proposed_token != existing_token:
+            return False
+        if Counter(proposed_token["warning_codes"]) - token_warnings:
+            return False
+    return True
 
 
 def _prepare_text(paths: CorpusPaths) -> None:
@@ -410,7 +542,7 @@ def _prepare_text(paths: CorpusPaths) -> None:
         raise TranscriptInputError("every transcript intake row must set confirmed=true")
     recordings = _load_recordings(paths)
     by_id = {record.recording_id: record for record in recordings}
-    pilot_states: set[CorpusState] = set()
+    pilot_records: list[RecordingRecord] = []
     for recording_id, inventory_hash in zip(
         selection.recording_ids,
         selection.inventory_hashes,
@@ -419,42 +551,70 @@ def _prepare_text(paths: CorpusPaths) -> None:
         record = by_id.get(recording_id)
         if record is None or record.sha256 != inventory_hash:
             raise TranscriptInputError("pilot selection does not match recordings.jsonl")
-        pilot_states.add(record.state)
-    allowed_state_sets = (
-        {CorpusState.INVENTORIED},
-        {CorpusState.TRANSCRIPT_CONFIRMED},
-    )
-    if pilot_states not in allowed_state_sets:
+        pilot_records.append(record)
+    allowed_states = {
+        CorpusState.INVENTORIED,
+        CorpusState.TEXT_CANDIDATES_READY,
+        CorpusState.TRANSCRIPT_CONFIRMED,
+    }
+    if any(record.state not in allowed_states for record in pilot_records):
         raise TranscriptInputError(
-            "pilot recordings must all be INVENTORIED or all be TRANSCRIPT_CONFIRMED"
+            "pilot recordings must be INVENTORIED, TEXT_CANDIDATES_READY, or TRANSCRIPT_CONFIRMED"
         )
     transcripts = tuple(_build_transcript_from_intake(paths, row) for row in intake)
     transcript_rows = tuple(
         json.loads(json.dumps(transcript.to_dict(), ensure_ascii=False))
         for transcript in transcripts
     )
+    _preflight_transcript_events(paths, tuple(pilot_records), transcripts)
     review_recording_ids = [
         transcript.recording_id
         for transcript in transcripts
         if transcript.pronunciation_plan["warning_codes"]
     ]
-    if pilot_states == {CorpusState.TRANSCRIPT_CONFIRMED}:
-        transcripts_path = paths.manifests / "transcripts.jsonl"
-        if not transcripts_path.exists() or read_jsonl(transcripts_path) != transcript_rows:
+    transcripts_path = paths.manifests / "transcripts.jsonl"
+    resolved_recording_ids: list[str] = []
+    if transcripts_path.exists():
+        existing_rows = read_jsonl(transcripts_path)
+        if len(existing_rows) != len(transcript_rows):
+            raise TranscriptInputError("transcript inputs differ from transcripts.jsonl")
+        for row, record, existing, proposed in zip(
+            intake,
+            pilot_records,
+            existing_rows,
+            transcript_rows,
+            strict=True,
+        ):
+            if proposed == existing:
+                continue
+            review_path = _pronunciation_review_path(paths, row.recording_id)
+            if (
+                record.state is not CorpusState.TRANSCRIPT_CONFIRMED
+                or not row.pronunciation_overrides_file
+                or not review_path.is_file()
+                or not _is_controlled_pronunciation_resolution(existing, proposed)
+            ):
+                raise TranscriptInputError("transcript inputs differ from transcripts.jsonl")
+            review = read_jsonl(review_path)
+            expected_hash = hashlib.sha256(proposed["spoken_text"].encode("utf-8")).hexdigest()
+            if (
+                len(review) != 1
+                or review[0].get("recording_id") != row.recording_id
+                or review[0].get("spoken_text_sha256") != expected_hash
+            ):
+                raise TranscriptInputError("pronunciation review template does not match")
+            resolved_recording_ids.append(row.recording_id)
+        if resolved_recording_ids:
+            write_jsonl_atomic(transcripts_path, transcript_rows)
+            for recording_id in resolved_recording_ids:
+                review_path = _pronunciation_review_path(paths, recording_id)
+                review_path.unlink()
+    else:
+        if any(record.state is not CorpusState.INVENTORIED for record in pilot_records):
             raise TranscriptInputError(
-                "confirmed transcript inputs differ from transcripts.jsonl"
+                "resumable recording state requires existing transcripts.jsonl"
             )
-        if review_recording_ids:
-            raise CorpusFailure(
-                "PRONUNCIATION_NEEDS_REVIEW",
-                "pronunciation review required for recording IDs: "
-                + ", ".join(review_recording_ids),
-            )
-        return
-    write_jsonl_atomic(
-        paths.manifests / "transcripts.jsonl",
-        transcript_rows,
-    )
+        write_jsonl_atomic(transcripts_path, transcript_rows)
     for transcript in transcripts:
         review_tokens = [
             {
@@ -469,9 +629,10 @@ def _prepare_text(paths: CorpusPaths) -> None:
         if not review_tokens:
             continue
         write_jsonl_atomic(
-            paths.manifests / f"pronunciation-review-{transcript.recording_id}.json",
+            _pronunciation_review_path(paths, transcript.recording_id),
             (
                 {
+                    "recording_id": transcript.recording_id,
                     "spoken_text_sha256": hashlib.sha256(
                         transcript.spoken_text.encode("utf-8")
                     ).hexdigest(),
@@ -491,8 +652,7 @@ def _prepare_text(paths: CorpusPaths) -> None:
     if review_recording_ids:
         raise CorpusFailure(
             "PRONUNCIATION_NEEDS_REVIEW",
-            "pronunciation review required for recording IDs: "
-            + ", ".join(review_recording_ids),
+            "pronunciation review required for recording IDs: " + ", ".join(review_recording_ids),
         )
 
 
@@ -508,6 +668,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     selection_parser.add_argument("--replace", action="store_true")
     prepare_text_parser = subparsers.add_parser("prepare-text")
     prepare_text_parser.add_argument("--init", action="store_true")
+    prepare_text_parser.add_argument("--replace", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
@@ -543,8 +704,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths.ensure_layout()
         try:
             if args.init:
-                _init_transcript_intake(paths)
+                _init_transcript_intake(paths, replace_existing=args.replace)
             else:
+                if args.replace:
+                    raise TranscriptInputError("--replace is only valid with --init")
                 _prepare_text(paths)
         except TranscriptInputError as error:
             print(f"{error.code}: {error}", file=sys.stderr)

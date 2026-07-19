@@ -31,10 +31,10 @@ def test_build_transcript_preserves_three_text_layers_and_units() -> None:
         "Pater noster",
         "qui es in caelis",
     ]
-    assert [
-        (unit.token_start_index, unit.token_end_index)
-        for unit in transcript.spoken_units
-    ] == [(0, 2), (2, 6)]
+    assert [(unit.token_start_index, unit.token_end_index) for unit in transcript.spoken_units] == [
+        (0, 2),
+        (2, 6),
+    ]
     assert transcript.normalized_text == "Pater noster qui es in caelis"
     assert transcript.pronunciation_plan["rule_version"] == "ecclesiastical-roman-v1"
     assert "alignment_text" not in transcript.to_dict()
@@ -65,4 +65,18 @@ def test_build_transcript_rejects_noncanonical_pronunciation_rule_version() -> N
             selected_candidate_id=candidate.candidate_id,
             spoken_unit_lines=("Pater noster",),
             pronouncer=pronouncer,
+        )
+
+
+@pytest.mark.parametrize("accessed_at", ("19-07-2026", "2026-07-19T12:00:00"))
+def test_build_text_candidate_rejects_non_iso_or_naive_access_time(
+    accessed_at: str,
+) -> None:
+    with pytest.raises(ValueError, match="ISO date or timezone-aware datetime"):
+        build_text_candidate(
+            source_id="source-1",
+            source_url="https://example.invalid/source",
+            source_version="edition-1",
+            accessed_at=accessed_at,
+            source_text="Pater noster",
         )

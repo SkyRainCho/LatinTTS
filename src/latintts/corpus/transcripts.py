@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
+from latintts.corpus.records import _require_iso_date_or_datetime
 from latintts.domain import PronunciationOverride, PronunciationPlan
 from latintts.normalization import tokenize_words
 from latintts.pipeline import Pronouncer
@@ -123,10 +124,10 @@ def build_text_candidate(
     source_text: str,
 ) -> TextCandidate:
     if not all(
-        value.strip()
-        for value in (source_id, source_url, source_version, accessed_at, source_text)
+        value.strip() for value in (source_id, source_url, source_version, accessed_at, source_text)
     ):
         raise ValueError("text candidate fields must not be empty")
+    _require_iso_date_or_datetime(accessed_at, "accessed_at")
     digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     identity = hashlib.sha256(
         "\0".join((source_id, source_version, digest)).encode("utf-8")
