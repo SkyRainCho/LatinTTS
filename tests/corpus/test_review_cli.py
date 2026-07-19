@@ -10,6 +10,7 @@ from subprocess import CompletedProcess
 
 import pytest
 
+from latintts.corpus import review as review_module
 from latintts.corpus import store
 from latintts.corpus.cli import align_corpus, main, pair_corpus
 from latintts.corpus.config import CorpusConfig
@@ -101,6 +102,23 @@ def _review_required_project(
         run_command=_audio_command,
     )
     return paths, config, backend
+
+
+def _confirm_pairing_correction(correction: Path) -> None:
+    automatic = json.loads((correction / "automatic.json").read_text(encoding="utf-8"))
+    decision_path = correction / "decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    saved_splits = {
+        unit["unit_id"]: unit["candidates"][0]["split_sample"] for unit in automatic["review_units"]
+    }
+    for row in decision["pairing_selections"]:
+        row.update(
+            split_sample=saved_splits[row["unit_id"]],
+            reason="listened to both preserved candidates",
+            reviewer="owner",
+            reviewed_at="2026-07-19T12:00:00+08:00",
+        )
+    decision_path.write_text(json.dumps(decision), encoding="utf-8")
 
 
 def _two_recording_aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
@@ -270,6 +288,90 @@ def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
     groups = export_review_bundle(paths, config)
     assert len(groups) == 3
     assert all(group.name != "pairing-correction" for group in groups)
+
+
+def test_pairing_correction_retry_recovers_after_corrected_pairing_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    real_persist = review_module.persist_recording_transition
+    monkeypatch.setattr(
+        review_module,
+        "persist_recording_transition",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("after pairing replace")),
+    )
+
+    with pytest.raises(RuntimeError, match="after pairing replace"):
+        import_review_bundle(paths, config)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    assert all(
+        outcome.status == "selected"
+        for outcome in pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0]).groups
+    )
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "SEGMENTED"
+    monkeypatch.setattr(review_module, "persist_recording_transition", real_persist)
+
+    assert import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "PAIRED"
+    assert (
+        len(
+            [
+                row
+                for row in read_jsonl(run_directory.parent / "processing-events.jsonl")
+                if row["target_state"] == "PAIRED"
+            ]
+        )
+        == 1
+    )
+
+
+def test_pairing_correction_retry_recovers_after_event_before_recordings_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    real_replace = store.os.replace
+
+    def fail_recordings_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == recordings_path:
+            raise OSError("recordings replace failed")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store.os, "replace", fail_recordings_replace)
+    with pytest.raises(store.RecordingTransitionPersistenceError, match="recovery required"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(store.os, "replace", real_replace)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    assert read_jsonl(recordings_path)[0]["state"] == "SEGMENTED"
+    assert (
+        len(
+            [
+                row
+                for row in read_jsonl(run_directory.parent / "processing-events.jsonl")
+                if row["target_state"] == "PAIRED"
+            ]
+        )
+        == 1
+    )
+
+    assert import_review_bundle(paths, config)
+    assert read_jsonl(recordings_path)[0]["state"] == "PAIRED"
+    assert (
+        len(
+            [
+                row
+                for row in read_jsonl(run_directory.parent / "processing-events.jsonl")
+                if row["target_state"] == "PAIRED"
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(

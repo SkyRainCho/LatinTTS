@@ -1416,6 +1416,18 @@ _PAIRING_DECISION_FIELDS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _PairingCorrectionSubmission:
+    run_directory: Path
+    original_pairing: PairingRecording
+    original_bytes: bytes
+    corrected_pairing: PairingRecording
+    corrected_bytes: bytes
+    pairing_needs_write: bool
+    correction_events: tuple[ReviewEvent, ...]
+    new_events: tuple[ReviewEvent, ...]
+
+
 def _pairing_entity_id(recording_id: str, unit_id: str) -> str:
     return f"pairing:{len(recording_id)}:{recording_id}:{len(unit_id)}:{unit_id}"
 
@@ -1425,8 +1437,36 @@ def _load_pairing_correction_submission(
     config: CorpusConfig,
     recording: RecordingRecord,
     existing: tuple[ReviewEvent, ...],
-) -> tuple[Path, PairingRecording, bytes, PairingRecording, tuple[ReviewEvent, ...]] | None:
-    run_directory, pairing = _load_pairing_only(paths, config, recording)
+) -> _PairingCorrectionSubmission | None:
+    run_directory, current_pairing = _load_pairing_only(paths, config, recording)
+    pairing_path = _require_canonical_descendant(
+        run_directory,
+        run_directory / "pairing.json",
+        kind="corrected pairing artifact",
+        require_file=True,
+    )
+    current_bytes = pairing_path.read_bytes()
+    automatic_pairing_path = run_directory / "pairing-automatic.json"
+    if automatic_pairing_path.exists():
+        automatic_pairing_path = _require_canonical_descendant(
+            run_directory,
+            automatic_pairing_path,
+            kind="automatic pairing artifact",
+            require_file=True,
+        )
+        original_bytes = automatic_pairing_path.read_bytes()
+        original_rows = read_jsonl(automatic_pairing_path)
+        if len(original_rows) != 1:
+            raise ValueError("automatic pairing artifact must contain exactly one row")
+        original_pairing = pairing_from_dict(original_rows[0])
+    else:
+        original_pairing = current_pairing
+        original_bytes = current_bytes
+    if (
+        original_pairing.recording_id != recording.recording_id
+        or original_pairing.config_sha256 != config.digest
+    ):
+        raise ValueError("automatic pairing identity does not match correction request")
     directory = _group_directory(run_directory, "pairing-correction")
     if not directory.is_dir() or {item.name for item in directory.iterdir()} != (
         _PAIRING_CORRECTION_FILES
@@ -1464,17 +1504,15 @@ def _load_pairing_correction_submission(
                 _pairing_correction_candidate(candidate) for candidate in outcome.candidates
             ],
         }
-        for outcome in pairing.groups
+        for outcome in original_pairing.groups
         if outcome.status == "review"
     ]
-    pairing_path = run_directory / "pairing.json"
-    original_bytes = pairing_path.read_bytes()
     if automatic != {
         "schema_version": "2",
         "recording_id": recording.recording_id,
         "pairing_artifact_sha256": hashlib.sha256(original_bytes).hexdigest(),
-        "pairing_cache_key": pairing.cache_key,
-        "pairing_integrity_sha256": pairing.integrity_sha256,
+        "pairing_cache_key": original_pairing.cache_key,
+        "pairing_integrity_sha256": original_pairing.integrity_sha256,
         "review_units": expected_units,
     }:
         raise ValueError("pairing correction automatic values are stale or invalid")
@@ -1517,7 +1555,7 @@ def _load_pairing_correction_submission(
                 raise ValueError("pairing selection reviewed_at must include a timezone")
         decoded[unit_id] = raw
     expected_ids: set[str] = {
-        outcome.unit_id for outcome in pairing.groups if outcome.status == "review"
+        outcome.unit_id for outcome in original_pairing.groups if outcome.status == "review"
     }
     if set(decoded) != expected_ids:
         raise ValueError("pairing selections must exactly cover review-required units")
@@ -1529,8 +1567,16 @@ def _load_pairing_correction_submission(
         if type(split) is not int:
             raise TypeError("confirmed pairing selection must contain an integer split")
         selections[unit_id] = split
-    corrected = materialize_reviewed_pairing(pairing, selections)
+    corrected = materialize_reviewed_pairing(original_pairing, selections)
+    corrected_bytes = (_canonical_json(pairing_to_dict(corrected)) + "\n").encode("utf-8")
+    if current_bytes == original_bytes:
+        pairing_needs_write = True
+    elif current_bytes == corrected_bytes and current_pairing == corrected:
+        pairing_needs_write = False
+    else:
+        raise ValueError("current pairing is neither the preserved automatic nor correction")
     new_events: list[ReviewEvent] = []
+    correction_events: list[ReviewEvent] = []
     for unit_id in sorted(expected_ids):
         row = decoded[unit_id]
         event = _new_review_event(
@@ -1550,7 +1596,17 @@ def _load_pairing_correction_submission(
                 raise ValueError("pairing correction conflicts with existing review history")
         else:
             new_events.append(event)
-    return run_directory, pairing, original_bytes, corrected, tuple(new_events)
+        correction_events.append(event)
+    return _PairingCorrectionSubmission(
+        run_directory,
+        original_pairing,
+        original_bytes,
+        corrected,
+        corrected_bytes,
+        pairing_needs_write,
+        tuple(correction_events),
+        tuple(new_events),
+    )
 
 
 def _import_pairing_corrections(
@@ -1573,7 +1629,7 @@ def _import_pairing_corrections(
     segmented = tuple(segmented_items)
     if not segmented:
         return None
-    submissions: list[tuple[RecordingRecord, Path, PairingRecording, bytes, PairingRecording]] = []
+    submissions: list[tuple[RecordingRecord, _PairingCorrectionSubmission]] = []
     new_events: list[ReviewEvent] = []
     all_confirmed = True
     for recording in segmented:
@@ -1583,36 +1639,48 @@ def _import_pairing_corrections(
         if submission is None:
             all_confirmed = False
             continue
-        run_directory, pairing, original_bytes, corrected, events = submission
-        submissions.append((recording, run_directory, pairing, original_bytes, corrected))
-        new_events.extend(events)
+        submissions.append((recording, submission))
+        new_events.extend(submission.new_events)
     review_path = paths.manifests / "review.jsonl"
     if new_events:
         write_jsonl_atomic(review_path, (event.to_dict() for event in (*existing, *new_events)))
     current = recordings
     indexes = {record.recording_id: index for index, record in enumerate(recordings)}
-    for recording, run_directory, pairing, original_bytes, corrected in submissions:
+    for recording, submission in submissions:
+        run_directory = submission.run_directory
         automatic_path = run_directory / "pairing-automatic.json"
         if automatic_path.exists():
-            if _digest(automatic_path) != hashlib.sha256(original_bytes).hexdigest():
+            _require_canonical_descendant(
+                run_directory,
+                automatic_path,
+                kind="automatic pairing artifact",
+                require_file=True,
+            )
+            if automatic_path.read_bytes() != submission.original_bytes:
                 raise ValueError("preserved automatic pairing differs from submitted correction")
         else:
-            _write_bytes_atomic(automatic_path, original_bytes)
+            _write_bytes_atomic(automatic_path, submission.original_bytes)
         pairing_path = run_directory / "pairing.json"
-        write_jsonl_atomic(pairing_path, (pairing_to_dict(corrected),))
+        if submission.pairing_needs_write:
+            write_jsonl_atomic(pairing_path, (pairing_to_dict(submission.corrected_pairing),))
+        elif pairing_path.read_bytes() != submission.corrected_bytes:
+            raise ValueError("corrected pairing bytes changed during correction recovery")
         index = indexes[recording.recording_id]
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = max(event.reviewed_at for event in submission.correction_events)
         advanced, processing_event = advance_recording(
             current[index],
             CorpusState.PAIRED,
             input_sha256s=(
                 recording.sha256,
-                hashlib.sha256(original_bytes).hexdigest(),
+                hashlib.sha256(submission.original_bytes).hexdigest(),
                 _digest(pairing_path),
                 _digest(review_path),
             ),
             config_sha256=config.digest,
-            tool_versions=("human-pairing-review-v1", pairing.ffmpeg_version),
+            tool_versions=(
+                "human-pairing-review-v1",
+                submission.original_pairing.ffmpeg_version,
+            ),
             started_at=timestamp,
             finished_at=timestamp,
             result="success",
