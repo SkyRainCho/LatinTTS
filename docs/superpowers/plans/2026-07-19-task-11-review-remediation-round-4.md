@@ -58,9 +58,9 @@
 - Reports focused review results as separate passed/skipped counts, explicitly identifying Windows alias skips.
 
 - [x] Run focused review tests and record exact passed/skipped totals.
-- [ ] Run full pytest with exact coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
-- [ ] Update abbreviated remediation commit IDs, exact coverage, and focused pass/skip wording.
-- [ ] Commit documentation and preserve the worktree without push or merge.
+- [x] Run full pytest with exact coverage, Ruff check, Ruff format check, strict mypy, gold audit, `git diff --check`, and clean-status checks.
+- [x] Update abbreviated remediation commit IDs, exact coverage, and focused pass/skip wording.
+- [x] Commit documentation and preserve the worktree without push or merge.
 
 ## Self-Review
 
