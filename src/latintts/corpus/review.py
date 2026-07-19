@@ -1664,6 +1664,9 @@ def import_review_bundle(
     automatic_by_entity: dict[str, dict[str, Any]] = {}
     decision_rows: dict[str, dict[str, Any]] = {}
     expected_entities: set[str] = set()
+    entities_by_recording: dict[str, set[str]] = {
+        recording_id: set() for recording_id in selection.recording_ids
+    }
     alignment_paths: dict[str, Path] = {}
     run_directories: dict[str, Path] = {}
     for recording_id, expected_hash in zip(
@@ -1802,6 +1805,7 @@ def import_review_bundle(
                 if entity_id in expected_entities:
                     raise ValueError("review pairing contains a duplicate global entity identity")
                 expected_entities.add(entity_id)
+                entities_by_recording[recording_id].add(entity_id)
                 if take_raw["entity_id"] != entity_id or set(decision_by_entity) != {
                     _review_entity_id(recording_id, group.repetition_group_id, 1),
                     _review_entity_id(recording_id, group.repetition_group_id, 2),
@@ -1880,25 +1884,26 @@ def import_review_bundle(
         if len(ids) != len(set(ids)):
             raise ValueError("review submission conflicts with existing event IDs")
         write_jsonl_atomic(review_path, (event.to_dict() for event in combined))
-    all_complete = True
-    for entity_id in expected_entities:
-        entity_events = (
-            *events_by_entity.get(entity_id, ()),
-            *(event for event in new_events if event.entity_id == entity_id),
-        )
-        if effective_by_entity[entity_id]["review_decision"] not in {
-            "approved",
-            "rejected",
-        } or not any(event.field == "review_decision" for event in entity_events):
-            all_complete = False
-            break
-    if not all_complete:
-        return False
+    complete_by_recording: dict[str, bool] = {}
+    for recording_id, entity_ids in entities_by_recording.items():
+        complete = bool(entity_ids)
+        for entity_id in entity_ids:
+            entity_events = (
+                *events_by_entity.get(entity_id, ()),
+                *(event for event in new_events if event.entity_id == entity_id),
+            )
+            if effective_by_entity[entity_id]["review_decision"] not in {
+                "approved",
+                "rejected",
+            } or not any(event.field == "review_decision" for event in entity_events):
+                complete = False
+                break
+        complete_by_recording[recording_id] = complete
     current = recordings
     for recording_id in selection.recording_ids:
         index, _ = by_id[recording_id]
         record = current[index]
-        if record.state is CorpusState.REVIEWED:
+        if not complete_by_recording[recording_id] or record.state is CorpusState.REVIEWED:
             continue
         timestamp = datetime.now(timezone.utc).isoformat()
         advanced, processing_event = advance_recording(
@@ -1922,4 +1927,4 @@ def import_review_bundle(
             recordings=current,
             event=processing_event,
         )
-    return True
+    return all(complete_by_recording.values())

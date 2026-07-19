@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import wave
 from copy import deepcopy
 from pathlib import Path
@@ -100,6 +101,50 @@ def _review_required_project(
         run_command=_audio_command,
     )
     return paths, config, backend
+
+
+def _two_recording_aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
+    paths, config = _set_up(tmp_path)
+    source_one = paths.raw_spoken / "rec-1.wav"
+    source_two = paths.raw_spoken / "rec-2.wav"
+    shutil.copyfile(source_one, source_two)
+    recordings = list(read_jsonl(paths.manifests / "recordings.jsonl"))
+    second_recording = deepcopy(recordings[0])
+    second_recording.update(
+        recording_id="rec-2",
+        relative_path="raw/spoken/rec-2.wav",
+        title_or_citation="rec-2",
+        sha256=hashlib.sha256(source_two.read_bytes()).hexdigest(),
+    )
+    write_jsonl_atomic(paths.manifests / "recordings.jsonl", (*recordings, second_recording))
+    transcripts = list(read_jsonl(paths.manifests / "transcripts.jsonl"))
+    second_transcript = deepcopy(transcripts[0])
+    second_transcript["recording_id"] = "rec-2"
+    for unit in second_transcript["spoken_units"]:
+        unit["unit_id"] = unit["unit_id"].replace("rec-1-", "rec-2-")
+    write_jsonl_atomic(paths.manifests / "transcripts.jsonl", (*transcripts, second_transcript))
+    write_jsonl_atomic(
+        paths.manifests / "pilot-selection.json",
+        (
+            {
+                "schema_version": "1",
+                "strategy": "explicit-v1",
+                "recording_ids": ["rec-1", "rec-2"],
+                "inventory_hashes": [recordings[0]["sha256"], second_recording["sha256"]],
+            },
+        ),
+    )
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    assert align_corpus(paths, config, backend)
+    return paths, config
 
 
 def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
@@ -297,6 +342,34 @@ def test_import_review_appends_take_events_and_advances_only_when_complete(
 
     assert import_review_bundle(paths, config)
     assert len(read_jsonl(events_path)) == 7
+
+
+def test_import_review_advances_each_complete_recording_independently(tmp_path: Path) -> None:
+    paths, config = _two_recording_aligned_project(tmp_path)
+    groups = export_review_bundle(paths, config)
+    by_recording = {
+        recording_id: tuple(group for group in groups if group.parents[1].name == recording_id)
+        for recording_id in ("rec-1", "rec-2")
+    }
+    assert all(len(items) == 3 for items in by_recording.values())
+    for group in by_recording["rec-1"]:
+        _set_decisions(group)
+    _set_decisions(by_recording["rec-2"][0])
+
+    assert not import_review_bundle(paths, config)
+    states = {
+        row["recording_id"]: row["state"]
+        for row in read_jsonl(paths.manifests / "recordings.jsonl")
+    }
+    assert states == {"rec-1": "REVIEWED", "rec-2": "ALIGNED"}
+
+    for group in by_recording["rec-2"][1:]:
+        _set_decisions(group)
+    assert import_review_bundle(paths, config)
+    assert {
+        row["recording_id"]: row["state"]
+        for row in read_jsonl(paths.manifests / "recordings.jsonl")
+    } == {"rec-1": "REVIEWED", "rec-2": "REVIEWED"}
 
 
 def test_import_review_rejects_conflicting_duplicate_submission(tmp_path: Path) -> None:
