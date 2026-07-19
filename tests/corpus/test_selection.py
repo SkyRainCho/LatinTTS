@@ -74,6 +74,19 @@ def test_selection_hard_excludes_sung_and_non_inventoried_records() -> None:
         select_pilot(records, explicit_ids=("eligible-one", "rejected"))
 
 
+@pytest.mark.parametrize("reverse_duplicates", (False, True))
+def test_select_pilot_rejects_duplicate_recording_ids_regardless_of_order(
+    reverse_duplicates: bool,
+) -> None:
+    first = recording("duplicate", 10.0)
+    conflicting = replace(recording("duplicate", 60.0), sha256="a" * 64)
+    duplicate_records = (conflicting, first) if reverse_duplicates else (first, conflicting)
+    records = (*duplicate_records, recording("other", 20.0))
+
+    with pytest.raises(ValueError, match="duplicate recording_id"):
+        select_pilot(records)
+
+
 def test_cli_writes_selection_and_refuses_different_inventory_without_replace(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

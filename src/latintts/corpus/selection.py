@@ -25,6 +25,9 @@ def select_pilot(
     records: tuple[RecordingRecord, ...],
     explicit_ids: tuple[str, ...] = (),
 ) -> PilotSelection:
+    recording_ids = tuple(record.recording_id for record in records)
+    if len(recording_ids) != len(set(recording_ids)):
+        raise ValueError("records must not contain duplicate recording_id")
     eligible = {
         record.recording_id: record
         for record in records
