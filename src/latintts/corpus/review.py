@@ -1880,9 +1880,13 @@ def _import_pairing_corrections(
             continue
         submissions.append((recording, submission))
         new_events.extend(submission.new_events)
+    if not submissions:
+        return all_confirmed
     review_path = paths.manifests / "review.jsonl"
     prospective_events = (*existing, *new_events)
-    prospective_review_bytes = _review_events_bytes(prospective_events)
+    prospective_review_bytes = (
+        _review_events_bytes(prospective_events) if new_events else review_path.read_bytes()
+    )
     preflights: list[_PairingCorrectionPreflight] = []
     for recording, submission in submissions:
         corrected_sha256 = hashlib.sha256(submission.corrected_bytes).hexdigest()
@@ -1899,6 +1903,8 @@ def _import_pairing_corrections(
         )
     if new_events:
         write_jsonl_atomic(review_path, (event.to_dict() for event in prospective_events))
+    if review_path.read_bytes() != prospective_review_bytes:
+        raise ValueError("review journal differs from recovery preflight")
     current = recordings
     indexes = {record.recording_id: index for index, record in enumerate(recordings)}
     for (recording, submission), preflight in zip(submissions, preflights, strict=True):

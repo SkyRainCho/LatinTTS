@@ -515,6 +515,54 @@ def test_pairing_correction_retry_recovers_after_corrected_pairing_replace(
     )
 
 
+def test_pairing_correction_retry_binds_new_transition_to_durable_review_whitespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    real_persist = review_module.persist_recording_transition
+    monkeypatch.setattr(
+        review_module,
+        "persist_recording_transition",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("before transition persist")),
+    )
+
+    with pytest.raises(RuntimeError, match="before transition persist"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(review_module, "persist_recording_transition", real_persist)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    processing_path = run_directory.parent / "processing-events.jsonl"
+    assert not any(row["target_state"] == "PAIRED" for row in read_jsonl(processing_path))
+    review_path = paths.manifests / "review.jsonl"
+    review_rows = read_jsonl(review_path)
+    review_path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, separators=(", ", ": ")) + "\n"
+            for row in review_rows
+        ),
+        encoding="utf-8",
+    )
+    durable_review_bytes = review_path.read_bytes()
+    durable_review_sha256 = hashlib.sha256(durable_review_bytes).hexdigest()
+
+    assert import_review_bundle(paths, config)
+
+    assert review_path.read_bytes() == durable_review_bytes
+    paired_events = [row for row in read_jsonl(processing_path) if row["target_state"] == "PAIRED"]
+    assert len(paired_events) == 1
+    assert paired_events[0]["input_sha256s"][3] == durable_review_sha256
+    automatic = pairing_from_dict(read_jsonl(run_directory / "pairing-automatic.json")[0])
+    corrected = pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0])
+    assert review_module.validate_pairing_review_snapshot(
+        review_path,
+        durable_review_sha256,
+        automatic,
+        corrected,
+    )
+
+
 def test_pairing_correction_retry_recovers_after_event_before_recordings_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
