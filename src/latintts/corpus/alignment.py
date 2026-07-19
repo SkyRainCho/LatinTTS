@@ -454,6 +454,7 @@ def result_from_dict(raw: dict[str, Any]) -> AlignmentResult:
     expected = frozenset(field.name for field in fields(AlignmentResult))
     if set(raw) != expected:
         raise ValueError("alignment result must contain exact fields")
+    _require_digest(raw["integrity_sha256"], "integrity_sha256")
     tokens_raw = raw["tokens"]
     if type(tokens_raw) is not list:
         raise TypeError("alignment result tokens must be a JSON array")

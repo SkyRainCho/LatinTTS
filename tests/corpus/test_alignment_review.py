@@ -180,3 +180,31 @@ def test_result_integrity_detects_tampering_and_raw_output_is_deeply_isolated(
     serialized["model_license"] = "forged"
     with pytest.raises(ValueError, match="integrity"):
         result_from_dict(serialized)
+
+
+@pytest.mark.parametrize(
+    "integrity_sha256",
+    (
+        "",
+        None,
+        False,
+        0,
+        "not-a-digest",
+        "A" * 64,
+    ),
+)
+def test_result_from_dict_requires_a_lowercase_integrity_digest(
+    tmp_path: Path, integrity_sha256: object
+) -> None:
+    raw = result_to_dict(_result(_request(tmp_path))) | {"integrity_sha256": integrity_sha256}
+
+    with pytest.raises((TypeError, ValueError), match="integrity_sha256"):
+        result_from_dict(raw)
+
+
+def test_result_from_dict_rejects_missing_integrity_digest(tmp_path: Path) -> None:
+    raw = result_to_dict(_result(_request(tmp_path)))
+    del raw["integrity_sha256"]
+
+    with pytest.raises(ValueError, match="exact fields"):
+        result_from_dict(raw)
