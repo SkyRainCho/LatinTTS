@@ -30,10 +30,13 @@ from latintts.corpus.mms_alignment import create_alignment_backend
 from latintts.corpus.pairing import (
     PairingBackend,
     PairingParameters,
+    PairingRecording,
     load_selected_alignments,
     map_text_units,
     pair_recording,
     pairing_from_dict,
+    pairing_run_directory,
+    require_safe_pairing_id,
 )
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.pauses import PauseAnalysis, PauseInterval, classify_pauses
@@ -70,6 +73,7 @@ from latintts.corpus.vad import (
     VadResult,
 )
 from latintts.domain import PronunciationOverride
+from latintts.normalization import normalize_phrase, normalize_word, tokenize_words
 
 _PREPARE_TEXT_CONFIG_SHA256 = hashlib.sha256(b"latintts-prepare-text-v1").hexdigest()
 _OVERRIDE_FIELDS = frozenset({"stress_index", "ipa", "model_phonemes"})
@@ -1289,17 +1293,118 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
         raise TypeError("transcript spoken_units must be a non-empty array")
     expected = frozenset(field.name for field in fields(SpokenUnit))
     units: list[SpokenUnit] = []
+    unit_ids: set[str] = set()
     for unit_raw in units_raw:
         if type(unit_raw) is not dict:
             raise TypeError("spoken unit must be an object")
         require_exact_fields(unit_raw, expected, "spoken unit")
-        units.append(SpokenUnit(**unit_raw))
+        unit = SpokenUnit(**unit_raw)
+        require_safe_pairing_id(unit.unit_id, "unit_id")
+        if unit.unit_id in unit_ids:
+            raise ValueError("spoken unit_id values must be unique")
+        unit_ids.add(unit.unit_id)
+        units.append(unit)
     if "\n".join(unit.text for unit in units) != raw["spoken_text"]:
         raise ValueError("spoken units do not exactly reconstruct spoken_text")
     plan = raw["pronunciation_plan"]
-    if type(plan) is not dict or type(plan.get("tokens")) is not list:
+    if type(plan) is not dict:
         raise TypeError("transcript pronunciation plan is invalid")
-    if units[-1].token_end_index != len(plan["tokens"]):
+    require_exact_fields(
+        plan,
+        frozenset(
+            {
+                "schema_version",
+                "rule_version",
+                "original_text",
+                "normalized_text",
+                "tokens",
+                "phrase_phonemes",
+                "warning_codes",
+            }
+        ),
+        "pronunciation plan",
+    )
+    tokens_raw = plan["tokens"]
+    if type(tokens_raw) is not list:
+        raise TypeError("transcript pronunciation plan tokens must be an array")
+    if (
+        plan["schema_version"] != "1"
+        or plan["rule_version"] != "ecclesiastical-roman-v1"
+        or plan["original_text"] != raw["spoken_text"]
+        or plan["normalized_text"] != raw["normalized_text"]
+        or plan["normalized_text"] != normalize_phrase(raw["spoken_text"])
+    ):
+        raise ValueError("pronunciation plan identity or text does not match transcript")
+    for field in ("phrase_phonemes", "warning_codes"):
+        if type(plan[field]) is not list or any(type(item) is not str for item in plan[field]):
+            raise TypeError(f"pronunciation plan {field} must be a string array")
+    token_fields = frozenset(
+        {
+            "surface",
+            "normalized",
+            "source_span",
+            "syllables",
+            "stress_index",
+            "ipa",
+            "model_phonemes",
+            "resolution_method",
+            "source_ids",
+            "warning_codes",
+        }
+    )
+    spans = tokenize_words(raw["spoken_text"])
+    if len(tokens_raw) != len(spans):
+        raise ValueError("pronunciation plan token count does not match spoken_text")
+    for token_raw, span in zip(tokens_raw, spans, strict=True):
+        if type(token_raw) is not dict:
+            raise TypeError("pronunciation plan token must be an object")
+        require_exact_fields(token_raw, token_fields, "pronunciation plan token")
+        if (
+            token_raw["surface"] != span.surface
+            or token_raw["normalized"] != normalize_word(span.surface).normalized
+            or token_raw["source_span"] != [span.start, span.end]
+        ):
+            raise ValueError("pronunciation plan token content does not match spoken_text")
+        for field in ("syllables", "model_phonemes", "source_ids", "warning_codes"):
+            if type(token_raw[field]) is not list or any(
+                type(item) is not str for item in token_raw[field]
+            ):
+                raise TypeError(f"pronunciation token {field} must be a string array")
+        if (
+            not token_raw["syllables"]
+            or type(token_raw["stress_index"]) is not int
+            or not 0 <= token_raw["stress_index"] < len(token_raw["syllables"])
+            or type(token_raw["ipa"]) is not str
+            or type(token_raw["resolution_method"]) is not str
+        ):
+            raise ValueError("pronunciation token linguistic content is invalid")
+    expected_phrase_phonemes: list[str] = []
+    expected_warning_codes: list[str] = []
+    for token_raw in tokens_raw:
+        if expected_phrase_phonemes:
+            expected_phrase_phonemes.append("|")
+        expected_phrase_phonemes.extend(token_raw["model_phonemes"])
+        expected_warning_codes.extend(token_raw["warning_codes"])
+    if (
+        plan["phrase_phonemes"] != expected_phrase_phonemes
+        or plan["warning_codes"] != expected_warning_codes
+    ):
+        raise ValueError("pronunciation plan aggregate content does not match tokens")
+    token_cursor = 0
+    for ordinal, unit in enumerate(units, 1):
+        unit_surfaces = tuple(span.surface for span in tokenize_words(unit.text))
+        planned_surfaces = tuple(
+            token["surface"] for token in tokens_raw[unit.token_start_index : unit.token_end_index]
+        )
+        if (
+            unit.ordinal != ordinal
+            or unit.token_start_index != token_cursor
+            or unit.token_end_index <= unit.token_start_index
+            or planned_surfaces != unit_surfaces
+        ):
+            raise ValueError("spoken unit token ranges do not match unit text")
+        token_cursor = unit.token_end_index
+    if token_cursor != len(tokens_raw):
         raise ValueError("spoken unit token ranges do not cover pronunciation plan")
     return tuple(units)
 
@@ -1313,8 +1418,8 @@ def _load_pairing_segmentation(
     ffmpeg_version: str,
     run_command: RunCommand,
 ) -> tuple[DerivedAudio, tuple[SpeechInterval, ...], PauseAnalysis, str]:
-    result_path = (
-        paths.alignments / "runs" / config.digest / record.recording_id / "segmentation.json"
+    result_path = pairing_run_directory(paths, config.digest, record.recording_id) / (
+        "segmentation.json"
     )
     rows = read_jsonl(result_path)
     if len(rows) != 1:
@@ -1413,11 +1518,22 @@ def _persist_stage_transition(
     updated = (*recordings[:index], advanced, *recordings[index + 1 :])
     persist_recording_transition(
         recordings_path=paths.manifests / "recordings.jsonl",
-        events_path=paths.alignments / "runs" / config.digest / "processing-events.jsonl",
+        events_path=(
+            pairing_run_directory(paths, config.digest, recordings[index].recording_id).parent
+            / "processing-events.jsonl"
+        ),
         recordings=updated,
         event=event,
     )
     return updated
+
+
+def _pairing_tool_versions(pairing: PairingRecording, stage: str) -> tuple[str, ...]:
+    return (
+        stage,
+        pairing.ffmpeg_version,
+        *(f"alignment-runtime-sha256={digest}" for digest in pairing.alignment_runtime_sha256s),
+    )
 
 
 def pair_corpus(
@@ -1439,6 +1555,7 @@ def pair_corpus(
     ):
         raise ValueError("transcripts must exactly match pilot selection")
     current = recordings
+    all_successful = True
     for recording_id, inventory_hash in zip(
         selection.recording_ids, selection.inventory_hashes, strict=True
     ):
@@ -1453,6 +1570,7 @@ def pair_corpus(
             raise ValueError("pair accepts only spoken pilot recordings")
         if record.state not in {CorpusState.SEGMENTED, CorpusState.PAIRED}:
             raise ValueError("pair requires SEGMENTED or PAIRED recording state")
+        run_directory = pairing_run_directory(paths, config.digest, recording_id)
         transcript_raw = transcript_by_id[recording_id]
         assert isinstance(transcript_raw, dict)
         units = _decode_spoken_units(transcript_raw, recording_id)
@@ -1483,10 +1601,20 @@ def pair_corpus(
             ffmpeg_version=ffmpeg_version,
             run_command=run_command,
         )
-        pairing_path = paths.alignments / "runs" / config.digest / recording_id / "pairing.json"
+        pairing_path = run_directory / "pairing.json"
         pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
         inputs = (record.sha256, segmentation_sha256, pairing_sha256)
-        tools = ("two-take-pairing-v1", "mms-ctc==0.3.0")
+        tools = _pairing_tool_versions(pairing, "two-take-pairing-v1")
+        fully_selected = all(
+            outcome.status == "selected" and outcome.group is not None for outcome in pairing.groups
+        )
+        if not fully_selected:
+            if record.state is CorpusState.PAIRED:
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "PAIRED recording contains review outcomes"
+                )
+            all_successful = False
+            continue
         if record.state is CorpusState.SEGMENTED:
             current = _persist_stage_transition(
                 paths,
@@ -1506,16 +1634,14 @@ def pair_corpus(
                 config_sha256=config.digest,
                 tool_versions=tools,
             )
-            events = read_jsonl(
-                paths.alignments / "runs" / config.digest / "processing-events.jsonl"
-            )
+            events = read_jsonl(run_directory.parent / "processing-events.jsonl")
             if not processing_event_exists(events, event):
                 raise CorpusFailure(
                     "CACHE_ARTIFACT_INVALID", "PAIRED recording lacks durable transition event"
                 )
         if len(pairing.groups) != len(windows):
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing does not cover every unit")
-    return True
+    return all_successful
 
 
 def _alignment_row(
@@ -1524,12 +1650,10 @@ def _alignment_row(
     paths: CorpusPaths,
     backend: PairingBackend,
 ) -> dict[str, Any]:
+    if any(outcome.status != "selected" or outcome.group is None for outcome in pairing.groups):
+        raise ValueError("alignment requires selected outcomes for every spoken unit")
     selected = load_selected_alignments(pairing, paths, backend)
-    issues = [
-        {"unit_id": outcome.unit_id, "issue_code": outcome.issue_code}
-        for outcome in pairing.groups
-        if outcome.status == "review"
-    ]
+    issues: list[dict[str, Any]] = []
     pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
     takes = [
         {
@@ -1548,7 +1672,7 @@ def _alignment_row(
     return {
         "schema_version": "1",
         "recording_id": pairing.recording_id,
-        "status": "complete_with_issues" if issues else "success",
+        "status": "success",
         "config_sha256": pairing.config_sha256,
         "pairing_artifact_sha256": pairing_sha256,
         "pairing_cache_key": pairing.cache_key,
@@ -1583,15 +1707,33 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
             raise ValueError("align accepts only spoken pilot recordings")
         if record.state not in {CorpusState.PAIRED, CorpusState.ALIGNED}:
             raise ValueError("align requires PAIRED or ALIGNED recording state")
-        run_directory = paths.alignments / "runs" / config.digest / recording_id
+        run_directory = pairing_run_directory(paths, config.digest, recording_id)
         pairing_path = run_directory / "pairing.json"
-        pairing_rows = read_jsonl(pairing_path)
-        if len(pairing_rows) != 1:
-            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is missing")
         try:
+            pairing_rows = read_jsonl(pairing_path)
+            if len(pairing_rows) != 1:
+                raise ValueError("pairing cache must contain exactly one recording")
             pairing = pairing_from_dict(pairing_rows[0])
             if pairing.recording_id != recording_id or pairing.config_sha256 != config.digest:
                 raise ValueError("pairing identity does not match align request")
+            pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+            pair_tools = _pairing_tool_versions(pairing, "two-take-pairing-v1")
+            paired_event = _expected_cached_transition(
+                record,
+                CorpusState.SEGMENTED,
+                CorpusState.PAIRED,
+                input_sha256s=(
+                    record.sha256,
+                    pairing.segmentation_artifact_sha256,
+                    pairing_sha256,
+                ),
+                config_sha256=config.digest,
+                tool_versions=pair_tools,
+            )
+            events_path = run_directory.parent / "processing-events.jsonl"
+            events = read_jsonl(events_path)
+            if not processing_event_exists(events, paired_event):
+                raise ValueError("pairing artifact is not bound to its PAIRED event")
             expected = _alignment_row(pairing_path, pairing, paths, backend)
         except (KeyError, OSError, TypeError, ValueError) as error:
             raise CorpusFailure(
@@ -1604,10 +1746,9 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
                 raise CorpusFailure("CACHE_ARTIFACT_INVALID", "alignment artifact is invalid")
         else:
             write_jsonl_atomic(alignment_path, (expected,))
-        pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
         alignment_sha256 = hashlib.sha256(alignment_path.read_bytes()).hexdigest()
         inputs = (record.sha256, pairing_sha256, alignment_sha256)
-        tools = ("cached-word-alignment-v1", "mms-ctc==0.3.0")
+        tools = _pairing_tool_versions(pairing, "cached-word-alignment-v1")
         if record.state is CorpusState.PAIRED:
             current = _persist_stage_transition(
                 paths,
@@ -1627,9 +1768,7 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
                 config_sha256=config.digest,
                 tool_versions=tools,
             )
-            events = read_jsonl(
-                paths.alignments / "runs" / config.digest / "processing-events.jsonl"
-            )
+            events = read_jsonl(run_directory.parent / "processing-events.jsonl")
             if not processing_event_exists(events, event):
                 raise CorpusFailure(
                     "CACHE_ARTIFACT_INVALID", "ALIGNED recording lacks durable transition event"

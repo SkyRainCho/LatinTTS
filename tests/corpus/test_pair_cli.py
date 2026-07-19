@@ -3,12 +3,19 @@ from __future__ import annotations
 import hashlib
 import shutil
 import wave
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from latintts.corpus.cli import align_corpus, main, pair_corpus, segment_corpus
+from latintts.corpus.cli import (
+    _decode_spoken_units,
+    align_corpus,
+    main,
+    pair_corpus,
+    segment_corpus,
+)
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.paths import CorpusPaths
@@ -119,6 +126,13 @@ def test_pair_corpus_advances_segmented_recording_and_align_reuses_selected_cach
         "selected",
         "selected",
     ]
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    pair_event = read_jsonl(events_path)[-1]
+    assert pair_event["tool_versions"] == [
+        "two-take-pairing-v1",
+        "ffmpeg-test-1",
+        *(f"alignment-runtime-sha256={digest}" for digest in pairing["alignment_runtime_sha256s"]),
+    ]
     assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "PAIRED"
     calls_after_pair = backend.calls
     assert pair_corpus(
@@ -137,14 +151,126 @@ def test_pair_corpus_advances_segmented_recording_and_align_reuses_selected_cach
     assert len(alignment["takes"]) == 6
     assert all(take["alignment_result"]["coverage"] == 1.0 for take in alignment["takes"])
     assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "ALIGNED"
+    align_event = read_jsonl(events_path)[-1]
+    assert align_event["tool_versions"] == [
+        "cached-word-alignment-v1",
+        "ffmpeg-test-1",
+        *(f"alignment-runtime-sha256={digest}" for digest in pairing["alignment_runtime_sha256s"]),
+    ]
     assert align_corpus(paths, config, backend)
     assert backend.calls == calls_after_pair
 
 
-def test_pair_and_align_preserve_review_issue_without_automatic_approval(tmp_path: Path) -> None:
+def test_pair_preserves_review_issue_without_advancing_state(tmp_path: Path) -> None:
     paths, config = _set_up(tmp_path)
     _segment(paths, config)
     backend = _FakeAligner(mismatched=True)
+    assert not pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    pairing = read_jsonl(paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json")[0]
+    assert [group["issue_code"] for group in pairing["groups"]] == [
+        "TAKE_TEXT_MISMATCH",
+        "TAKE_TEXT_MISMATCH",
+        "TAKE_TEXT_MISMATCH",
+    ]
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "SEGMENTED"
+    assert not (paths.alignments / "runs" / config.digest / "rec-1" / "alignment.json").exists()
+
+
+@pytest.mark.parametrize("mutation", ("duplicate-unit", "tampered-token-surface"))
+def test_pair_rejects_duplicate_units_and_same_count_tampered_plan(
+    tmp_path: Path, mutation: str
+) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    transcript_path = paths.manifests / "transcripts.jsonl"
+    transcript = read_jsonl(transcript_path)[0]
+    if mutation == "duplicate-unit":
+        transcript["spoken_units"][1]["unit_id"] = transcript["spoken_units"][0]["unit_id"]
+    else:
+        transcript["pronunciation_plan"]["tokens"][0]["surface"] = "Wrong"
+    write_jsonl_atomic(transcript_path, (transcript,))
+    with pytest.raises(ValueError, match=r"unit_id|token"):
+        pair_corpus(
+            paths,
+            config,
+            _FakeAligner(),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert not (paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "identity",
+        "units-array",
+        "unit-object",
+        "unit-text",
+        "plan-object",
+        "tokens-array",
+        "plan-identity",
+        "normalized-content",
+        "plan-string-array",
+        "token-count",
+        "token-object",
+        "token-string-array",
+        "token-linguistic",
+        "aggregate-content",
+        "unit-range",
+    ),
+)
+def test_decode_spoken_units_rejects_malformed_nested_transcript(
+    tmp_path: Path, mutation: str
+) -> None:
+    paths, _ = _set_up(tmp_path)
+    original = read_jsonl(paths.manifests / "transcripts.jsonl")[0]
+    raw = deepcopy(original)
+    if mutation == "identity":
+        raw["state"] = "DRAFT"
+    elif mutation == "units-array":
+        raw["spoken_units"] = []
+    elif mutation == "unit-object":
+        raw["spoken_units"][0] = "invalid"
+    elif mutation == "unit-text":
+        raw["spoken_units"][0]["text"] = "Wrong"
+    elif mutation == "plan-object":
+        raw["pronunciation_plan"] = "invalid"
+    elif mutation == "tokens-array":
+        raw["pronunciation_plan"]["tokens"] = "invalid"
+    elif mutation == "plan-identity":
+        raw["pronunciation_plan"]["rule_version"] = "wrong"
+    elif mutation == "normalized-content":
+        raw["normalized_text"] = "wrong"
+        raw["pronunciation_plan"]["normalized_text"] = "wrong"
+    elif mutation == "plan-string-array":
+        raw["pronunciation_plan"]["phrase_phonemes"] = "invalid"
+    elif mutation == "token-count":
+        raw["pronunciation_plan"]["tokens"].pop()
+    elif mutation == "token-object":
+        raw["pronunciation_plan"]["tokens"][0] = "invalid"
+    elif mutation == "token-string-array":
+        raw["pronunciation_plan"]["tokens"][0]["syllables"] = "invalid"
+    elif mutation == "token-linguistic":
+        raw["pronunciation_plan"]["tokens"][0]["stress_index"] = 999
+    elif mutation == "aggregate-content":
+        raw["pronunciation_plan"]["phrase_phonemes"][0] = "wrong"
+    else:
+        raw["spoken_units"][0]["token_end_index"] = 1
+    with pytest.raises((TypeError, ValueError)):
+        _decode_spoken_units(raw, "rec-1")
+
+
+def test_align_rejects_pairing_file_not_bound_to_paired_event(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
     assert pair_corpus(
         paths,
         config,
@@ -152,18 +278,11 @@ def test_pair_and_align_preserve_review_issue_without_automatic_approval(tmp_pat
         ffmpeg_version="ffmpeg-test-1",
         run_command=_audio_command,
     )
-    assert align_corpus(paths, config, backend)
-    alignment = read_jsonl(paths.alignments / "runs" / config.digest / "rec-1" / "alignment.json")[
-        0
-    ]
-    assert alignment["status"] == "complete_with_issues"
-    assert alignment["takes"] == []
-    assert [issue["issue_code"] for issue in alignment["issues"]] == [
-        "TAKE_TEXT_MISMATCH",
-        "TAKE_TEXT_MISMATCH",
-        "TAKE_TEXT_MISMATCH",
-    ]
-    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "ALIGNED"
+    pairing_path = paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json"
+    pairing_path.write_bytes(pairing_path.read_bytes() + b"\n")
+    with pytest.raises(CorpusFailure) as error:
+        align_corpus(paths, config, backend)
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
 
 
 @pytest.mark.parametrize(

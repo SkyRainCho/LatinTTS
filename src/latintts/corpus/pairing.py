@@ -5,7 +5,7 @@ import json
 import math
 import os
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import pairwise
@@ -27,6 +27,26 @@ from latintts.corpus.store import read_jsonl, write_jsonl_atomic
 from latintts.corpus.transcripts import SpokenUnit
 from latintts.corpus.vad import SpeechInterval
 
+_SAFE_COMPONENT_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def _require_safe_component(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value in {".", ".."}
+        or any(character not in _SAFE_COMPONENT_CHARACTERS for character in value)
+    ):
+        raise ValueError(f"{field} must be a safe path component")
+    return value
+
+
+def require_safe_pairing_id(value: object, field: str) -> str:
+    """Validate an identifier before it can influence pairing paths or artifact IDs."""
+    return _require_safe_component(value, field)
+
 
 @dataclass(frozen=True, slots=True)
 class TextUnitWindow:
@@ -39,8 +59,7 @@ class TextUnitWindow:
     token_end_index: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.unit_id) is not str or not self.unit_id.strip():
-            raise ValueError("unit_id must be a non-empty string")
+        _require_safe_component(self.unit_id, "unit_id")
         if type(self.text) is not str or not self.text.strip():
             raise ValueError("text must be a non-empty string")
         for value, field in (
@@ -194,10 +213,27 @@ class PairingRecording:
     config_sha256: str
     segmentation_artifact_sha256: str
     analysis_audio_sha256: str
+    ffmpeg_version: str
+    alignment_runtime_sha256s: tuple[str, ...]
     cache_key: str
     pairing_parameters: PairingParameters
     windows: tuple[TextUnitWindow, ...]
     groups: tuple[PairingGroupOutcome, ...]
+    integrity_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.ffmpeg_version) is not str or not self.ffmpeg_version.strip():
+            raise ValueError("ffmpeg_version must be a non-empty string")
+        if type(self.alignment_runtime_sha256s) is not tuple or any(
+            not _is_digest(value) for value in self.alignment_runtime_sha256s
+        ):
+            raise ValueError("alignment runtime identities must be SHA-256 digests")
+        if len(set(self.alignment_runtime_sha256s)) != len(self.alignment_runtime_sha256s):
+            raise ValueError("alignment runtime identities must be unique")
+        expected = _pairing_integrity(self)
+        if self.integrity_sha256 and self.integrity_sha256 != expected:
+            raise ValueError("pairing artifact integrity digest does not match content")
+        object.__setattr__(self, "integrity_sha256", expected)
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,9 +263,33 @@ CandidateExtractor = Callable[..., DerivedAudio]
 _DIGEST_LENGTH = 64
 
 
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if type(value) is tuple:
+        return [_plain_json(item) for item in value]
+    return value
+
+
 def _canonical_digest(raw: object) -> str:
-    canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        _plain_json(raw), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _alignment_runtime_sha256(request: AlignmentRequest) -> str:
+    return _canonical_digest(
+        {
+            "backend": request.backend,
+            "backend_version": request.backend_version,
+            "model_id": request.model_id,
+            "model_revision": request.model_revision,
+            "model_license": request.model_license,
+            "effective_parameters": request.effective_parameters,
+            "alignment_transform_version": request.alignment_transform_version,
+        }
+    )
 
 
 def _require_exact(raw: object, expected: set[str], name: str) -> dict[str, Any]:
@@ -404,13 +464,15 @@ def _group_from_dict(raw: object) -> RepetitionGroup:
     )
 
 
-def pairing_to_dict(result: PairingRecording) -> dict[str, Any]:
+def _pairing_payload(result: PairingRecording) -> dict[str, Any]:
     return {
         "schema_version": result.schema_version,
         "recording_id": result.recording_id,
         "config_sha256": result.config_sha256,
         "segmentation_artifact_sha256": result.segmentation_artifact_sha256,
         "analysis_audio_sha256": result.analysis_audio_sha256,
+        "ffmpeg_version": result.ffmpeg_version,
+        "alignment_runtime_sha256s": list(result.alignment_runtime_sha256s),
         "cache_key": result.cache_key,
         "pairing_parameters": result.pairing_parameters.to_dict(),
         "windows": [_window_to_dict(window) for window in result.windows],
@@ -427,6 +489,18 @@ def pairing_to_dict(result: PairingRecording) -> dict[str, Any]:
     }
 
 
+def _pairing_integrity(result: PairingRecording) -> str:
+    return _canonical_digest(_pairing_payload(result))
+
+
+def pairing_to_dict(result: PairingRecording) -> dict[str, Any]:
+    if type(result) is not PairingRecording:
+        raise TypeError("result must be a PairingRecording")
+    if result.integrity_sha256 != _pairing_integrity(result):
+        raise ValueError("pairing artifact integrity digest does not match content")
+    return _pairing_payload(result) | {"integrity_sha256": result.integrity_sha256}
+
+
 def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
     value = _require_exact(
         raw,
@@ -436,13 +510,18 @@ def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
             "config_sha256",
             "segmentation_artifact_sha256",
             "analysis_audio_sha256",
+            "ffmpeg_version",
+            "alignment_runtime_sha256s",
             "cache_key",
             "pairing_parameters",
             "windows",
             "groups",
+            "integrity_sha256",
         },
         "pairing recording",
     )
+    if value["schema_version"] != "1":
+        raise ValueError("pairing schema_version must be '1'")
     parameters_raw = _require_exact(
         value["pairing_parameters"],
         {"minimum_duration_ratio", "maximum_duration_ratio", "minimum_score_margin"},
@@ -451,7 +530,12 @@ def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
     parameters = PairingParameters(**parameters_raw)
     windows_raw = value["windows"]
     groups_raw = value["groups"]
-    if type(windows_raw) is not list or type(groups_raw) is not list:
+    runtimes_raw = value["alignment_runtime_sha256s"]
+    if (
+        type(windows_raw) is not list
+        or type(groups_raw) is not list
+        or type(runtimes_raw) is not list
+    ):
         raise TypeError("pairing windows and groups must be arrays")
     windows = tuple(_window_from_dict(window) for window in windows_raw)
     groups: list[PairingGroupOutcome] = []
@@ -486,19 +570,20 @@ def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
                 selected,
             )
         )
+    supplied_integrity = value["integrity_sha256"]
     result = PairingRecording(
         value["schema_version"],
         value["recording_id"],
         value["config_sha256"],
         value["segmentation_artifact_sha256"],
         value["analysis_audio_sha256"],
+        value["ffmpeg_version"],
+        tuple(runtimes_raw),
         value["cache_key"],
         parameters,
         windows,
         tuple(groups),
     )
-    if result.schema_version != "1":
-        raise ValueError("pairing schema_version must be '1'")
     if len(result.windows) != len(result.groups) or any(
         window.unit_id != group.unit_id
         for window, group in zip(result.windows, result.groups, strict=True)
@@ -521,6 +606,7 @@ def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
         result.segmentation_artifact_sha256,
         result.config_sha256,
         result.pairing_parameters,
+        result.ffmpeg_version,
     )
     if result.cache_key != expected_cache_key:
         raise ValueError("pairing cache identity does not match provenance")
@@ -597,6 +683,8 @@ def pairing_from_dict(raw: dict[str, Any]) -> PairingRecording:
         )
         if group.takes != expected_takes:
             raise ValueError("selected take evidence does not match the chosen split")
+    if supplied_integrity != result.integrity_sha256:
+        raise ValueError("pairing artifact integrity digest does not match content")
     return result
 
 
@@ -604,6 +692,7 @@ def _validate_spoken_units(units: tuple[SpokenUnit, ...]) -> None:
     if type(units) is not tuple or not units:
         raise CorpusFailure("TRANSCRIPT_SPOKEN_MISMATCH", "spoken units must not be empty")
     token_cursor = 0
+    unit_ids: set[str] = set()
     for ordinal, unit in enumerate(units, 1):
         if type(unit) is not SpokenUnit:
             raise TypeError("units must contain SpokenUnit values")
@@ -616,6 +705,10 @@ def _validate_spoken_units(units: tuple[SpokenUnit, ...]) -> None:
                 "TRANSCRIPT_SPOKEN_MISMATCH",
                 "spoken unit token ranges must be contiguous, complete, and ordered",
             )
+        _require_safe_component(unit.unit_id, "unit_id")
+        if unit.unit_id in unit_ids:
+            raise CorpusFailure("TRANSCRIPT_SPOKEN_MISMATCH", "spoken unit IDs must be unique")
+        unit_ids.add(unit.unit_id)
         token_cursor = unit.token_end_index
 
 
@@ -765,6 +858,7 @@ def _pairing_cache_key(
     segmentation_artifact_sha256: str,
     config_sha256: str,
     parameters: PairingParameters,
+    ffmpeg_version: str,
 ) -> str:
     return _canonical_digest(
         {
@@ -775,6 +869,7 @@ def _pairing_cache_key(
             "segmentation_artifact_sha256": segmentation_artifact_sha256,
             "config_sha256": config_sha256,
             "pairing_parameters": parameters.to_dict(),
+            "ffmpeg_version": ffmpeg_version,
         }
     )
 
@@ -787,6 +882,31 @@ def _is_digest(value: object) -> bool:
     )
 
 
+def pairing_run_directory(paths: CorpusPaths, config_sha256: str, recording_id: str) -> Path:
+    """Return a lexical, alias-free recording run directory below the fixed alignment root."""
+    if type(paths) is not CorpusPaths:
+        raise TypeError("paths must be CorpusPaths")
+    if not _is_digest(config_sha256):
+        raise ValueError("config_sha256 must be a lowercase SHA-256 digest")
+    _require_safe_component(recording_id, "recording_id")
+    fixed_root = paths.alignments
+    components = (
+        fixed_root,
+        fixed_root / "runs",
+        fixed_root / "runs" / config_sha256,
+        fixed_root / "runs" / config_sha256 / recording_id,
+    )
+    if any(component.is_symlink() for component in components):
+        raise ValueError("pairing run root must not contain path aliases")
+    resolved_root = fixed_root.resolve()
+    resolved_candidate = components[-1].resolve()
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError("pairing run directory escapes fixed alignment root") from error
+    return components[-1]
+
+
 def _validate_pairing_identity(
     result: PairingRecording,
     *,
@@ -796,6 +916,7 @@ def _validate_pairing_identity(
     segmentation_artifact_sha256: str,
     config_sha256: str,
     parameters: PairingParameters,
+    ffmpeg_version: str,
 ) -> None:
     expected_key = _pairing_cache_key(
         recording_id,
@@ -804,6 +925,7 @@ def _validate_pairing_identity(
         segmentation_artifact_sha256,
         config_sha256,
         parameters,
+        ffmpeg_version,
     )
     if (
         result.recording_id != recording_id
@@ -812,6 +934,7 @@ def _validate_pairing_identity(
         or result.segmentation_artifact_sha256 != segmentation_artifact_sha256
         or result.config_sha256 != config_sha256
         or result.pairing_parameters != parameters
+        or result.ffmpeg_version != ffmpeg_version
         or result.cache_key != expected_key
     ):
         raise ValueError("pairing cache identity or provenance does not match")
@@ -840,12 +963,13 @@ def _result_matches_request_provenance(result: AlignmentResult, request: Alignme
     ):
         if getattr(result, field) != getattr(request, field):
             raise ValueError(f"alignment result {field} does not match request provenance")
-    if result.alignment_text != request.alignment_text:
-        raise ValueError("alignment result text does not match request")
 
 
 def _candidate_word_order_same(
-    unit: TextUnitWindow, result: AlignmentResult, request: AlignmentRequest
+    unit: TextUnitWindow,
+    result: AlignmentResult,
+    request: AlignmentRequest,
+    audio_duration_seconds: float,
 ) -> bool:
     token_count = len(request.alignment_text.split())
     if unit.token_end_index and unit.token_end_index - unit.token_start_index != token_count:
@@ -853,15 +977,15 @@ def _candidate_word_order_same(
             "TRANSCRIPT_SPOKEN_MISMATCH",
             f"unit token range does not cover text for {unit.unit_id}",
         )
-    expected = tuple(range(token_count))
-    word_indexes = tuple(word.spoken_token_index for word in result.words)
-    token_indexes = tuple(token.spoken_token_index for token in result.tokens)
-    return (
-        len(result.words) == token_count
-        and len(set(word_indexes)) == len(word_indexes)
-        and word_indexes == expected
-        and token_indexes == expected
-    )
+    try:
+        validate_alignment(
+            result,
+            request,
+            audio_duration_seconds=audio_duration_seconds,
+        )
+    except ValueError:
+        return False
+    return True
 
 
 def _alignment_cache_path(run_directory: Path, cache_key: str) -> Path:
@@ -977,7 +1101,9 @@ def _validate_cached_evidence(
     backend: PairingBackend,
     run_directory: Path,
 ) -> None:
+    runtime_sha256s: set[str] = set()
     for window, outcome in zip(result.windows, result.groups, strict=True):
+        recomputed_candidates: list[SplitEvidence] = []
         for evidence in outcome.candidates:
             if (
                 evidence.first_audio is None
@@ -988,6 +1114,8 @@ def _validate_cached_evidence(
                 or evidence.second_result_integrity_sha256 is None
             ):
                 raise ValueError("cached split evidence lacks provenance")
+            alignments: list[AlignmentResult] = []
+            requests: list[AlignmentRequest] = []
             for audio, cache_key, integrity in (
                 (
                     evidence.first_audio,
@@ -1000,6 +1128,8 @@ def _validate_cached_evidence(
                     evidence.second_result_integrity_sha256,
                 ),
             ):
+                if audio.ffmpeg_version != result.ffmpeg_version:
+                    raise ValueError("cached candidate FFmpeg version does not match pairing")
                 path = _validate_candidate_file(audio, paths)
                 request = backend.build_request(
                     audio_path=path,
@@ -1008,16 +1138,82 @@ def _validate_cached_evidence(
                     segmentation_artifact_sha256=result.segmentation_artifact_sha256,
                     config_sha256=result.config_sha256,
                 )
+                runtime_sha256s.add(_alignment_runtime_sha256(request))
                 if request.cache_key != cache_key or audio.metrics is None:
                     raise ValueError("cached alignment request identity does not match")
                 alignment = _read_cached_alignment(
                     _alignment_cache_path(run_directory, cache_key),
                     request,
                     audio_duration_seconds=audio.metrics.sample_count / 16_000,
-                    require_word_order=evidence.word_order_same,
+                    require_word_order=False,
                 )
                 if alignment.integrity_sha256 != integrity:
                     raise ValueError("cached alignment integrity does not match pairing evidence")
+                requests.append(request)
+                alignments.append(alignment)
+            word_order_same = all(
+                _candidate_word_order_same(
+                    window,
+                    alignment,
+                    request,
+                    audio.metrics.sample_count / 16_000,
+                )
+                for audio, alignment, request in zip(
+                    (evidence.first_audio, evidence.second_audio),
+                    alignments,
+                    requests,
+                    strict=True,
+                )
+                if audio is not None and audio.metrics is not None
+            )
+            recomputed = SplitEvidence(
+                evidence.split_sample,
+                alignments[0].mean_score,
+                alignments[1].mean_score,
+                word_order_same,
+                min(alignments[0].coverage, alignments[1].coverage),
+                evidence.first_audio,
+                evidence.second_audio,
+                requests[0].cache_key,
+                requests[1].cache_key,
+                alignments[0].integrity_sha256,
+                alignments[1].integrity_sha256,
+            )
+            if recomputed != evidence:
+                raise ValueError("cached split evidence does not match alignment results")
+            recomputed_candidates.append(recomputed)
+
+        candidates = tuple(recomputed_candidates)
+        try:
+            group = _enrich_group(
+                choose_split(
+                    result.recording_id,
+                    window,
+                    candidates,
+                    sample_rate=16_000,
+                    minimum_duration_ratio=(result.pairing_parameters.minimum_duration_ratio),
+                    maximum_duration_ratio=(result.pairing_parameters.maximum_duration_ratio),
+                    minimum_score_margin=result.pairing_parameters.minimum_score_margin,
+                )
+            )
+        except CorpusFailure as error:
+            if error.code not in {
+                "TAKE_COUNT_MISMATCH",
+                "TAKE_DURATION_MISMATCH",
+                "TAKE_TEXT_MISMATCH",
+            }:
+                raise
+            expected_outcome = PairingGroupOutcome(
+                window.unit_id, "review", error.code, candidates, None
+            )
+        else:
+            expected_outcome = PairingGroupOutcome(
+                window.unit_id, "selected", None, candidates, group
+            )
+        if outcome != expected_outcome:
+            raise ValueError("cached pairing decision does not match recomputed evidence")
+    if tuple(sorted(runtime_sha256s)) != result.alignment_runtime_sha256s:
+        raise ValueError("cached alignment runtime identities do not match pairing")
 
 
 def pair_recording(
@@ -1035,8 +1231,7 @@ def pair_recording(
     extract_candidate: CandidateExtractor = extract_analysis_segment,
 ) -> PairingRecording:
     """Extract, align, score, and cache every two-take split candidate for one recording."""
-    if type(recording_id) is not str or not recording_id.strip():
-        raise ValueError("recording_id must be a non-empty string")
+    _require_safe_component(recording_id, "recording_id")
     if (
         type(windows) is not tuple
         or not windows
@@ -1049,11 +1244,16 @@ def pair_recording(
         raise TypeError("paths must be CorpusPaths")
     if type(pairing_parameters) is not PairingParameters:
         raise TypeError("pairing_parameters must be PairingParameters")
+    if type(ffmpeg_version) is not str or not ffmpeg_version.strip():
+        raise ValueError("ffmpeg_version must be a non-empty string")
+    unit_ids = tuple(window.unit_id for window in windows)
+    if len(set(unit_ids)) != len(unit_ids):
+        raise ValueError("unit_id values must be unique")
     if not _is_digest(segmentation_artifact_sha256) or not _is_digest(config_sha256):
         raise ValueError("pairing provenance hashes must be lowercase SHA-256 digests")
     if analysis_audio.config_sha256 != config_sha256:
         raise ValueError("analysis audio config provenance does not match pairing config")
-    run_directory = paths.alignments / "runs" / config_sha256 / recording_id
+    run_directory = pairing_run_directory(paths, config_sha256, recording_id)
     pairing_path = run_directory / "pairing.json"
     if pairing_path.exists():
         try:
@@ -1069,6 +1269,7 @@ def pair_recording(
                 segmentation_artifact_sha256=segmentation_artifact_sha256,
                 config_sha256=config_sha256,
                 parameters=pairing_parameters,
+                ffmpeg_version=ffmpeg_version,
             )
             _validate_cached_evidence(cached, paths, backend, run_directory)
             return cached
@@ -1077,6 +1278,7 @@ def pair_recording(
 
     with _pairing_lock(run_directory):
         outcomes: list[PairingGroupOutcome] = []
+        runtime_sha256s: set[str] = set()
         for window in windows:
             evidence_items: list[SplitEvidence] = []
             for pause_start, pause_end in window.short_pause_ranges:
@@ -1096,6 +1298,8 @@ def pair_recording(
                         ffmpeg_version=ffmpeg_version,
                         run_command=run_command,
                     )
+                    if audio.ffmpeg_version != ffmpeg_version:
+                        raise ValueError("candidate audio FFmpeg version does not match pairing")
                     path = _validate_candidate_file(audio, paths)
                     request = backend.build_request(
                         audio_path=path,
@@ -1104,6 +1308,7 @@ def pair_recording(
                         segmentation_artifact_sha256=segmentation_artifact_sha256,
                         config_sha256=config_sha256,
                     )
+                    runtime_sha256s.add(_alignment_runtime_sha256(request))
                     if audio.metrics is None:
                         raise ValueError("candidate analysis audio must contain PCM metrics")
                     result = _load_or_align(
@@ -1116,17 +1321,15 @@ def pair_recording(
                     requests.append(request)
                     results.append(result)
                 order_same = all(
-                    _candidate_word_order_same(window, result, request)
-                    for result, request in zip(results, requests, strict=True)
+                    _candidate_word_order_same(
+                        window,
+                        result,
+                        request,
+                        audio.metrics.sample_count / 16_000,
+                    )
+                    for audio, result, request in zip(audio_items, results, requests, strict=True)
+                    if audio.metrics is not None
                 )
-                if order_same:
-                    for audio, result, request in zip(audio_items, results, requests, strict=True):
-                        assert audio.metrics is not None
-                        validate_alignment(
-                            result,
-                            request,
-                            audio_duration_seconds=audio.metrics.sample_count / 16_000,
-                        )
                 evidence_items.append(
                     SplitEvidence(
                         split_sample,
@@ -1175,6 +1378,8 @@ def pair_recording(
             config_sha256,
             segmentation_artifact_sha256,
             analysis_audio.sha256,
+            ffmpeg_version,
+            tuple(sorted(runtime_sha256s)),
             _pairing_cache_key(
                 recording_id,
                 windows,
@@ -1182,6 +1387,7 @@ def pair_recording(
                 segmentation_artifact_sha256,
                 config_sha256,
                 pairing_parameters,
+                ffmpeg_version,
             ),
             pairing_parameters,
             windows,
@@ -1197,7 +1403,8 @@ def load_selected_alignments(
     backend: PairingBackend,
 ) -> tuple[SelectedTakeAlignment, ...]:
     """Load and strictly validate selected alignment cache entries without recomputation."""
-    run_directory = paths.alignments / "runs" / pairing.config_sha256 / pairing.recording_id
+    run_directory = pairing_run_directory(paths, pairing.config_sha256, pairing.recording_id)
+    _validate_cached_evidence(pairing, paths, backend, run_directory)
     selected: list[SelectedTakeAlignment] = []
     for outcome in pairing.groups:
         if outcome.status == "review":

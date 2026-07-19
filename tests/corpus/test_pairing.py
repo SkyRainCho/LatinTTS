@@ -1,4 +1,5 @@
 import hashlib
+import json
 import shutil
 import wave
 from copy import deepcopy
@@ -26,6 +27,7 @@ from latintts.corpus.pairing import (
     map_text_units,
     pair_recording,
     pairing_from_dict,
+    pairing_run_directory,
     pairing_to_dict,
 )
 from latintts.corpus.paths import CorpusPaths
@@ -427,6 +429,109 @@ def test_pair_recording_preserves_text_mismatch_evidence_for_review(tmp_path: Pa
     assert outcome.candidates[0].word_order_same is False
 
 
+def test_pair_recording_preserves_word_text_drift_as_text_mismatch_review(tmp_path: Path) -> None:
+    class WordDriftAligner(_FakeAligner):
+        def align(self, request: AlignmentRequest) -> AlignmentResult:
+            result = super().align(request)
+            words = list(result.words)
+            first = words[0]
+            words[0] = WordSpan(
+                "wrong",
+                first.start_seconds,
+                first.end_seconds,
+                first.score,
+                first.spoken_token_index,
+            )
+            return AlignmentResult(
+                backend=result.backend,
+                backend_version=result.backend_version,
+                model_id=result.model_id,
+                model_revision=result.model_revision,
+                model_license=result.model_license,
+                alignment_text=result.alignment_text,
+                tokens=result.tokens,
+                words=tuple(words),
+                coverage=result.coverage,
+                mean_score=result.mean_score,
+                alignment_level=result.alignment_level,
+                phoneme_timing_status=result.phoneme_timing_status,
+                warnings=result.warnings,
+                raw_output={"fixture": "word-drift"},
+            )
+
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    result = pair_recording(
+        "rec-1",
+        (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        WordDriftAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    outcome = result.groups[0]
+    assert outcome.status == "review"
+    assert outcome.issue_code == "TAKE_TEXT_MISMATCH"
+    assert len(outcome.candidates) == 1
+    assert outcome.candidates[0].word_order_same is False
+    cached = pair_recording(
+        "rec-1",
+        (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        WordDriftAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    assert cached == result
+
+
+def test_pair_recording_preserves_alignment_text_drift_as_text_mismatch_review(
+    tmp_path: Path,
+) -> None:
+    class AlignmentTextDriftAligner(_FakeAligner):
+        def align(self, request: AlignmentRequest) -> AlignmentResult:
+            result = super().align(request)
+            return AlignmentResult(
+                backend=result.backend,
+                backend_version=result.backend_version,
+                model_id=result.model_id,
+                model_revision=result.model_revision,
+                model_license=result.model_license,
+                alignment_text=f"wrong {result.alignment_text.split(maxsplit=1)[1]}",
+                tokens=result.tokens,
+                words=result.words,
+                coverage=result.coverage,
+                mean_score=result.mean_score,
+                alignment_level=result.alignment_level,
+                phoneme_timing_status=result.phoneme_timing_status,
+                warnings=result.warnings,
+                raw_output={"fixture": "alignment-text-drift"},
+            )
+
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    result = pair_recording(
+        "rec-1",
+        (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        AlignmentTextDriftAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    assert result.groups[0].status == "review"
+    assert result.groups[0].issue_code == "TAKE_TEXT_MISMATCH"
+
+
 def test_pair_recording_preserves_missing_candidate_for_review(tmp_path: Path) -> None:
     paths, config, analysis = _analysis_fixture(tmp_path)
     result = pair_recording(
@@ -555,7 +660,12 @@ def test_pairing_json_round_trip_is_strict_and_cache_key_is_bound(tmp_path: Path
         run_command=_audio_command,
     )
     raw = pairing_to_dict(result)
+    assert len(raw["integrity_sha256"]) == 64
     assert pairing_from_dict(raw) == result
+    malformed = deepcopy(raw)
+    malformed["integrity_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="integrity"):
+        pairing_from_dict(malformed)
     malformed = deepcopy(raw)
     malformed["groups"][0]["status"] = "approved"
     with pytest.raises(ValueError, match="status"):
@@ -813,6 +923,219 @@ def test_pair_recording_rejects_invalid_entry_contract(
             ffmpeg_version="ffmpeg-test-1",
             run_command=_audio_command,
         )
+
+
+@pytest.mark.parametrize("unsafe_id", ("../escape", "unit/child", ".", "..", "C:\\root"))
+def test_pair_recording_rejects_unsafe_recording_and_unit_ids(
+    tmp_path: Path, unsafe_id: str
+) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window_id = "unit-1" if unsafe_id == "../escape" else unsafe_id
+    recording_id = unsafe_id if unsafe_id == "../escape" else "rec-1"
+    with pytest.raises(ValueError, match="safe path component"):
+        pair_recording(
+            recording_id,
+            (TextUnitWindow(window_id, "Pater", 0, 160_000, ((78_000, 82_000),), 0, 1),),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+
+def test_pair_recording_binds_ffmpeg_version_to_artifact_and_candidate_cache(
+    tmp_path: Path,
+) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    first = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    assert first.ffmpeg_version == "ffmpeg-test-1"
+    with pytest.raises(CorpusFailure) as error:
+        pair_recording(
+            "rec-1",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-2",
+            run_command=_audio_command,
+        )
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+@pytest.mark.parametrize("tamper", ("status", "take", "word-order", "evidence"))
+def test_pair_recording_recomputes_cached_decision_despite_valid_artifact_integrity(
+    tmp_path: Path, tamper: str
+) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    result = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    raw = pairing_to_dict(result)
+    group = raw["groups"][0]
+    if tamper == "status":
+        group["status"] = "review"
+        group["issue_code"] = "TAKE_DURATION_MISMATCH"
+        group["group"] = None
+    elif tamper == "take":
+        group["group"]["takes"][0]["end_sample"] -= 1
+    elif tamper == "word-order":
+        group["candidates"][0]["word_order_same"] = False
+        group["status"] = "review"
+        group["issue_code"] = "TAKE_TEXT_MISMATCH"
+        group["group"] = None
+    else:
+        group["candidates"][0]["first_alignment_score"] = 0.1
+        group["group"]["selected_evidence"]["first_alignment_score"] = 0.1
+        group["group"]["takes"][0]["alignment_score"] = 0.1
+    payload = {key: value for key, value in raw.items() if key != "integrity_sha256"}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    raw["integrity_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    pairing_path = paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json"
+    write_jsonl_atomic(pairing_path, (raw,))
+
+    with pytest.raises(CorpusFailure) as error:
+        pair_recording(
+            "rec-1",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_pair_recording_rejects_aliased_config_run_root(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    runs = paths.alignments / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside-runs"
+    outside.mkdir()
+    alias = runs / config.digest
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this Windows host")
+
+    with pytest.raises(ValueError, match="alias"):
+        pair_recording(
+            "rec-1",
+            (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert not (outside / "rec-1" / "pairing.json").exists()
+
+
+def test_pairing_artifact_and_run_directory_defensive_contracts(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    result = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    runtime = result.alignment_runtime_sha256s[0]
+    with pytest.raises(ValueError, match="ffmpeg_version"):
+        replace(result, ffmpeg_version="")
+    with pytest.raises(ValueError, match="runtime"):
+        replace(result, alignment_runtime_sha256s=("bad",))
+    with pytest.raises(ValueError, match="unique"):
+        replace(result, alignment_runtime_sha256s=(runtime, runtime))
+    with pytest.raises(TypeError, match="PairingRecording"):
+        pairing_to_dict(object())  # type: ignore[arg-type]
+    object.__setattr__(result, "integrity_sha256", "0" * 64)
+    with pytest.raises(ValueError, match="integrity"):
+        pairing_to_dict(result)
+    with pytest.raises(TypeError, match="CorpusPaths"):
+        pairing_run_directory(object(), config.digest, "rec-1")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="config_sha256"):
+        pairing_run_directory(paths, "bad", "rec-1")
+    with pytest.raises(ValueError, match="ffmpeg_version"):
+        pair_recording(
+            "rec-2",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="",
+            run_command=_audio_command,
+        )
+    with pytest.raises(ValueError, match="unique"):
+        pair_recording(
+            "rec-2",
+            (window, window),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+
+def test_map_text_units_rejects_duplicate_ids_and_invalid_pause_analysis() -> None:
+    duplicate_units = (
+        SpokenUnit("unit-1", 1, "Pater", 0, 1),
+        SpokenUnit("unit-1", 2, "noster", 1, 2),
+    )
+    speech = (SpeechInterval(0, 100), SpeechInterval(200, 300))
+    pauses = PauseAnalysis((PauseInterval(100, 200, 0.00625, "long"),), 0.1, 0.05, 0.2)
+    with pytest.raises(CorpusFailure, match="unique"):
+        map_text_units(duplicate_units, speech, pauses)
+    with pytest.raises(TypeError, match="PauseAnalysis"):
+        map_text_units((SpokenUnit("unit-1", 1, "Pater", 0, 1),), speech, object())  # type: ignore[arg-type]
 
 
 def test_pair_recording_rejects_duplicate_cache_rows(tmp_path: Path) -> None:
