@@ -5,6 +5,7 @@ import json
 import shutil
 import wave
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -14,6 +15,7 @@ from latintts.corpus import review as review_module
 from latintts.corpus import store
 from latintts.corpus.cli import align_corpus, main, pair_corpus
 from latintts.corpus.config import CorpusConfig
+from latintts.corpus.domain import CorpusFailure
 from latintts.corpus.pairing import pairing_from_dict
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.review import (
@@ -119,6 +121,17 @@ def _confirm_pairing_correction(correction: Path) -> None:
             reviewed_at="2026-07-19T12:00:00+08:00",
         )
     decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+
+def _corrected_pairing_project(
+    tmp_path: Path,
+) -> tuple[CorpusPaths, CorpusConfig, _FakeAligner, Path]:
+    paths, config, backend = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    assert import_review_bundle(paths, config)
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    return paths, config, backend, run_directory
 
 
 def _two_recording_aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
@@ -247,6 +260,51 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     assert "&lt;Pater &amp; &quot;Noster&quot;&gt;" in html
 
 
+def test_review_wav_duration_uses_actual_44100hz_frame_count_at_rounding_edge(
+    tmp_path: Path,
+) -> None:
+    paths, _ = _set_up(tmp_path)
+    recording = review_module._decode_recording(
+        read_jsonl(paths.manifests / "recordings.jsonl")[0]
+    )
+    recording = replace(
+        recording,
+        metadata=replace(recording.metadata, sample_rate=44_100),
+    )
+    destination = tmp_path / "rounding-edge.wav"
+
+    def write_rounding_edge(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        output = Path(command[-1])
+        start = float(command[command.index("-ss") + 1])
+        end = float(command[command.index("-to") + 1])
+        sample_count = round((end - start) * 44_100)
+        with wave.open(str(output), "wb") as writer:
+            writer.setnchannels(recording.metadata.channels)
+            writer.setsampwidth(3)
+            writer.setframerate(44_100)
+            writer.writeframes(b"\x01\x00\x00" * sample_count)
+        return CompletedProcess(command, 0, "", "")
+
+    start_seconds = 1 / 16_000
+    end_seconds = 3 / 16_000
+    review_module._export_review_audio(
+        recording,
+        paths,
+        destination,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=write_rounding_edge,
+    )
+
+    actual_duration = review_module._review_wav_duration(destination, recording)
+    endpoint_rounding_duration = (
+        round(end_seconds * 44_100) - round(start_seconds * 44_100)
+    ) / 44_100
+    assert actual_duration == 6 / 44_100
+    assert endpoint_rounding_duration == 5 / 44_100
+
+
 def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
     tmp_path: Path,
 ) -> None:
@@ -283,6 +341,16 @@ def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
     assert (run_directory / "pairing-automatic.json").is_file()
     corrected = pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0])
     assert all(outcome.status == "selected" for outcome in corrected.groups)
+
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("repeated reviewed pair must use validated caches")
+        ),
+    )
 
     assert align_corpus(paths, config, backend)
     groups = export_review_bundle(paths, config)
@@ -349,29 +417,193 @@ def test_pairing_correction_retry_recovers_after_event_before_recordings_replace
 
     run_directory = paths.alignments / "runs" / config.digest / "rec-1"
     assert read_jsonl(recordings_path)[0]["state"] == "SEGMENTED"
-    assert (
-        len(
-            [
-                row
-                for row in read_jsonl(run_directory.parent / "processing-events.jsonl")
-                if row["target_state"] == "PAIRED"
-            ]
-        )
-        == 1
+    processing_path = run_directory.parent / "processing-events.jsonl"
+    paired_events = [
+        row for row in read_jsonl(processing_path) if row["target_state"] == "PAIRED"
+    ]
+    assert len(paired_events) == 1
+    bound_review_sha256 = paired_events[0]["input_sha256s"][3]
+
+    review_path = paths.manifests / "review.jsonl"
+    history = list(read_jsonl(review_path))
+    appended = review_module._new_review_event(
+        "review:unrelated",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "later independent review",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T13:00:00+08:00",
+        },
     )
+    write_jsonl_atomic(review_path, (*history, appended.to_dict()))
 
     assert import_review_bundle(paths, config)
     assert read_jsonl(recordings_path)[0]["state"] == "PAIRED"
-    assert (
-        len(
-            [
-                row
-                for row in read_jsonl(run_directory.parent / "processing-events.jsonl")
-                if row["target_state"] == "PAIRED"
-            ]
-        )
-        == 1
+    recovered = [row for row in read_jsonl(processing_path) if row["target_state"] == "PAIRED"]
+    assert len(recovered) == 1
+    assert recovered[0]["input_sha256s"][3] == bound_review_sha256
+
+
+def test_pairing_correction_retry_recovers_after_journal_before_automatic_pairing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    real_write_bytes = review_module._write_bytes_atomic
+    monkeypatch.setattr(
+        review_module,
+        "_write_bytes_atomic",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("after review journal")
+        ),
     )
+
+    with pytest.raises(RuntimeError, match="after review journal"):
+        import_review_bundle(paths, config)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    assert (paths.manifests / "review.jsonl").is_file()
+    assert not (run_directory / "pairing-automatic.json").exists()
+    assert any(
+        outcome.status == "review"
+        for outcome in pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0]).groups
+    )
+    monkeypatch.setattr(review_module, "_write_bytes_atomic", real_write_bytes)
+
+    assert import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "PAIRED"
+
+
+def test_pairing_correction_retry_recovers_after_automatic_before_corrected_pairing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    pairing_path = run_directory / "pairing.json"
+    real_write_jsonl = review_module.write_jsonl_atomic
+
+    def fail_pairing_write(path: Path, rows: object) -> None:
+        if Path(path) == pairing_path:
+            raise RuntimeError("after automatic pairing")
+        real_write_jsonl(path, rows)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(review_module, "write_jsonl_atomic", fail_pairing_write)
+    with pytest.raises(RuntimeError, match="after automatic pairing"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(review_module, "write_jsonl_atomic", real_write_jsonl)
+
+    assert (run_directory / "pairing-automatic.json").is_file()
+    assert any(
+        outcome.status == "review"
+        for outcome in pairing_from_dict(read_jsonl(pairing_path)[0]).groups
+    )
+    assert import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "PAIRED"
+
+
+def test_align_rejects_non_deterministic_pairing_correction_event_id(tmp_path: Path) -> None:
+    paths, config, backend, _ = _corrected_pairing_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"
+    rows = list(read_jsonl(review_path))
+    rows[0]["review_event_id"] = "review-" + "0" * 64
+    write_jsonl_atomic(review_path, rows)
+
+    with pytest.raises(CorpusFailure, match="selected alignment cache"):
+        align_corpus(paths, config, backend)
+
+
+def test_align_rejects_changed_review_snapshot_prefix_even_when_json_is_semantically_same(
+    tmp_path: Path,
+) -> None:
+    paths, config, backend, _ = _corrected_pairing_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"
+    lines = review_path.read_text(encoding="utf-8").splitlines()
+    review_path.write_text(" \n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(CorpusFailure, match="selected alignment cache"):
+        align_corpus(paths, config, backend)
+
+
+def test_align_accepts_valid_review_events_appended_after_bound_pairing_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths, config, backend, _ = _corrected_pairing_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"
+    rows = list(read_jsonl(review_path))
+    suffix = review_module._new_review_event(
+        "review-suffix",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "later take review",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T13:00:00+08:00",
+        },
+    )
+    write_jsonl_atomic(review_path, (*rows, suffix.to_dict()))
+
+    assert align_corpus(paths, config, backend)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("orphan-entity", "duplicate-entity", "unsaved-split", "automatic-mismatch"),
+)
+def test_ordinary_review_import_rejects_invalid_pairing_correction_history(
+    tmp_path: Path, case: str
+) -> None:
+    paths, config, backend, run_directory = _corrected_pairing_project(tmp_path)
+    assert align_corpus(paths, config, backend)
+    export_review_bundle(paths, config)
+    review_path = paths.manifests / "review.jsonl"
+    rows = list(read_jsonl(review_path))
+    original = rows[0]
+    decision = {
+        "reason": original["reason"],
+        "reviewer": original["reviewer"],
+        "reviewed_at": "2026-07-19T13:00:00+08:00",
+    }
+    if case == "orphan-entity":
+        event = review_module._new_review_event(
+            "pairing:6:orphan:4:unit",
+            "pairing_selected_split",
+            None,
+            original["after"],
+            decision,
+        )
+        rows.append(event.to_dict())
+    elif case == "duplicate-entity":
+        event = review_module._new_review_event(
+            original["entity_id"],
+            "pairing_selected_split",
+            None,
+            original["after"],
+            decision,
+        )
+        rows.append(event.to_dict())
+    elif case == "unsaved-split":
+        event = review_module._new_review_event(
+            original["entity_id"],
+            "pairing_selected_split",
+            None,
+            original["after"] + 1,
+            decision,
+        )
+        rows[0] = event.to_dict()
+    else:
+        shutil.copyfile(
+            run_directory / "pairing.json", run_directory / "pairing-automatic.json"
+        )
+    write_jsonl_atomic(review_path, rows)
+
+    with pytest.raises(ValueError, match="pairing correction"):
+        import_review_bundle(paths, config)
 
 
 @pytest.mark.parametrize(

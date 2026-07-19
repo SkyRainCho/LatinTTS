@@ -1415,6 +1415,7 @@ def pair_recording(
     ffmpeg_version: str,
     run_command: RunCommand = subprocess.run,
     extract_candidate: CandidateExtractor = extract_analysis_segment,
+    allow_reviewed_selection: bool = False,
 ) -> PairingRecording:
     """Extract, align, score, and cache every two-take split candidate for one recording."""
     _require_safe_component(recording_id, "recording_id")
@@ -1465,7 +1466,13 @@ def pair_recording(
                 parameters=pairing_parameters,
                 ffmpeg_version=ffmpeg_version,
             )
-            _validate_cached_evidence(cached, paths, backend, run_directory)
+            _validate_cached_evidence(
+                cached,
+                paths,
+                backend,
+                run_directory,
+                allow_reviewed_selection=allow_reviewed_selection,
+            )
             return cached
         except (KeyError, OSError, TypeError, ValueError) as error:
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is invalid") from error

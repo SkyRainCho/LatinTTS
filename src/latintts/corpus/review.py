@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import wave
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
@@ -33,13 +34,19 @@ from latintts.corpus.pairing import (
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.records import (
     AudioMetadata,
+    ProcessingEvent,
     RecordingRecord,
     ReviewEvent,
     advance_recording,
     require_exact_fields,
 )
 from latintts.corpus.selection import PilotSelection
-from latintts.corpus.store import persist_recording_transition, read_jsonl, write_jsonl_atomic
+from latintts.corpus.store import (
+    persist_recording_transition,
+    processing_event_exists,
+    read_jsonl,
+    write_jsonl_atomic,
+)
 from latintts.corpus.transcripts import TranscriptRecord
 
 
@@ -629,6 +636,23 @@ def _export_review_audio(
     return derived
 
 
+def _review_wav_duration(path: Path, recording: RecordingRecord) -> float:
+    try:
+        with wave.open(str(path), "rb") as reader:
+            frame_count = reader.getnframes()
+            if (
+                reader.getframerate() != recording.metadata.sample_rate
+                or reader.getnchannels() != recording.metadata.channels
+                or reader.getsampwidth() != 3
+                or reader.getcomptype() != "NONE"
+                or frame_count <= 0
+            ):
+                raise ValueError("review WAV format or frame count is invalid")
+    except (OSError, EOFError, wave.Error) as error:
+        raise ValueError("review WAV is invalid") from error
+    return frame_count / recording.metadata.sample_rate
+
+
 def _require_canonical_descendant(
     root: Path,
     target: Path,
@@ -842,9 +866,9 @@ def _export_group(
             ffmpeg_version=ffmpeg_version,
             run_command=run_command,
         )
+        duration = _review_wav_duration(directory / audio_name, recording)
         start_frame = round(start_seconds * recording.metadata.sample_rate)
         end_frame = round(end_seconds * recording.metadata.sample_rate)
-        duration = (end_frame - start_frame) / recording.metadata.sample_rate
         write_textgrid(
             directory / textgrid_name,
             duration_seconds=duration,
@@ -1312,6 +1336,7 @@ def _validate_take_summary(
     take: TakeCandidate,
     result: AlignmentResult,
     recording: RecordingRecord,
+    trusted_duration: float,
 ) -> dict[str, Any]:
     candidate_scores = raw["candidate_scores"]
     quality = raw["quality_metrics"]
@@ -1368,7 +1393,7 @@ def _validate_take_summary(
     automatic = _validated_automatic_values(raw["automatic_values"])
     expected_automatic = {
         "segment_start": 0.0,
-        "segment_end": (expected_end - expected_start) / frame_rate,
+        "segment_end": trusted_duration,
         "words": [
             {
                 "text": word.text,
@@ -1393,7 +1418,7 @@ def _validate_trusted_review_audio(
     *,
     ffmpeg_version: str,
     run_command: RunCommand,
-) -> None:
+) -> float:
     provenance_raw = raw["audio_provenance"]
     if type(provenance_raw) is not dict:
         raise TypeError("review audio_provenance must be an object")
@@ -1409,6 +1434,7 @@ def _validate_trusted_review_audio(
     )
     if raw["audio_sha256"] != trusted.sha256 or _digest(audio_path) != trusted.sha256:
         raise ValueError("review audio does not match the trusted source-derived clip")
+    return _review_wav_duration(audio_path, recording)
 
 
 _PAIRING_DECISION_FIELDS = frozenset(
@@ -1430,6 +1456,64 @@ class _PairingCorrectionSubmission:
 
 def _pairing_entity_id(recording_id: str, unit_id: str) -> str:
     return f"pairing:{len(recording_id)}:{recording_id}:{len(unit_id)}:{unit_id}"
+
+
+def validate_pairing_correction_events(
+    original: PairingRecording,
+    corrected: PairingRecording,
+    events: tuple[ReviewEvent, ...],
+) -> tuple[ReviewEvent, ...]:
+    if type(original) is not PairingRecording or type(corrected) is not PairingRecording:
+        raise TypeError("pairing correction validation requires PairingRecording values")
+    if type(events) is not tuple or any(type(event) is not ReviewEvent for event in events):
+        raise TypeError("pairing correction history must contain ReviewEvent values")
+    if (
+        original.recording_id != corrected.recording_id
+        or original.config_sha256 != corrected.config_sha256
+        or original.cache_key != corrected.cache_key
+    ):
+        raise ValueError("original and corrected pairing identities differ")
+    corrected_by_unit = {outcome.unit_id: outcome for outcome in corrected.groups}
+    if len(corrected_by_unit) != len(corrected.groups):
+        raise ValueError("corrected pairing contains duplicate unit identity")
+    expected: dict[str, int] = {}
+    for outcome in original.groups:
+        current = corrected_by_unit.get(outcome.unit_id)
+        if outcome.status == "selected":
+            if current != outcome:
+                raise ValueError("automatic selected pairing outcome changed during correction")
+            continue
+        if (
+            current is None
+            or current.status != "selected"
+            or current.group is None
+            or current.candidates != outcome.candidates
+            or current.group.selected_evidence not in outcome.candidates
+        ):
+            raise ValueError("corrected pairing does not select saved candidate evidence")
+        expected[_pairing_entity_id(original.recording_id, outcome.unit_id)] = (
+            current.group.selected_evidence.split_sample
+        )
+    prefix = f"pairing:{len(original.recording_id)}:{original.recording_id}:"
+    relevant = tuple(event for event in events if event.entity_id.startswith(prefix))
+    if len(relevant) != len(expected) or len({event.entity_id for event in relevant}) != len(
+        relevant
+    ):
+        raise ValueError("pairing correction history has missing or duplicate entities")
+    by_entity = {event.entity_id: event for event in relevant}
+    if set(by_entity) != set(expected):
+        raise ValueError("pairing correction history contains an orphan entity")
+    for entity_id, split_sample in expected.items():
+        event = by_entity[entity_id]
+        if (
+            event.field != "pairing_selected_split"
+            or event.before is not None
+            or type(event.after) is not int
+            or event.after != split_sample
+            or event.review_event_id != _event_identity(event)
+        ):
+            raise ValueError("pairing correction event is not deterministic saved evidence")
+    return tuple(by_entity[entity_id] for entity_id in sorted(by_entity))
 
 
 def _load_pairing_correction_submission(
@@ -1609,6 +1693,71 @@ def _load_pairing_correction_submission(
     )
 
 
+def _review_snapshot_is_prefix(review_path: Path, expected_sha256: str) -> bool:
+    digest = hashlib.sha256()
+    for line in review_path.read_bytes().splitlines(keepends=True):
+        digest.update(line)
+        if digest.hexdigest() == expected_sha256:
+            return True
+    return False
+
+
+def _pairing_review_snapshot_sha256(
+    review_path: Path,
+    events_path: Path,
+    recording: RecordingRecord,
+    submission: _PairingCorrectionSubmission,
+    config: CorpusConfig,
+    corrected_sha256: str,
+) -> str:
+    automatic_sha256 = hashlib.sha256(submission.original_bytes).hexdigest()
+    tool_versions = (
+        "human-pairing-review-v1",
+        submission.original_pairing.ffmpeg_version,
+    )
+    rows = read_jsonl(events_path) if events_path.exists() else ()
+    decoded = tuple(ProcessingEvent.from_dict(row) for row in rows)
+    matching = tuple(
+        event
+        for event in decoded
+        if event.recording_id == recording.recording_id
+        and event.previous_state is CorpusState.SEGMENTED
+        and event.target_state is CorpusState.PAIRED
+        and len(event.input_sha256s) == 4
+        and event.input_sha256s[:3]
+        == (recording.sha256, automatic_sha256, corrected_sha256)
+        and event.config_sha256 == config.digest
+        and event.tool_versions == tool_versions
+        and event.result == "success"
+    )
+    if not matching:
+        return _digest(review_path)
+    if len(matching) != 1:
+        raise ValueError("pairing correction has duplicate processing transitions")
+    snapshot_sha256 = matching[0].input_sha256s[3]
+    if not _review_snapshot_is_prefix(review_path, snapshot_sha256):
+        raise ValueError("pairing correction review snapshot is not an immutable history prefix")
+    timestamp = max(event.reviewed_at for event in submission.correction_events)
+    _, expected = advance_recording(
+        recording,
+        CorpusState.PAIRED,
+        input_sha256s=(
+            recording.sha256,
+            automatic_sha256,
+            corrected_sha256,
+            snapshot_sha256,
+        ),
+        config_sha256=config.digest,
+        tool_versions=tool_versions,
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    if not processing_event_exists(rows, expected):
+        raise ValueError("pairing correction processing transition is invalid")
+    return snapshot_sha256
+
+
 def _import_pairing_corrections(
     paths: CorpusPaths,
     config: CorpusConfig,
@@ -1667,14 +1816,24 @@ def _import_pairing_corrections(
             raise ValueError("corrected pairing bytes changed during correction recovery")
         index = indexes[recording.recording_id]
         timestamp = max(event.reviewed_at for event in submission.correction_events)
+        corrected_sha256 = _digest(pairing_path)
+        events_path = run_directory.parent / "processing-events.jsonl"
+        review_snapshot_sha256 = _pairing_review_snapshot_sha256(
+            review_path,
+            events_path,
+            recording,
+            submission,
+            config,
+            corrected_sha256,
+        )
         advanced, processing_event = advance_recording(
             current[index],
             CorpusState.PAIRED,
             input_sha256s=(
                 recording.sha256,
                 hashlib.sha256(submission.original_bytes).hexdigest(),
-                _digest(pairing_path),
-                _digest(review_path),
+                corrected_sha256,
+                review_snapshot_sha256,
             ),
             config_sha256=config.digest,
             tool_versions=(
@@ -1688,11 +1847,66 @@ def _import_pairing_corrections(
         current = (*current[:index], advanced, *current[index + 1 :])
         persist_recording_transition(
             recordings_path=paths.manifests / "recordings.jsonl",
-            events_path=run_directory.parent / "processing-events.jsonl",
+            events_path=events_path,
             recordings=current,
             event=processing_event,
         )
     return all_confirmed
+
+
+def _validate_existing_pairing_corrections(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    selection: PilotSelection,
+    recordings: tuple[RecordingRecord, ...],
+    events: tuple[ReviewEvent, ...],
+) -> frozenset[str]:
+    by_id = {recording.recording_id: recording for recording in recordings}
+    legal_event_ids: set[str] = set()
+    for recording_id, expected_hash in zip(
+        selection.recording_ids, selection.inventory_hashes, strict=True
+    ):
+        recording = by_id.get(recording_id)
+        if recording is None or recording.sha256 != expected_hash:
+            raise ValueError("selection does not match recordings")
+        run_directory = pairing_run_directory(paths, config.digest, recording_id)
+        automatic_path = run_directory / "pairing-automatic.json"
+        if not automatic_path.exists() and not automatic_path.is_symlink():
+            continue
+        automatic_path = _require_canonical_descendant(
+            run_directory,
+            automatic_path,
+            kind="automatic pairing artifact",
+            require_file=True,
+        )
+        current_path = _require_canonical_descendant(
+            run_directory,
+            run_directory / "pairing.json",
+            kind="corrected pairing artifact",
+            require_file=True,
+        )
+        automatic_rows = read_jsonl(automatic_path)
+        current_rows = read_jsonl(current_path)
+        if len(automatic_rows) != 1 or len(current_rows) != 1:
+            raise ValueError("pairing correction artifacts must each contain one row")
+        automatic = pairing_from_dict(automatic_rows[0])
+        corrected = pairing_from_dict(current_rows[0])
+        if (
+            automatic.recording_id != recording_id
+            or automatic.config_sha256 != config.digest
+            or corrected.recording_id != recording_id
+            or corrected.config_sha256 != config.digest
+        ):
+            raise ValueError("pairing correction artifact identity does not match selection")
+        correction_events = validate_pairing_correction_events(automatic, corrected, events)
+        legal_event_ids.update(event.review_event_id for event in correction_events)
+    for event in events:
+        if (
+            event.field == "pairing_selected_split"
+            and event.review_event_id not in legal_event_ids
+        ):
+            raise ValueError("pairing correction history contains an illegal entity")
+    return frozenset(legal_event_ids)
 
 
 def import_review_bundle(
@@ -1722,10 +1936,13 @@ def import_review_bundle(
     correction_result = _import_pairing_corrections(paths, config, selection, recordings, existing)
     if correction_result is not None:
         return correction_result
+    legal_pairing_event_ids = _validate_existing_pairing_corrections(
+        paths, config, selection, recordings, existing
+    )
     events_by_entity: dict[str, list[ReviewEvent]] = {}
     for event in existing:
         if event.field == "pairing_selected_split":
-            if type(event.before) is not type(None) or type(event.after) is not int:
+            if event.review_event_id not in legal_pairing_event_ids:
                 raise ValueError("pairing correction review history is invalid")
             continue
         events_by_entity.setdefault(event.entity_id, []).append(event)
@@ -1888,7 +2105,7 @@ def import_review_bundle(
                 )
                 if take_raw["audio_sha256"] != _digest(audio_path):
                     raise ValueError("review audio hash does not match automatic.json")
-                _validate_trusted_review_audio(
+                trusted_duration = _validate_trusted_review_audio(
                     take_raw,
                     audio_path,
                     recording,
@@ -1905,7 +2122,9 @@ def import_review_bundle(
                     review_root=directory.parent,
                 )
                 result = aligned["alignment_result"]
-                automatic_values = _validate_take_summary(take_raw, take, result, recording)
+                automatic_values = _validate_take_summary(
+                    take_raw, take, result, recording, trusted_duration
+                )
                 boundaries = read_textgrid(textgrid_path)
                 if boundaries.duration_seconds != automatic_values["segment_end"]:
                     raise ValueError("review TextGrid duration differs from automatic audio")

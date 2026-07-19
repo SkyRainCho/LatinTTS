@@ -50,7 +50,11 @@ from latintts.corpus.records import (
     advance_recording,
     require_exact_fields,
 )
-from latintts.corpus.review import export_review_bundle, import_review_bundle
+from latintts.corpus.review import (
+    export_review_bundle,
+    import_review_bundle,
+    validate_pairing_correction_events,
+)
 from latintts.corpus.selection import PilotSelection, select_pilot
 from latintts.corpus.store import (
     persist_recording_transition,
@@ -1557,30 +1561,12 @@ def _human_pairing_transition_exists(
         return False
     automatic_pairing = pairing_from_dict(automatic_rows[0])
     review_events = tuple(ReviewEvent.from_dict(row) for row in read_jsonl(review_path))
-    selected_by_unit = {outcome.unit_id: outcome for outcome in pairing.groups}
-    for original in automatic_pairing.groups:
-        corrected = selected_by_unit.get(original.unit_id)
-        if original.status == "selected":
-            if corrected != original:
-                return False
-            continue
-        if corrected is None or corrected.status != "selected" or corrected.group is None:
-            return False
-        entity_id = (
-            f"pairing:{len(record.recording_id)}:{record.recording_id}:"
-            f"{len(original.unit_id)}:{original.unit_id}"
+    try:
+        correction_events = validate_pairing_correction_events(
+            automatic_pairing, pairing, review_events
         )
-        matching_events = tuple(
-            event
-            for event in review_events
-            if event.entity_id == entity_id and event.field == "pairing_selected_split"
-        )
-        if (
-            len(matching_events) != 1
-            or matching_events[0].before is not None
-            or matching_events[0].after != corrected.group.selected_evidence.split_sample
-        ):
-            return False
+    except (TypeError, ValueError):
+        return False
     decoded = tuple(ProcessingEvent.from_dict(row) for row in events)
     matching = tuple(
         event
@@ -1596,7 +1582,31 @@ def _human_pairing_transition_exists(
         and event.tool_versions == ("human-pairing-review-v1", pairing.ffmpeg_version)
         and event.result == "success"
     )
-    return len(matching) == 1 and processing_event_exists(events, matching[0])
+    if len(matching) != 1:
+        return False
+    snapshot_sha256 = matching[0].input_sha256s[3]
+    digest = hashlib.sha256()
+    snapshot_found = False
+    for line in review_path.read_bytes().splitlines(keepends=True):
+        digest.update(line)
+        if digest.hexdigest() == snapshot_sha256:
+            snapshot_found = True
+            break
+    if not snapshot_found:
+        return False
+    timestamp = max(event.reviewed_at for event in correction_events)
+    prior = replace(record, state=CorpusState.SEGMENTED)
+    _, expected = advance_recording(
+        prior,
+        CorpusState.PAIRED,
+        input_sha256s=(record.sha256, automatic_sha256, pairing_sha256, snapshot_sha256),
+        config_sha256=config.digest,
+        tool_versions=("human-pairing-review-v1", pairing.ffmpeg_version),
+        started_at=timestamp,
+        finished_at=timestamp,
+        result="success",
+    )
+    return processing_event_exists(events, expected)
 
 
 def pair_corpus(
@@ -1652,6 +1662,29 @@ def pair_corpus(
             pause_analysis,
             preserve_missing_take_candidates=True,
         )
+        reviewed_pairing = False
+        if record.state is CorpusState.PAIRED:
+            try:
+                pairing_path = run_directory / "pairing.json"
+                cached_rows = read_jsonl(pairing_path)
+                if len(cached_rows) != 1:
+                    raise ValueError("pairing cache must contain one recording")
+                cached_pairing = pairing_from_dict(cached_rows[0])
+                pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
+                events = read_jsonl(run_directory.parent / "processing-events.jsonl")
+                reviewed_pairing = _human_pairing_transition_exists(
+                    events,
+                    record,
+                    cached_pairing,
+                    pairing_sha256,
+                    config,
+                    paths,
+                    run_directory,
+                )
+            except (KeyError, OSError, TypeError, ValueError) as error:
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "pairing cache is invalid"
+                ) from error
         pairing = pair_recording(
             recording_id,
             windows,
@@ -1663,6 +1696,7 @@ def pair_corpus(
             pairing_parameters=parameters,
             ffmpeg_version=ffmpeg_version,
             run_command=run_command,
+            allow_reviewed_selection=reviewed_pairing,
         )
         pairing_path = run_directory / "pairing.json"
         pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
@@ -1698,7 +1732,7 @@ def pair_corpus(
                 tool_versions=tools,
             )
             events = read_jsonl(run_directory.parent / "processing-events.jsonl")
-            if not processing_event_exists(events, event):
+            if not reviewed_pairing and not processing_event_exists(events, event):
                 raise CorpusFailure(
                     "CACHE_ARTIFACT_INVALID", "PAIRED recording lacks durable transition event"
                 )
