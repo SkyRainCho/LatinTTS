@@ -547,6 +547,40 @@ def test_review_snapshot_decoder_rejects_noncanonical_prefix_bytes(
         review_module._review_snapshot_rows(path, hashlib.sha256(digest_payload).hexdigest())
 
 
+@pytest.mark.parametrize("case", ("empty", "semantic-drift"))
+def test_complete_review_journal_rejects_loaded_history_drift(tmp_path: Path, case: str) -> None:
+    path = tmp_path / "review.jsonl"
+    expected = review_module._new_review_event(
+        "review:expected",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "reviewed expected event",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T12:00:00+08:00",
+        },
+    )
+    if case == "empty":
+        path.write_bytes(b"")
+    else:
+        changed = review_module._new_review_event(
+            "review:changed",
+            "review_decision",
+            "unreviewed",
+            "approved",
+            {
+                "reason": "reviewed changed event",
+                "reviewer": "owner",
+                "reviewed_at": "2026-07-19T12:00:00+08:00",
+            },
+        )
+        review_module.write_jsonl_atomic(path, (changed.to_dict(),))
+
+    with pytest.raises(ValueError, match="changed during correction recovery"):
+        review_module._complete_review_journal_bytes(path, (expected,))
+
+
 def test_canonical_descendant_accepts_only_direct_unaliased_path(tmp_path: Path) -> None:
     root = tmp_path / "review"
     group = root / "group"
