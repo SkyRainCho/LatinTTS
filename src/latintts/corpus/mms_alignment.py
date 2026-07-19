@@ -8,7 +8,7 @@ import math
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -110,13 +110,54 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_model_weights(snapshot: Path) -> tuple[str, tuple[ModelWeightFile, ...]]:
+def _canonical_index_weight_path(snapshot: Path, index: Path, filename: str) -> Path:
+    posix_path = PurePosixPath(filename)
+    if (
+        not filename
+        or "\\" in filename
+        or posix_path.is_absolute()
+        or PureWindowsPath(filename).is_absolute()
+        or posix_path.as_posix() != filename
+        or ".." in posix_path.parts
+    ):
+        raise CorpusFailure(
+            "ALIGNER_UNAVAILABLE", "MMS shard filename must be a canonical relative path"
+        )
+    candidate = index.parent.joinpath(*posix_path.parts)
+    try:
+        candidate.relative_to(snapshot)
+    except ValueError as error:
+        raise CorpusFailure(
+            "ALIGNER_UNAVAILABLE", "MMS shard filename must be a canonical relative path"
+        ) from error
+    return candidate
+
+
+def _validate_cached_weight_path(path: Path, cache_root: Path) -> None:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(cache_root.resolve(strict=True))
+    except FileNotFoundError as error:
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS weight file is missing") from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CorpusFailure(
+            "ALIGNER_UNAVAILABLE", "MMS weight link resolves outside the Hugging Face cache root"
+        ) from error
+    if not resolved.is_file():
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS weight path is not a file")
+
+
+def resolve_model_weights(
+    snapshot: Path, *, cache_root: Path | None = None
+) -> tuple[str, tuple[ModelWeightFile, ...]]:
+    cache_root = snapshot if cache_root is None else cache_root
     safetensors = tuple(sorted(snapshot.rglob("*.safetensors")))
     indexes = tuple(sorted(snapshot.rglob("*.safetensors.index.json")))
     if indexes:
         if len(indexes) != 1:
             raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS snapshot has conflicting shard indexes")
         index = indexes[0]
+        _validate_cached_weight_path(index, cache_root)
         try:
             raw_index = json.loads(index.read_text(encoding="utf-8"))
             weight_map = raw_index["weight_map"]
@@ -132,17 +173,11 @@ def resolve_model_weights(snapshot: Path) -> tuple[str, tuple[ModelWeightFile, .
             raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS shard index is invalid")
         referenced: set[Path] = set()
         for filename in weight_map.values():
-            candidate = (index.parent / filename).resolve()
-            try:
-                candidate.relative_to(snapshot.resolve())
-            except ValueError as error:
-                raise CorpusFailure(
-                    "ALIGNER_UNAVAILABLE", "MMS shard path escapes snapshot"
-                ) from error
+            candidate = _canonical_index_weight_path(snapshot, index, filename)
             if candidate.suffix != ".safetensors":
                 raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS shard index mixes weight formats")
             referenced.add(candidate)
-        actual = {path.resolve() for path in safetensors}
+        actual = set(safetensors)
         if actual != referenced:
             raise CorpusFailure(
                 "ALIGNER_UNAVAILABLE", "MMS shard index has missing or extra weight files"
@@ -157,6 +192,8 @@ def resolve_model_weights(snapshot: Path) -> tuple[str, tuple[ModelWeightFile, .
         if len(bins) != 1:
             raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS snapshot has no unique model weights")
         selected = bins
+    for path in selected:
+        _validate_cached_weight_path(path, cache_root)
     manifest = tuple(
         ModelWeightFile(
             filename=path.relative_to(snapshot).as_posix(),
@@ -239,7 +276,9 @@ class MmsCtcAligner:
                 raise CorpusFailure(
                     "ALIGNER_UNAVAILABLE", "MMS resolved model revision does not match the pin"
                 )
-            model_weights_sha256, model_weight_manifest = resolve_model_weights(model_path)
+            model_weights_sha256, model_weight_manifest = resolve_model_weights(
+                model_path, cache_root=self.cache_dir or model_path
+            )
             runtime_device = self.device
             runtime_dtype = self.dtype_name
             cuda_available = bool(torch.cuda.is_available())
@@ -427,6 +466,8 @@ class MmsCtcAligner:
                 model_revision=self.model_revision,
                 runtime_identity=self._effective_parameters(self.runtime_info()),
             )
+        except CorpusFailure:
+            raise
         except (ImportError, AssertionError, OSError, RuntimeError, ValueError) as error:
             message = str(error)
             if "out of memory" in message.casefold():

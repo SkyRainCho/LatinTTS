@@ -1262,8 +1262,19 @@ def _ffmpeg_version() -> str:
     return first_line.strip()
 
 
+class _EnvironmentCommandFailure(Exception):
+    def __init__(self, artifact_field: str, failure_type: str) -> None:
+        super().__init__(failure_type)
+        self.artifact_field = artifact_field
+        self.evidence = f"unavailable: {failure_type}"
+
+
 def _capture_environment_command(
-    command: list[str], run_command: RunCommand, *, cwd: Path | None = None
+    command: list[str],
+    run_command: RunCommand,
+    *,
+    artifact_field: str,
+    cwd: Path | None = None,
 ) -> str:
     try:
         options: dict[str, object] = {
@@ -1271,12 +1282,18 @@ def _capture_environment_command(
             "check": True,
             "encoding": "utf-8",
             "text": True,
+            "timeout": 30,
         }
         if cwd is not None:
             options["cwd"] = cwd
         completed = run_command(command, **options)
-    except (FileNotFoundError, subprocess.CalledProcessError) as error:
-        return f"unavailable: {type(error).__name__}"
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        UnicodeError,
+    ) as error:
+        raise _EnvironmentCommandFailure(artifact_field, type(error).__name__) from error
     return completed.stdout.strip()
 
 
@@ -1328,31 +1345,46 @@ def alignment_smoke_test(
 ) -> int:
     """Load the pinned backend and persist a reproducible local runtime audit."""
     timestamp = (now or (lambda: datetime.now(timezone.utc)))().isoformat()
-    pip_freeze = _sanitize_pip_freeze(
-        _capture_environment_command([sys.executable, "-m", "pip", "freeze"], run_command)
-    )
-    nvidia_smi = _capture_environment_command(
-        [
-            "nvidia-smi",
-            "--query-gpu=name,driver_version,memory.total",
-            "--format=csv,noheader",
-        ],
-        run_command,
-    )
-    code_commit = _capture_environment_command(
-        ["git", "rev-parse", "HEAD"], run_command, cwd=paths.project_root
-    )
     alignment = config.raw.get("alignment")
     model_revision = alignment.get("model_revision") if type(alignment) is dict else None
     model_license = alignment.get("license") if type(alignment) is dict else None
-    run_id = hashlib.sha256(f"{timestamp}\0{code_commit}\0{model_revision}".encode()).hexdigest()[
+    run_id = hashlib.sha256(f"{timestamp}\0{config.digest}\0{model_revision}".encode()).hexdigest()[
         :24
     ]
+    runtime_directory = paths.alignments / "runtime"
+    runtime_directory.mkdir(parents=True, exist_ok=True)
+    environment_values = {
+        "pip_freeze": "not collected",
+        "nvidia_smi": "not collected",
+        "code_commit": "not collected",
+    }
     success = False
     failure_code: str | None = None
     message = ""
     runtime: Any | None = None
     try:
+        environment_values["pip_freeze"] = _sanitize_pip_freeze(
+            _capture_environment_command(
+                [sys.executable, "-m", "pip", "freeze"],
+                run_command,
+                artifact_field="pip_freeze",
+            )
+        )
+        environment_values["nvidia_smi"] = _capture_environment_command(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,memory.total",
+                "--format=csv,noheader",
+            ],
+            run_command,
+            artifact_field="nvidia_smi",
+        )
+        environment_values["code_commit"] = _capture_environment_command(
+            ["git", "rev-parse", "HEAD"],
+            run_command,
+            artifact_field="code_commit",
+            cwd=paths.project_root,
+        )
         backend = create_alignment_backend(
             config,
             cache_dir=cache_dir,
@@ -1363,10 +1395,14 @@ def alignment_smoke_test(
         )
         runtime = backend.runtime_info()
         success = True
+    except _EnvironmentCommandFailure as error:
+        environment_values[error.artifact_field] = error.evidence
+        failure_code = "ALIGNER_UNAVAILABLE"
+        message = "environment evidence unavailable"
     except CorpusFailure as error:
         failure_code = error.code
         message = "pinned alignment backend unavailable"
-    except (OSError, TypeError, ValueError):
+    except (OSError, ValueError):
         failure_code = "MANIFEST_SCHEMA_MISMATCH"
         message = "invalid alignment smoke configuration"
     smoke = {
@@ -1376,9 +1412,9 @@ def alignment_smoke_test(
         "message": message,
         "timestamp": timestamp,
         "python_version": sys.version,
-        "pip_freeze": pip_freeze,
-        "nvidia_smi": nvidia_smi,
-        "code_commit": code_commit,
+        "pip_freeze": environment_values["pip_freeze"],
+        "nvidia_smi": environment_values["nvidia_smi"],
+        "code_commit": environment_values["code_commit"],
         "backend_version": runtime.aligner_version if runtime is not None else None,
         "aligner_commit": runtime.aligner_commit if runtime is not None else None,
         "torch_version": runtime.torch_version if runtime is not None else None,
@@ -1409,7 +1445,7 @@ def alignment_smoke_test(
             f"Run ID: {run_id}",
             f"Python version: {sys.version}",
             f"Timestamp: {timestamp}",
-            f"Code commit: {code_commit}",
+            f"Code commit: {environment_values['code_commit']}",
             f"Model revision: {model_revision}",
             f"Model license: {model_license}",
             f"Torch version: {smoke['torch_version']}",
@@ -1418,17 +1454,15 @@ def alignment_smoke_test(
             f"ctc-forced-aligner commit: {smoke['aligner_commit']}",
             "",
             "pip freeze:",
-            pip_freeze,
+            environment_values["pip_freeze"],
             "",
             "nvidia-smi:",
-            nvidia_smi,
+            environment_values["nvidia_smi"],
             "",
         )
     )
     smoke["run_id"] = run_id
     smoke["environment_sha256"] = hashlib.sha256(environment.encode("utf-8")).hexdigest()
-    runtime_directory = paths.alignments / "runtime"
-    runtime_directory.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(runtime_directory / "environment.txt", environment)
     write_jsonl_atomic(runtime_directory / "smoke.json", (smoke,))
     return 0 if success else 1
@@ -1528,7 +1562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cache_dir=paths.local_data / "cache" / "huggingface",
                 local_files_only=not args.allow_download,
             )
-        except (OSError, TypeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
     if args.command == "segment":

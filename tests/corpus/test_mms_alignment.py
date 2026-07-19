@@ -320,6 +320,81 @@ def test_model_weight_manifest_includes_index_and_all_unique_referenced_shards(
     )
 
 
+def test_model_weight_manifest_accepts_explicit_cache_root_for_regular_snapshot(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    snapshot = cache / "models--latin" / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+
+    _, manifest = resolve_model_weights(snapshot, cache_root=cache)
+
+    assert tuple(item.filename for item in manifest) == ("model.safetensors",)
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"file symlinks unavailable: {error}")
+
+
+def test_model_weight_manifest_supports_hf_snapshot_symlinks_to_cache_blobs(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    repository = cache / "models--latin"
+    snapshot = repository / "snapshots" / ("a" * 40)
+    blobs = repository / "blobs"
+    snapshot.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    index_blob = blobs / "index-hash"
+    shard_blob = blobs / "shard-hash"
+    index_blob.write_text(
+        json.dumps({"weight_map": {"layer": "model-00001-of-00001.safetensors"}}),
+        encoding="utf-8",
+    )
+    shard_blob.write_bytes(b"shard")
+    _symlink_or_skip(snapshot / "model.safetensors.index.json", Path("../../blobs/index-hash"))
+    _symlink_or_skip(snapshot / "model-00001-of-00001.safetensors", Path("../../blobs/shard-hash"))
+
+    _, manifest = resolve_model_weights(snapshot, cache_root=cache)
+
+    assert tuple(item.filename for item in manifest) == (
+        "model.safetensors.index.json",
+        "model-00001-of-00001.safetensors",
+    )
+    assert manifest[1].sha256 == hashlib.sha256(b"shard").hexdigest()
+
+
+def test_model_weight_manifest_rejects_snapshot_symlink_outside_cache(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    snapshot = cache / "models--latin" / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    outside = tmp_path / "outside.safetensors"
+    outside.write_bytes(b"outside")
+    _symlink_or_skip(snapshot / "model.safetensors", outside)
+
+    with pytest.raises(CorpusFailure, match="outside the Hugging Face cache root"):
+        resolve_model_weights(snapshot, cache_root=cache)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ("../outside.safetensors", "C:/outside.safetensors", r"..\outside.safetensors"),
+)
+def test_model_weight_manifest_rejects_noncanonical_index_paths(
+    tmp_path: Path, filename: str
+) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer": filename}}), encoding="utf-8"
+    )
+
+    with pytest.raises(CorpusFailure, match="canonical relative path"):
+        resolve_model_weights(tmp_path, cache_root=tmp_path)
+
+
 @pytest.mark.parametrize("mode", ("missing", "extra", "conflicting-index"))
 def test_model_weight_manifest_rejects_inconsistent_shard_sets(tmp_path: Path, mode: str) -> None:
     (tmp_path / "model.safetensors.index.json").write_text(
@@ -351,6 +426,15 @@ def test_model_weight_manifest_rejects_ambiguous_or_invalid_selection(
         (tmp_path / "two.safetensors").write_bytes(b"two")
 
     with pytest.raises(CorpusFailure, match=r"invalid|multiple|no unique"):
+        resolve_model_weights(tmp_path)
+
+
+def test_model_weight_manifest_rejects_mixed_format_shard_index(tmp_path: Path) -> None:
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer": "pytorch_model.bin"}}), encoding="utf-8"
+    )
+
+    with pytest.raises(CorpusFailure, match="mixes weight formats"):
         resolve_model_weights(tmp_path)
 
 
@@ -828,10 +912,10 @@ def test_mms_aligner_translates_pinned_api_assertions_to_stable_failure(tmp_path
     assert error.value.code == "ALIGNER_UNAVAILABLE"
 
 
-def test_mms_aligner_translates_invalid_postprocessed_spans_to_stable_failure(
+def test_mms_aligner_preserves_low_confidence_from_empty_postprocessed_spans(
     tmp_path: Path,
 ) -> None:
-    class InvalidSpanAligner:
+    class EmptySpanAligner:
         load_audio = staticmethod(lambda *args: "waveform")
         generate_emissions = staticmethod(lambda *args: ("emissions", 0.02))
         preprocess_text = staticmethod(
@@ -842,9 +926,7 @@ def test_mms_aligner_translates_invalid_postprocessed_spans_to_stable_failure(
         )
         get_alignments = staticmethod(lambda *args: ("segments", "scores", 0))
         get_spans = staticmethod(lambda *args: "spans")
-        postprocess_results = staticmethod(
-            lambda *args: ({"start": 0.8, "end": 0.2, "text": "gratia", "score": 0.9},)
-        )
+        postprocess_results = staticmethod(lambda *args: ())
 
     runtime = _resolved_runtime_info()
     backend = MmsCtcAligner(
@@ -857,14 +939,16 @@ def test_mms_aligner_translates_invalid_postprocessed_spans_to_stable_failure(
         batch_size=4,
         dependencies=SimpleNamespace(
             runtime_info=runtime,
-            aligner=InvalidSpanAligner(),
+            aligner=EmptySpanAligner(),
             model=SimpleNamespace(dtype="float16", device="cuda"),
             tokenizer="tokenizer",
         ),
     )
 
-    with pytest.raises(CorpusFailure, match="MMS alignment failed"):
+    with pytest.raises(CorpusFailure, match="MMS returned no word spans") as error:
         backend.align(_runtime_request(backend, tmp_path, "Gratia"))
+
+    assert error.value.code == "ALIGNMENT_LOW_CONFIDENCE"
 
 
 def test_runtime_info_requires_verified_loaded_dependencies() -> None:

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from latintts.corpus.cli import alignment_smoke_test, main
 from latintts.corpus.config import CorpusConfig
@@ -161,6 +164,7 @@ def test_alignment_smoke_writes_reproducible_runtime_audit_with_fake_modules(
         "git",
     ]
     assert command_options[2]["cwd"] == paths.project_root
+    assert all(options["timeout"] == 30 for options in command_options)
 
 
 def test_align_smoke_cli_uses_local_cache_policy_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -180,21 +184,48 @@ def test_align_smoke_cli_uses_local_cache_policy_by_default(tmp_path: Path, monk
     assert captured["cache_dir"] == tmp_path / "local-data" / "cache" / "huggingface"
 
 
+def test_alignment_smoke_propagates_programmer_type_error(tmp_path: Path) -> None:
+    def programmer_bug(name: str) -> object:
+        raise TypeError(f"unexpected loader contract for {name}")
+
+    def successful_command(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout="available\n")
+
+    with pytest.raises(TypeError, match="unexpected loader contract"):
+        alignment_smoke_test(
+            CorpusPaths.from_project_root(tmp_path),
+            _config(),
+            module_loader=programmer_bug,
+            run_command=successful_command,
+        )
+
+
+def test_align_smoke_cli_propagates_programmer_type_error(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("latintts.corpus.cli.CorpusConfig.load", lambda path: _config())
+    monkeypatch.setattr(
+        "latintts.corpus.cli.alignment_smoke_test",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TypeError("programmer bug")),
+    )
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        main(["--project-root", str(tmp_path), "align", "--smoke-test"])
+
+
 def test_alignment_smoke_persists_stable_failure_when_dependencies_are_unavailable(
     tmp_path: Path,
 ) -> None:
     def missing_module(name: str) -> object:
         raise ImportError(name)
 
-    def missing_command(command: list[str], **kwargs: object) -> object:
-        raise FileNotFoundError(command[0])
+    def available_command(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout="available\n")
 
     paths = CorpusPaths.from_project_root(tmp_path)
     exit_code = alignment_smoke_test(
         paths,
         _config(),
         module_loader=missing_module,
-        run_command=missing_command,  # type: ignore[arg-type]
+        run_command=available_command,
     )
 
     smoke = json.loads((paths.alignments / "runtime" / "smoke.json").read_text(encoding="utf-8"))
@@ -203,6 +234,59 @@ def test_alignment_smoke_persists_stable_failure_when_dependencies_are_unavailab
     assert smoke["success"] is False
     assert smoke["failure_code"] == "ALIGNER_UNAVAILABLE"
     assert smoke["model_weights_sha256"] is None
-    assert smoke["pip_freeze"] == "unavailable: FileNotFoundError"
+    assert smoke["pip_freeze"] == "available"
     assert smoke["message"] == "pinned alignment backend unavailable"
     assert str(Path(sys.executable).parent) not in environment
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_name"),
+    (
+        (PermissionError(r"C:\Users\Alice\private"), "PermissionError"),
+        (OSError(r"C:\Users\Alice\private"), "OSError"),
+        (
+            subprocess.CalledProcessError(1, ["pip", "freeze"], stderr=r"C:\Users\Alice\private"),
+            "CalledProcessError",
+        ),
+        (subprocess.TimeoutExpired(["pip", "freeze"], 30), "TimeoutExpired"),
+        (
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, r"C:\Users\Alice\private"),
+            "UnicodeDecodeError",
+        ),
+    ),
+)
+def test_alignment_smoke_persists_sanitized_failure_for_environment_command_errors(
+    tmp_path: Path, failure: BaseException, failure_name: str
+) -> None:
+    module_calls: list[str] = []
+
+    def backend_must_not_load(name: str) -> object:
+        module_calls.append(name)
+        raise AssertionError("backend should not load after environment capture failure")
+
+    def failed_command(command: list[str], **kwargs: object) -> object:
+        raise failure
+
+    paths = CorpusPaths.from_project_root(tmp_path)
+    exit_code = alignment_smoke_test(
+        paths,
+        _config(),
+        module_loader=backend_must_not_load,
+        run_command=failed_command,  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc),
+    )
+
+    runtime = paths.alignments / "runtime"
+    smoke_text = (runtime / "smoke.json").read_text(encoding="utf-8")
+    smoke = json.loads(smoke_text)
+    environment = (runtime / "environment.txt").read_text(encoding="utf-8")
+    assert exit_code == 1
+    assert module_calls == []
+    assert smoke["success"] is False
+    assert smoke["failure_code"] == "ALIGNER_UNAVAILABLE"
+    assert smoke["message"] == "environment evidence unavailable"
+    assert smoke["pip_freeze"] == f"unavailable: {failure_name}"
+    assert f"Run ID: {smoke['run_id']}" in environment
+    assert smoke["environment_sha256"] == hashlib.sha256(environment.encode()).hexdigest()
+    assert "Alice" not in smoke_text + environment
+    assert "private" not in smoke_text + environment
