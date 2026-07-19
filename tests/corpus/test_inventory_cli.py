@@ -6,7 +6,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from latintts.corpus.cli import main
-from latintts.corpus.domain import CorpusState
+from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.inventory import inventory, inventory_from_manifests, write_intake_skeleton
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.store import read_jsonl, write_jsonl_atomic
@@ -241,7 +241,9 @@ def test_inventory_public_entry_point_is_manifest_inventory() -> None:
     assert inventory is inventory_from_manifests
 
 
-def test_inventory_from_manifests_recovers_missing_transition_event(tmp_path: Path) -> None:
+def test_inventory_from_manifests_rejects_missing_transition_event_without_writes(
+    tmp_path: Path,
+) -> None:
     paths = CorpusPaths.from_project_root(tmp_path)
     paths.ensure_layout()
     (paths.raw_spoken / "speech.wav").write_bytes(b"speech")
@@ -253,11 +255,151 @@ def test_inventory_from_manifests_recovers_missing_transition_event(tmp_path: Pa
     event_path = paths.alignments / "runs" / "inventory" / "processing-events.jsonl"
     inventory_from_manifests(paths, run_command=_fake_probe)
     write_jsonl_atomic(event_path, ())
+    recordings_path = paths.manifests / "recordings.jsonl"
+    recordings_before = recordings_path.read_bytes()
+    events_before = event_path.read_bytes()
 
-    records = inventory_from_manifests(paths, run_command=_fake_probe)
+    with pytest.raises(ValueError, match="existing inventory is inconsistent"):
+        inventory_from_manifests(paths, run_command=_fake_probe)
 
-    events = read_jsonl(event_path)
-    assert len(events) == 1
-    assert events[0]["recording_id"] == records[0].recording_id
-    assert events[0]["previous_state"] == "DISCOVERED"
-    assert events[0]["target_state"] == "INVENTORIED"
+    assert recordings_path.read_bytes() == recordings_before
+    assert event_path.read_bytes() == events_before
+
+
+def test_inventory_from_manifests_rejects_partial_state_without_writes(tmp_path: Path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    (paths.raw_spoken / "speech.wav").write_bytes(b"speech")
+    _write_completed_intake(
+        paths,
+        [["raw/spoken/speech.wav", "Speech", "speaker-1", "rights-1", ""]],
+    )
+    _write_rights(paths)
+    inventory_from_manifests(paths, run_command=_fake_probe)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    event_path = paths.alignments / "runs" / "inventory" / "processing-events.jsonl"
+    partial = dict(read_jsonl(recordings_path)[0])
+    partial["state"] = "DISCOVERED"
+    write_jsonl_atomic(recordings_path, (partial,))
+    recordings_before = recordings_path.read_bytes()
+    events_before = event_path.read_bytes()
+
+    with pytest.raises(ValueError, match="existing inventory is inconsistent"):
+        inventory_from_manifests(paths, run_command=_fake_probe)
+
+    assert recordings_path.read_bytes() == recordings_before
+    assert event_path.read_bytes() == events_before
+
+
+def test_inventory_from_manifests_rejects_changed_audio_without_writes(tmp_path: Path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    audio = paths.raw_spoken / "speech.wav"
+    audio.write_bytes(b"speech")
+    _write_completed_intake(
+        paths,
+        [["raw/spoken/speech.wav", "Speech", "speaker-1", "rights-1", ""]],
+    )
+    _write_rights(paths)
+    inventory_from_manifests(paths, run_command=_fake_probe)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    event_path = paths.alignments / "runs" / "inventory" / "processing-events.jsonl"
+    recordings_before = recordings_path.read_bytes()
+    events_before = event_path.read_bytes()
+    audio.write_bytes(b"changed speech")
+
+    with pytest.raises(ValueError, match="existing inventory is inconsistent"):
+        inventory_from_manifests(paths, run_command=_fake_probe)
+
+    assert recordings_path.read_bytes() == recordings_before
+    assert event_path.read_bytes() == events_before
+
+
+def test_inventory_from_manifests_rejects_duplicate_transition_event_without_writes(
+    tmp_path: Path,
+) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    (paths.raw_spoken / "speech.wav").write_bytes(b"speech")
+    _write_completed_intake(
+        paths,
+        [["raw/spoken/speech.wav", "Speech", "speaker-1", "rights-1", ""]],
+    )
+    _write_rights(paths)
+    inventory_from_manifests(paths, run_command=_fake_probe)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    event_path = paths.alignments / "runs" / "inventory" / "processing-events.jsonl"
+    event = read_jsonl(event_path)[0]
+    write_jsonl_atomic(event_path, (event, event))
+    recordings_before = recordings_path.read_bytes()
+    events_before = event_path.read_bytes()
+
+    with pytest.raises(ValueError, match="existing inventory is inconsistent"):
+        inventory_from_manifests(paths, run_command=_fake_probe)
+
+    assert recordings_path.read_bytes() == recordings_before
+    assert event_path.read_bytes() == events_before
+
+
+def test_inventory_cli_reports_corpus_failure_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    def unavailable(paths: CorpusPaths) -> tuple[()]:
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "ffprobe unavailable")
+
+    monkeypatch.setattr("latintts.corpus.cli.inventory_from_manifests", unavailable)
+
+    assert main(["--project-root", str(tmp_path), "inventory"]) == 1
+    assert capsys.readouterr().err == "ALIGNER_UNAVAILABLE: ffprobe unavailable\n"
+
+
+def test_inventory_cli_reports_missing_manifest_as_input_error(tmp_path: Path, capsys) -> None:
+    assert main(["--project-root", str(tmp_path), "inventory"]) == 2
+    assert capsys.readouterr().err == (
+        "MANIFEST_SCHEMA_MISMATCH: missing required manifest: intake.csv\n"
+    )
+
+
+def test_inventory_cli_reports_strict_manifest_error(tmp_path: Path, capsys) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    (paths.manifests / "intake.csv").write_text("wrong,header\n", encoding="utf-8")
+
+    assert main(["--project-root", str(tmp_path), "inventory"]) == 2
+    assert capsys.readouterr().err == (
+        "MANIFEST_SCHEMA_MISMATCH: intake.csv must use the exact header\n"
+    )
+
+
+def test_inventory_cli_does_not_swallow_programming_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def broken(paths: CorpusPaths) -> tuple[()]:
+        raise RuntimeError("programming bug")
+
+    monkeypatch.setattr("latintts.corpus.cli.inventory_from_manifests", broken)
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        main(["--project-root", str(tmp_path), "inventory"])
+
+
+def test_empty_inventory_rejects_unexpected_event_without_writes(tmp_path: Path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    _write_completed_intake(paths, [])
+    write_jsonl_atomic(paths.manifests / "rights.jsonl", ())
+    inventory_from_manifests(paths, run_command=_fake_probe)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    event_path = paths.alignments / "runs" / "inventory" / "processing-events.jsonl"
+    write_jsonl_atomic(event_path, ({"unexpected": "event"},))
+    recordings_before = recordings_path.read_bytes()
+    events_before = event_path.read_bytes()
+
+    with pytest.raises(ValueError, match="existing inventory is inconsistent"):
+        inventory_from_manifests(paths, run_command=_fake_probe)
+
+    assert recordings_path.read_bytes() == recordings_before
+    assert event_path.read_bytes() == events_before

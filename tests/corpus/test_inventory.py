@@ -155,3 +155,111 @@ def test_probe_audio_maps_ffprobe_failure_without_stderr(tmp_path: Path) -> None
         probe_audio(audio, run_command=failed_run)
 
     assert error.value.code == "INVENTORY_UNSUPPORTED_FORMAT"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "raw/spoken/../sung/chant.wav",
+        "raw/sung/./chant.wav",
+        r"raw\sung\chant.wav",
+    ),
+)
+def test_inventory_row_rejects_noncanonical_intake_paths_before_probe(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    (paths.raw_sung / "chant.wav").write_bytes(b"synthetic-chant")
+    row = IntakeRow(relative_path, "Chant", "speaker-1", "rights-1", "")
+    probe_calls = 0
+
+    def counted_probe(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        nonlocal probe_calls
+        probe_calls += 1
+        return _probe_run(command, **kwargs)
+
+    with pytest.raises(ValueError, match="canonical POSIX"):
+        inventory_row(row, _rights(), paths, run_command=counted_probe)
+
+    assert probe_calls == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        [],
+        {"format": {"duration": "1.0"}, "streams": {}},
+        {"format": {"duration": "1.0"}, "streams": [None]},
+        {
+            "format": [],
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": "pcm_s16le",
+                    "sample_rate": "48000",
+                    "channels": 1,
+                }
+            ],
+        },
+        {
+            "format": {"duration": 1.0},
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": "pcm_s16le",
+                    "sample_rate": "48000",
+                    "channels": 1,
+                }
+            ],
+        },
+        {
+            "format": {"duration": "1.0"},
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": None,
+                    "sample_rate": "48000",
+                    "channels": 1,
+                }
+            ],
+        },
+        {
+            "format": {"duration": "1.0"},
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": "pcm_s16le",
+                    "sample_rate": 48000,
+                    "channels": 1,
+                }
+            ],
+        },
+        {
+            "format": {"duration": "1.0"},
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": "pcm_s16le",
+                    "sample_rate": "48000",
+                    "channels": "1",
+                }
+            ],
+        },
+    ),
+)
+def test_probe_audio_rejects_malformed_structure_and_raw_field_types(
+    tmp_path: Path,
+    payload: object,
+) -> None:
+    audio = tmp_path / "malformed.wav"
+    audio.write_bytes(b"malformed")
+
+    def malformed_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(CorpusFailure) as error:
+        probe_audio(audio, run_command=malformed_run)
+
+    assert error.value.code == "INVENTORY_UNSUPPORTED_FORMAT"

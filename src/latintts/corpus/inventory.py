@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
 
 from latintts.corpus.domain import CorpusFailure, CorpusState
@@ -16,6 +16,7 @@ from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.records import (
     AudioMetadata,
     IntakeRow,
+    ProcessingEvent,
     RecordingRecord,
     RightsRecord,
     advance_recording,
@@ -32,22 +33,74 @@ _INTAKE_FIELDS = (
     "notes",
 )
 _INVENTORY_CONFIG_SHA256 = hashlib.sha256(b"latintts-corpus-inventory-v1").hexdigest()
+_PROCESSING_EVENT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "event_id",
+        "recording_id",
+        "previous_state",
+        "target_state",
+        "input_sha256s",
+        "config_sha256",
+        "tool_versions",
+        "started_at",
+        "finished_at",
+        "result",
+    }
+)
+
+
+class InventoryInputError(ValueError):
+    def __init__(self, message: str, code: str = "MANIFEST_SCHEMA_MISMATCH") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _has_inventory_events(events_path: Path, records: tuple[RecordingRecord, ...]) -> bool:
     if not records:
-        return True
+        return not events_path.exists() or not read_jsonl(events_path)
     if not events_path.exists():
         return False
-    events = read_jsonl(events_path)
+    raw_events = read_jsonl(events_path)
+    if len(raw_events) != len(records):
+        return False
+    events: list[ProcessingEvent] = []
+    for raw in raw_events:
+        if (
+            set(raw) != _PROCESSING_EVENT_FIELDS
+            or type(raw.get("input_sha256s")) is not list
+            or type(raw.get("tool_versions")) is not list
+        ):
+            return False
+        try:
+            events.append(
+                ProcessingEvent(
+                    schema_version=raw["schema_version"],
+                    event_id=raw["event_id"],
+                    recording_id=raw["recording_id"],
+                    previous_state=CorpusState(raw["previous_state"]),
+                    target_state=CorpusState(raw["target_state"]),
+                    input_sha256s=tuple(raw["input_sha256s"]),
+                    config_sha256=raw["config_sha256"],
+                    tool_versions=tuple(raw["tool_versions"]),
+                    started_at=raw["started_at"],
+                    finished_at=raw["finished_at"],
+                    result=raw["result"],
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+    if len({event.event_id for event in events}) != len(events):
+        return False
     return all(
         any(
-            event.get("recording_id") == record.recording_id
-            and event.get("previous_state") == CorpusState.DISCOVERED.value
-            and event.get("target_state") == CorpusState.INVENTORIED.value
-            and event.get("input_sha256s") == [record.sha256]
-            and event.get("config_sha256") == _INVENTORY_CONFIG_SHA256
-            and event.get("result") == "success"
+            event.recording_id == record.recording_id
+            and event.previous_state is CorpusState.DISCOVERED
+            and event.target_state is CorpusState.INVENTORIED
+            and event.input_sha256s == (record.sha256,)
+            and event.config_sha256 == _INVENTORY_CONFIG_SHA256
+            and event.tool_versions == ("ffprobe",)
+            and event.result == "success"
             for event in events
         )
         for record in records
@@ -60,6 +113,23 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _canonical_audio_source(paths: CorpusPaths, relative_path: str) -> tuple[Path, str]:
+    parts = relative_path.split("/")
+    if "\\" in relative_path or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("intake audio path must be canonical POSIX")
+    posix_path = PurePosixPath(relative_path)
+    if posix_path.is_absolute() or posix_path.as_posix() != relative_path:
+        raise ValueError("intake audio path must be canonical POSIX")
+    try:
+        source = paths.resolve_local(posix_path)
+        canonical = paths.relative_local(source)
+    except ValueError as error:
+        raise ValueError("intake audio path must be canonical POSIX") from error
+    if canonical != relative_path:
+        raise ValueError("intake audio path must be canonical POSIX")
+    return source, canonical
 
 
 def probe_audio(path: Path, run_command: RunCommand = subprocess.run) -> AudioMetadata:
@@ -89,24 +159,49 @@ def probe_audio(path: Path, run_command: RunCommand = subprocess.run) -> AudioMe
         raise CorpusFailure("INVENTORY_UNSUPPORTED_FORMAT", message) from error
     try:
         raw = json.loads(completed.stdout)
-        audio_streams = [item for item in raw["streams"] if item.get("codec_type") == "audio"]
-    except (KeyError, TypeError, ValueError) as error:
+    except (TypeError, ValueError) as error:
         raise CorpusFailure(
             "INVENTORY_UNSUPPORTED_FORMAT", f"invalid ffprobe output for {path}"
         ) from error
+    if type(raw) is not dict:
+        raise CorpusFailure("INVENTORY_UNSUPPORTED_FORMAT", f"invalid ffprobe output for {path}")
+    format_data = raw.get("format")
+    streams = raw.get("streams")
+    if type(format_data) is not dict or type(streams) is not list:
+        raise CorpusFailure("INVENTORY_UNSUPPORTED_FORMAT", f"invalid ffprobe output for {path}")
+    audio_streams: list[dict[str, object]] = []
+    for item in streams:
+        if type(item) is not dict or type(item.get("codec_type")) is not str:
+            raise CorpusFailure(
+                "INVENTORY_UNSUPPORTED_FORMAT", f"invalid ffprobe output for {path}"
+            )
+        if item["codec_type"] == "audio":
+            audio_streams.append(item)
     if not audio_streams:
         raise CorpusFailure("INVENTORY_UNSUPPORTED_FORMAT", f"no audio stream: {path}")
+    stream = audio_streams[0]
+    duration = format_data.get("duration")
+    bit_rate = format_data.get("bit_rate")
+    sample_rate = stream.get("sample_rate")
+    channels = stream.get("channels")
+    codec = stream.get("codec_name")
+    if (
+        type(duration) is not str
+        or not (bit_rate is None or type(bit_rate) is str)
+        or type(sample_rate) is not str
+        or type(channels) is not int
+        or type(codec) is not str
+    ):
+        raise CorpusFailure("INVENTORY_UNSUPPORTED_FORMAT", f"invalid audio metadata for {path}")
     try:
-        stream = audio_streams[0]
-        bit_rate = raw["format"].get("bit_rate")
         return AudioMetadata(
-            duration_seconds=float(raw["format"]["duration"]),
-            sample_rate=int(stream["sample_rate"]),
-            channels=int(stream["channels"]),
-            codec=str(stream["codec_name"]),
+            duration_seconds=float(duration),
+            sample_rate=int(sample_rate),
+            channels=channels,
+            codec=codec,
             bit_rate=int(bit_rate) if bit_rate is not None else None,
         )
-    except (KeyError, TypeError, ValueError) as error:
+    except ValueError as error:
         raise CorpusFailure(
             "INVENTORY_UNSUPPORTED_FORMAT", f"invalid audio metadata for {path}"
         ) from error
@@ -118,13 +213,13 @@ def inventory_row(
     paths: CorpusPaths,
     run_command: RunCommand = subprocess.run,
 ) -> RecordingRecord:
-    source = paths.resolve_local(row.relative_path)
+    source, canonical_path = _canonical_audio_source(paths, row.relative_path)
     if source.suffix.lower() not in SUPPORTED_SUFFIXES:
         raise CorpusFailure(
             "INVENTORY_UNSUPPORTED_FORMAT",
             f"unsupported audio suffix: {source.suffix}",
         )
-    prefix = Path(row.relative_path).parts[:2]
+    prefix = PurePosixPath(canonical_path).parts[:2]
     if prefix not in (("raw", "spoken"), ("raw", "sung")):
         raise ValueError("intake audio must be under raw/spoken or raw/sung")
     if rights.rights_id != row.rights_id:
@@ -135,7 +230,7 @@ def inventory_row(
     return RecordingRecord(
         schema_version="1",
         recording_id=f"rec-{digest[:12]}",
-        relative_path=Path(row.relative_path).as_posix(),
+        relative_path=canonical_path,
         sha256=digest,
         content_type="sung" if prefix == ("raw", "sung") else "spoken",
         title_or_citation=row.title_or_citation,
@@ -180,30 +275,56 @@ def inventory_from_manifests(
     run_directory: Path | None = None,
     timestamp: str | None = None,
 ) -> tuple[RecordingRecord, ...]:
-    intake_rows = read_intake(paths.manifests / "intake.csv")
-    rights_by_id = load_rights(paths.manifests / "rights.jsonl")
+    intake_path = paths.manifests / "intake.csv"
+    rights_path = paths.manifests / "rights.jsonl"
+    try:
+        intake_rows = read_intake(intake_path)
+    except FileNotFoundError as error:
+        raise InventoryInputError(f"missing required manifest: {intake_path.name}") from error
+    except (TypeError, ValueError) as error:
+        raise InventoryInputError(str(error)) from error
+    try:
+        rights_by_id = load_rights(rights_path)
+    except FileNotFoundError as error:
+        raise InventoryInputError(f"missing required manifest: {rights_path.name}") from error
+    except (TypeError, ValueError) as error:
+        raise InventoryInputError(str(error)) from error
     missing_rights = sorted({row.rights_id for row in intake_rows} - rights_by_id.keys())
     if missing_rights:
-        raise ValueError(f"unknown rights_id: {', '.join(missing_rights)}")
+        raise InventoryInputError(
+            f"unknown rights_id: {', '.join(missing_rights)}",
+            code="RIGHTS_SCOPE_UNCONFIRMED",
+        )
 
-    final_records = tuple(
-        inventory_row(row, rights_by_id[row.rights_id], paths, run_command)
-        for row in sorted(intake_rows, key=lambda item: item.relative_path)
-    )
+    try:
+        final_records = tuple(
+            inventory_row(row, rights_by_id[row.rights_id], paths, run_command)
+            for row in sorted(intake_rows, key=lambda item: item.relative_path)
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise InventoryInputError(str(error)) from error
     recording_ids = [record.recording_id for record in final_records]
     if len(set(recording_ids)) != len(recording_ids):
-        raise ValueError("duplicate recording_id derived from identical audio content")
+        raise InventoryInputError("duplicate recording_id derived from identical audio content")
 
     recordings_path = paths.manifests / "recordings.jsonl"
     event_directory = run_directory or paths.alignments / "runs" / "inventory"
     events_path = event_directory / "processing-events.jsonl"
     final_rows = tuple(record.to_dict() for record in final_records)
-    if (
-        recordings_path.exists()
-        and read_jsonl(recordings_path) == final_rows
-        and _has_inventory_events(events_path, final_records)
-    ):
-        return final_records
+    if recordings_path.exists():
+        try:
+            is_complete = read_jsonl(recordings_path) == final_rows and _has_inventory_events(
+                events_path, final_records
+            )
+        except (OSError, ValueError) as error:
+            raise InventoryInputError(
+                "existing inventory is inconsistent; manual recovery required"
+            ) from error
+        if is_complete:
+            return final_records
+        raise InventoryInputError("existing inventory is inconsistent; manual recovery required")
+    if events_path.exists():
+        raise InventoryInputError("existing inventory is inconsistent; manual recovery required")
 
     current_records = tuple(
         replace(record, state=CorpusState.DISCOVERED) for record in final_records

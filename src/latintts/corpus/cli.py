@@ -3,10 +3,16 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import shutil
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from latintts.corpus.inventory import inventory_from_manifests, write_intake_skeleton
+from latintts.corpus.domain import CorpusFailure
+from latintts.corpus.inventory import (
+    InventoryInputError,
+    inventory_from_manifests,
+    write_intake_skeleton,
+)
 from latintts.corpus.paths import CorpusPaths
 
 
@@ -40,6 +46,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.init_intake:
             write_intake_skeleton(paths, paths.manifests / "intake.csv")
         else:
-            inventory_from_manifests(paths)
+            try:
+                inventory_from_manifests(paths)
+            except CorpusFailure as error:
+                print(f"{error.code}: {error}", file=sys.stderr)
+                return 1
+            except InventoryInputError as error:
+                print(f"{error.code}: {error}", file=sys.stderr)
+                return 2
         return 0
     raise AssertionError(args.command)
