@@ -349,10 +349,15 @@ def test_lossless_command_preserves_layout_and_uses_compression_level_5(
                     "codec_name": "flac",
                     "sample_rate": "48000",
                     "channels": 1,
+                    "duration_ts": "38400",
+                    "time_base": "1/48000",
                 }
             ],
         }
         return CompletedProcess(command, 0, json.dumps(payload), "")
+
+    def fake_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, "", "")
 
     lossless = extract_lossless_segment(
         record,
@@ -362,6 +367,7 @@ def test_lossless_command_preserves_layout_and_uses_compression_level_5(
         ffmpeg_version=FFMPEG_VERSION,
         run_command=fake_run,
         probe_command=fake_probe,
+        decode_command=fake_decode,
     )
 
     command = commands[0]

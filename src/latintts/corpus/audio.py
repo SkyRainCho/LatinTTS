@@ -14,6 +14,7 @@ import wave
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, fields
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
 from typing import Any, Literal
@@ -406,15 +407,16 @@ def _analysis_duration(path: Path) -> float:
     return frame_count / frame_rate
 
 
-def _validate_analysis_output(path: Path, expected_duration: float | None = None) -> PcmMetrics:
+def _validate_analysis_output(path: Path, expected_sample_count: int | None = None) -> PcmMetrics:
     duration = _analysis_duration(path)
-    if expected_duration is not None and abs(duration - expected_duration) > 0.05:
-        raise ValueError("analysis WAV duration does not match requested segment")
+    actual_sample_count = round(duration * 16000)
+    if expected_sample_count is not None and abs(actual_sample_count - expected_sample_count) > 1:
+        raise ValueError("analysis WAV sample count does not match requested segment")
     return measure_pcm16(path)
 
 
 def _validate_review_output(
-    path: Path, sample_rate: int, channels: int, expected_duration: float
+    path: Path, sample_rate: int, channels: int, expected_sample_count: int
 ) -> None:
     try:
         with wave.open(str(path), "rb") as handle:
@@ -423,7 +425,7 @@ def _validate_review_output(
                 and handle.getsampwidth() == 3
                 and handle.getframerate() == sample_rate
                 and handle.getnframes() > 0
-                and abs(handle.getnframes() / sample_rate - expected_duration) <= 0.05
+                and abs(handle.getnframes() - expected_sample_count) <= 1
             )
     except (EOFError, OSError, wave.Error) as error:
         raise ValueError("review WAV is invalid") from error
@@ -436,15 +438,16 @@ def _validate_flac_output(
     *,
     sample_rate: int,
     channels: int,
-    duration_seconds: float,
+    expected_sample_count: int,
     probe_command: RunCommand,
+    decode_command: RunCommand,
 ) -> None:
     command = [
         "ffprobe",
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type,codec_name,sample_rate,channels",
+        "format=duration:stream=codec_type,codec_name,sample_rate,channels,duration_ts,time_base",
         "-of",
         "json",
         str(path),
@@ -470,19 +473,53 @@ def _validate_flac_output(
         duration = float(format_data["duration"])
         audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
         stream = audio_streams[0]
+        stream_sample_rate = int(stream["sample_rate"])
+        stream_samples = (
+            int(stream["duration_ts"]) * Fraction(stream["time_base"]) * stream_sample_rate
+        )
         valid = (
             stream["codec_name"] == "flac"
-            and int(stream["sample_rate"]) == sample_rate
+            and stream_sample_rate == sample_rate
             and type(stream["channels"]) is int
             and stream["channels"] == channels
+            and stream_samples.denominator == 1
+            and abs(stream_samples.numerator - expected_sample_count) <= 1
             and math.isfinite(duration)
             and duration > 0
-            and abs(duration - duration_seconds) <= max(0.05, 2 / sample_rate)
+            and abs(duration - float(stream_samples / sample_rate)) <= 0.05
         )
     except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
         raise CorpusFailure("AUDIO_QUALITY_REJECTED", "invalid ffprobe FLAC output") from error
     if not valid:
         raise CorpusFailure("AUDIO_QUALITY_REJECTED", "FLAC media properties do not match")
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-xerror",
+        "-i",
+        str(path),
+        "-map",
+        "0:a:0",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        decode_command(
+            command,
+            capture_output=True,
+            check=True,
+            encoding="utf-8",
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "ffmpeg not found in PATH") from error
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr.strip() if isinstance(error.stderr, str) else ""
+        message = stderr or f"ffmpeg decode exited with status {error.returncode}"
+        raise CorpusFailure("AUDIO_QUALITY_REJECTED", message) from error
 
 
 def _validate_segment_bounds(
@@ -760,7 +797,8 @@ def extract_analysis_segment(
     )
 
     def validate_candidate(path: Path) -> PcmMetrics | None:
-        return _validate_analysis_output(path, end_seconds - start_seconds)
+        expected_samples = round((end_seconds - start_seconds) * 16000)
+        return _validate_analysis_output(path, expected_samples)
 
     return _materialize(
         plan=plan,
@@ -817,11 +855,12 @@ def extract_review_wav(
     )
 
     def validate_review(path: Path) -> PcmMetrics | None:
+        expected_samples = round((end_seconds - start_seconds) * record.metadata.sample_rate)
         _validate_review_output(
             path,
             record.metadata.sample_rate,
             record.metadata.channels,
-            end_seconds - start_seconds,
+            expected_samples,
         )
         return None
 
@@ -853,6 +892,7 @@ def extract_lossless_segment(
     cached: DerivedAudio | None = None,
     run_command: RunCommand = subprocess.run,
     probe_command: RunCommand = subprocess.run,
+    decode_command: RunCommand = subprocess.run,
 ) -> DerivedAudio:
     source = _raw_source(record, paths)
     _validate_segment_bounds(start_seconds, end_seconds, record.metadata.duration_seconds)
@@ -876,15 +916,16 @@ def extract_lossless_segment(
         start_seconds=start_seconds,
         end_seconds=end_seconds,
     )
-    expected_duration = end_seconds - start_seconds
+    expected_samples = round((end_seconds - start_seconds) * record.metadata.sample_rate)
 
     def validate_flac(path: Path) -> PcmMetrics | None:
         _validate_flac_output(
             path,
             sample_rate=record.metadata.sample_rate,
             channels=record.metadata.channels,
-            duration_seconds=expected_duration,
+            expected_sample_count=expected_samples,
             probe_command=probe_command,
+            decode_command=decode_command,
         )
         return None
 

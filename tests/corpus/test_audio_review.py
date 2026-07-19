@@ -73,6 +73,10 @@ def _analysis_runner(command: list[str], **kwargs: object) -> CompletedProcess[s
     return CompletedProcess(command, 0, "", "")
 
 
+def _good_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+    return CompletedProcess(command, 0, "", "")
+
+
 def _derive(
     paths: CorpusPaths,
     record: RecordingRecord,
@@ -350,7 +354,9 @@ def test_cache_read_io_error_maps_to_cache_artifact_invalid(tmp_path: Path) -> N
     assert error.value.code == "CACHE_ARTIFACT_INVALID"
 
 
-def _flac_probe_payload(*, duration: float = 0.4) -> str:
+def _flac_probe_payload(
+    *, duration: float = 0.4, duration_ts: int = 19200, time_base: str = "1/48000"
+) -> str:
     return json.dumps(
         {
             "format": {"duration": str(duration)},
@@ -360,6 +366,8 @@ def _flac_probe_payload(*, duration: float = 0.4) -> str:
                     "codec_name": "flac",
                     "sample_rate": "48000",
                     "channels": 1,
+                    "duration_ts": str(duration_ts),
+                    "time_base": time_base,
                 }
             ],
         }
@@ -386,6 +394,7 @@ def test_lossless_segment_is_validated_by_safe_ffprobe(tmp_path: Path) -> None:
         ffmpeg_version=FFMPEG_VERSION,
         run_command=fake_ffmpeg,
         probe_command=fake_ffprobe,
+        decode_command=_good_decode,
     )
 
     command, kwargs = calls[0]
@@ -394,6 +403,181 @@ def test_lossless_segment_is_validated_by_safe_ffprobe(tmp_path: Path) -> None:
     assert command[-1].endswith(".flac")
     assert kwargs.get("shell") is None
     assert derived.mode == "lossless"
+
+
+def test_candidate_rejects_clip_off_by_two_samples(tmp_path: Path) -> None:
+    paths, record, config, _ = _fixture(tmp_path)
+    analysis = _derive(paths, record, config)
+
+    def two_samples_long(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        _write_pcm(Path(command[-1]), frames=6402)
+        return CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(CorpusFailure) as error:
+        extract_analysis_segment(
+            analysis,
+            paths,
+            0.1,
+            0.5,
+            ffmpeg_version=FFMPEG_VERSION,
+            run_command=two_samples_long,
+        )
+
+    assert error.value.code == "AUDIO_QUALITY_REJECTED"
+    assert not tuple((paths.segments / "candidates").glob("*.wav"))
+
+
+def test_review_rejects_clip_off_by_two_preserved_rate_samples(tmp_path: Path) -> None:
+    paths, record, _, _ = _fixture(tmp_path)
+
+    def two_samples_short(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        _write_pcm(
+            Path(command[-1]),
+            sample_rate=record.metadata.sample_rate,
+            channels=record.metadata.channels,
+            sample_width=3,
+            frames=19198,
+        )
+        return CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(CorpusFailure) as error:
+        extract_review_wav(
+            record,
+            paths,
+            0.1,
+            0.5,
+            ffmpeg_version=FFMPEG_VERSION,
+            run_command=two_samples_short,
+        )
+
+    assert error.value.code == "AUDIO_QUALITY_REJECTED"
+    assert not tuple((paths.segments / "review").glob("*.wav"))
+
+
+def test_lossless_metadata_valid_but_decode_failing_is_never_published(
+    tmp_path: Path,
+) -> None:
+    paths, record, _, _ = _fixture(tmp_path)
+    decode_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_ffmpeg(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        Path(command[-1]).write_bytes(b"metadata-valid-truncated-frames")
+        return CompletedProcess(command, 0, "", "")
+
+    def good_probe(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, _flac_probe_payload(), "")
+
+    def failing_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        decode_calls.append((command, kwargs))
+        raise CalledProcessError(1, command, stderr="corrupt frame")
+
+    with pytest.raises(CorpusFailure) as error:
+        extract_lossless_segment(
+            record,
+            paths,
+            0.1,
+            0.5,
+            ffmpeg_version=FFMPEG_VERSION,
+            run_command=fake_ffmpeg,
+            probe_command=good_probe,
+            decode_command=failing_decode,
+        )
+
+    assert error.value.code == "AUDIO_QUALITY_REJECTED"
+    command, kwargs = decode_calls[0]
+    assert command == [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-xerror",
+        "-i",
+        command[6],
+        "-map",
+        "0:a:0",
+        "-f",
+        "null",
+        "-",
+    ]
+    assert isinstance(command, list)
+    assert kwargs.get("shell") is None
+    assert not tuple((paths.segments / "lossless").glob("*.flac"))
+
+
+def test_lossless_rejects_metadata_sample_count_off_by_two(tmp_path: Path) -> None:
+    paths, record, _, _ = _fixture(tmp_path)
+
+    def fake_ffmpeg(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        Path(command[-1]).write_bytes(b"synthetic")
+        return CompletedProcess(command, 0, "", "")
+
+    def wrong_count_probe(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(
+            command,
+            0,
+            _flac_probe_payload(duration_ts=19202),
+            "",
+        )
+
+    def good_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(CorpusFailure) as error:
+        extract_lossless_segment(
+            record,
+            paths,
+            0.1,
+            0.5,
+            ffmpeg_version=FFMPEG_VERSION,
+            run_command=fake_ffmpeg,
+            probe_command=wrong_count_probe,
+            decode_command=good_decode,
+        )
+
+    assert error.value.code == "AUDIO_QUALITY_REJECTED"
+
+
+def test_lossless_cache_hit_requires_full_decode(tmp_path: Path) -> None:
+    paths, record, _, _ = _fixture(tmp_path)
+
+    def fake_ffmpeg(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        Path(command[-1]).write_bytes(b"synthetic")
+        return CompletedProcess(command, 0, "", "")
+
+    def good_probe(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, _flac_probe_payload(), "")
+
+    def good_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, "", "")
+
+    cached = extract_lossless_segment(
+        record,
+        paths,
+        0.1,
+        0.5,
+        ffmpeg_version=FFMPEG_VERSION,
+        run_command=fake_ffmpeg,
+        probe_command=good_probe,
+        decode_command=good_decode,
+    )
+
+    def failing_decode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        raise CalledProcessError(1, command, stderr="corrupt cached frame")
+
+    with pytest.raises(CorpusFailure) as error:
+        extract_lossless_segment(
+            record,
+            paths,
+            0.1,
+            0.5,
+            ffmpeg_version=FFMPEG_VERSION,
+            cached=cached,
+            run_command=fake_ffmpeg,
+            probe_command=good_probe,
+            decode_command=failing_decode,
+        )
+
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
 
 
 @pytest.mark.parametrize("failure", ("malformed", "failed", "wrong-layout"))
@@ -777,6 +961,7 @@ def test_missing_ffprobe_and_cache_probe_failure_have_stable_codes(tmp_path: Pat
         ffmpeg_version=FFMPEG_VERSION,
         run_command=fake_ffmpeg,
         probe_command=good_probe,
+        decode_command=_good_decode,
     )
     with pytest.raises(CorpusFailure) as cache_failure:
         extract_lossless_segment(
