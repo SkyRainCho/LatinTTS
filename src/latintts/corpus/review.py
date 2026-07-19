@@ -1693,13 +1693,55 @@ def _load_pairing_correction_submission(
     )
 
 
-def _review_snapshot_is_prefix(review_path: Path, expected_sha256: str) -> bool:
+def _review_snapshot_rows(review_path: Path, expected_sha256: str) -> tuple[dict[str, Any], ...]:
+    journal = review_path.read_bytes()
     digest = hashlib.sha256()
-    for line in review_path.read_bytes().splitlines(keepends=True):
-        digest.update(line)
+    prefix_length = 0
+    for encoded_line in journal.splitlines(keepends=True):
+        digest.update(encoded_line)
+        prefix_length += len(encoded_line)
         if digest.hexdigest() == expected_sha256:
-            return True
-    return False
+            prefix = journal[:prefix_length]
+            if not prefix.endswith(b"\n"):
+                raise ValueError("review snapshot must end at a complete JSONL line")
+            break
+    else:
+        raise ValueError("review snapshot is not an immutable journal prefix")
+    try:
+        text = prefix.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("review snapshot is not valid UTF-8 JSONL") from error
+    rows: list[dict[str, Any]] = []
+    for line_number, json_line in enumerate(text.splitlines(), 1):
+        if not json_line.strip():
+            raise ValueError(f"blank line {line_number} in review snapshot")
+        try:
+            raw = json.loads(
+                json_line,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_constant,
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"invalid JSON at line {line_number} in review snapshot: {error}"
+            ) from error
+        if type(raw) is not dict:
+            raise ValueError(f"line {line_number} in review snapshot must be a JSON object")
+        rows.append(raw)
+    return tuple(rows)
+
+
+def validate_pairing_review_snapshot(
+    review_path: Path,
+    snapshot_sha256: str,
+    original: PairingRecording,
+    corrected: PairingRecording,
+) -> tuple[ReviewEvent, ...]:
+    _load_existing_review_events(review_path)
+    prefix_events = tuple(
+        ReviewEvent.from_dict(row) for row in _review_snapshot_rows(review_path, snapshot_sha256)
+    )
+    return validate_pairing_correction_events(original, corrected, prefix_events)
 
 
 def _pairing_review_snapshot_sha256(
@@ -1709,7 +1751,7 @@ def _pairing_review_snapshot_sha256(
     submission: _PairingCorrectionSubmission,
     config: CorpusConfig,
     corrected_sha256: str,
-) -> str:
+) -> tuple[str, tuple[ReviewEvent, ...]]:
     automatic_sha256 = hashlib.sha256(submission.original_bytes).hexdigest()
     tool_versions = (
         "human-pairing-review-v1",
@@ -1730,13 +1772,24 @@ def _pairing_review_snapshot_sha256(
         and event.result == "success"
     )
     if not matching:
-        return _digest(review_path)
+        snapshot_sha256 = _digest(review_path)
+        correction_events = validate_pairing_review_snapshot(
+            review_path,
+            snapshot_sha256,
+            submission.original_pairing,
+            submission.corrected_pairing,
+        )
+        return snapshot_sha256, correction_events
     if len(matching) != 1:
         raise ValueError("pairing correction has duplicate processing transitions")
     snapshot_sha256 = matching[0].input_sha256s[3]
-    if not _review_snapshot_is_prefix(review_path, snapshot_sha256):
-        raise ValueError("pairing correction review snapshot is not an immutable history prefix")
-    timestamp = max(event.reviewed_at for event in submission.correction_events)
+    correction_events = validate_pairing_review_snapshot(
+        review_path,
+        snapshot_sha256,
+        submission.original_pairing,
+        submission.corrected_pairing,
+    )
+    timestamp = max(event.reviewed_at for event in correction_events)
     _, expected = advance_recording(
         recording,
         CorpusState.PAIRED,
@@ -1754,7 +1807,7 @@ def _pairing_review_snapshot_sha256(
     )
     if not processing_event_exists(rows, expected):
         raise ValueError("pairing correction processing transition is invalid")
-    return snapshot_sha256
+    return snapshot_sha256, correction_events
 
 
 def _import_pairing_corrections(
@@ -1814,10 +1867,9 @@ def _import_pairing_corrections(
         elif pairing_path.read_bytes() != submission.corrected_bytes:
             raise ValueError("corrected pairing bytes changed during correction recovery")
         index = indexes[recording.recording_id]
-        timestamp = max(event.reviewed_at for event in submission.correction_events)
         corrected_sha256 = _digest(pairing_path)
         events_path = run_directory.parent / "processing-events.jsonl"
-        review_snapshot_sha256 = _pairing_review_snapshot_sha256(
+        review_snapshot_sha256, bound_correction_events = _pairing_review_snapshot_sha256(
             review_path,
             events_path,
             recording,
@@ -1825,6 +1877,7 @@ def _import_pairing_corrections(
             config,
             corrected_sha256,
         )
+        timestamp = max(event.reviewed_at for event in bound_correction_events)
         advanced, processing_event = advance_recording(
             current[index],
             CorpusState.PAIRED,

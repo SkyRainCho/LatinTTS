@@ -44,16 +44,16 @@ from latintts.corpus.records import (
     AudioMetadata,
     ProcessingEvent,
     RecordingRecord,
-    ReviewEvent,
     SourceCandidateIntake,
     TranscriptIntakeRow,
     advance_recording,
     require_exact_fields,
 )
 from latintts.corpus.review import (
+    _require_canonical_descendant,
     export_review_bundle,
     import_review_bundle,
-    validate_pairing_correction_events,
+    validate_pairing_review_snapshot,
 )
 from latintts.corpus.selection import PilotSelection, select_pilot
 from latintts.corpus.store import (
@@ -1553,19 +1553,21 @@ def _human_pairing_transition_exists(
 ) -> bool:
     automatic_path = run_directory / "pairing-automatic.json"
     review_path = paths.manifests / "review.jsonl"
-    if not automatic_path.is_file() or not review_path.is_file():
+    if not review_path.is_file():
         return False
-    automatic_sha256 = hashlib.sha256(automatic_path.read_bytes()).hexdigest()
-    automatic_rows = read_jsonl(automatic_path)
-    if len(automatic_rows) != 1:
-        return False
-    automatic_pairing = pairing_from_dict(automatic_rows[0])
-    review_events = tuple(ReviewEvent.from_dict(row) for row in read_jsonl(review_path))
     try:
-        correction_events = validate_pairing_correction_events(
-            automatic_pairing, pairing, review_events
+        automatic_path = _require_canonical_descendant(
+            run_directory,
+            automatic_path,
+            kind="automatic pairing artifact",
+            require_file=True,
         )
-    except (TypeError, ValueError):
+        automatic_sha256 = hashlib.sha256(automatic_path.read_bytes()).hexdigest()
+        automatic_rows = read_jsonl(automatic_path)
+        if len(automatic_rows) != 1:
+            return False
+        automatic_pairing = pairing_from_dict(automatic_rows[0])
+    except (OSError, TypeError, ValueError):
         return False
     decoded = tuple(ProcessingEvent.from_dict(row) for row in events)
     matching = tuple(
@@ -1585,14 +1587,11 @@ def _human_pairing_transition_exists(
     if len(matching) != 1:
         return False
     snapshot_sha256 = matching[0].input_sha256s[3]
-    digest = hashlib.sha256()
-    snapshot_found = False
-    for line in review_path.read_bytes().splitlines(keepends=True):
-        digest.update(line)
-        if digest.hexdigest() == snapshot_sha256:
-            snapshot_found = True
-            break
-    if not snapshot_found:
+    try:
+        correction_events = validate_pairing_review_snapshot(
+            review_path, snapshot_sha256, automatic_pairing, pairing
+        )
+    except (OSError, TypeError, ValueError):
         return False
     timestamp = max(event.reviewed_at for event in correction_events)
     prior = replace(record, state=CorpusState.SEGMENTED)

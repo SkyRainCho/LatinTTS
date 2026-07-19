@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 
 import pytest
 
@@ -132,6 +133,46 @@ def _corrected_pairing_project(
     assert import_review_bundle(paths, config)
     run_directory = paths.alignments / "runs" / config.digest / "rec-1"
     return paths, config, backend, run_directory
+
+
+def _bind_pairing_transition_to_prefix(processing_path: Path, prefix: bytes) -> None:
+    rows = list(read_jsonl(processing_path))
+    paired = next(row for row in rows if row["target_state"] == "PAIRED")
+    paired["input_sha256s"][3] = hashlib.sha256(prefix).hexdigest()
+    identity = {
+        "recording_id": paired["recording_id"],
+        "previous_state": paired["previous_state"],
+        "target_state": paired["target_state"],
+        "inputs": paired["input_sha256s"],
+        "config": paired["config_sha256"],
+        "tools": paired["tool_versions"],
+        "result": paired["result"],
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    paired["event_id"] = "state-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    write_jsonl_atomic(processing_path, rows)
+
+
+def _place_correction_after_bound_prefix(review_path: Path, processing_path: Path) -> None:
+    correction = read_jsonl(review_path)[0]
+    unrelated = review_module._new_review_event(
+        "review:unrelated-prefix",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "earlier independent review",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T11:00:00+08:00",
+        },
+    )
+    write_jsonl_atomic(review_path, (unrelated.to_dict(), correction))
+    prefix = review_path.read_bytes().splitlines(keepends=True)[0]
+    _bind_pairing_transition_to_prefix(processing_path, prefix)
+
+
+def _file_snapshot(paths: tuple[Path, ...]) -> tuple[tuple[bool, bytes | None], ...]:
+    return tuple((path.exists(), path.read_bytes() if path.exists() else None) for path in paths)
 
 
 def _two_recording_aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
@@ -623,6 +664,137 @@ def test_align_accepts_valid_review_events_appended_after_bound_pairing_snapshot
     write_jsonl_atomic(review_path, (*rows, suffix.to_dict()))
 
     assert align_corpus(paths, config, backend)
+
+
+def test_align_rejects_non_deterministic_review_event_after_bound_correction_prefix(
+    tmp_path: Path,
+) -> None:
+    paths, config, backend, run_directory = _corrected_pairing_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"
+    rows = list(read_jsonl(review_path))
+    suffix = review_module._new_review_event(
+        "review:later-suffix",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "later take review",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T13:00:00+08:00",
+        },
+    ).to_dict()
+    suffix["review_event_id"] = "review-" + "0" * 64
+    write_jsonl_atomic(review_path, (*rows, suffix))
+    observed_paths = (
+        paths.manifests / "recordings.jsonl",
+        review_path,
+        run_directory.parent / "processing-events.jsonl",
+        run_directory / "pairing-automatic.json",
+        run_directory / "pairing.json",
+        run_directory / "alignment.json",
+    )
+    before = _file_snapshot(observed_paths)
+
+    with pytest.raises(CorpusFailure, match="selected alignment cache"):
+        align_corpus(paths, config, backend)
+
+    assert _file_snapshot(observed_paths) == before
+
+
+def test_align_rejects_processing_event_snapshot_before_pairing_correction(
+    tmp_path: Path,
+) -> None:
+    paths, config, backend, run_directory = _corrected_pairing_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"
+    processing_path = run_directory.parent / "processing-events.jsonl"
+    _place_correction_after_bound_prefix(review_path, processing_path)
+    observed_paths = (
+        paths.manifests / "recordings.jsonl",
+        review_path,
+        processing_path,
+        run_directory / "pairing-automatic.json",
+        run_directory / "pairing.json",
+        run_directory / "alignment.json",
+    )
+    before = _file_snapshot(observed_paths)
+
+    with pytest.raises(CorpusFailure, match="selected alignment cache"):
+        align_corpus(paths, config, backend)
+
+    assert _file_snapshot(observed_paths) == before
+
+
+def test_pairing_correction_recovery_rejects_snapshot_before_correction_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    real_replace = store.os.replace
+
+    def fail_recordings_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == recordings_path:
+            raise OSError("recordings replace failed")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store.os, "replace", fail_recordings_replace)
+    with pytest.raises(store.RecordingTransitionPersistenceError, match="recovery required"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(store.os, "replace", real_replace)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    review_path = paths.manifests / "review.jsonl"
+    processing_path = run_directory.parent / "processing-events.jsonl"
+    _place_correction_after_bound_prefix(review_path, processing_path)
+    observed_paths = (
+        recordings_path,
+        review_path,
+        processing_path,
+        run_directory / "pairing-automatic.json",
+        run_directory / "pairing.json",
+    )
+    before = _file_snapshot(observed_paths)
+
+    with pytest.raises(ValueError, match=r"snapshot|correction"):
+        import_review_bundle(paths, config)
+
+    assert _file_snapshot(observed_paths) == before
+
+
+@pytest.mark.parametrize("operation", ("pair", "align"))
+def test_repeated_pair_and_align_reject_reparse_marked_automatic_pairing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    paths, config, backend, run_directory = _corrected_pairing_project(tmp_path)
+    automatic_path = (run_directory / "pairing-automatic.json").absolute()
+    real_lstat = review_module.os.lstat
+
+    def reparse_lstat(path: object) -> object:
+        metadata = real_lstat(path)  # type: ignore[arg-type]
+        if Path(path).absolute() == automatic_path:  # type: ignore[arg-type]
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_file_attributes=(
+                    getattr(metadata, "st_file_attributes", 0)
+                    | review_module.stat.FILE_ATTRIBUTE_REPARSE_POINT
+                ),
+            )
+        return metadata
+
+    monkeypatch.setattr(review_module.os, "lstat", reparse_lstat)
+
+    with pytest.raises(CorpusFailure, match=r"CACHE_ARTIFACT_INVALID|cache is invalid"):
+        if operation == "pair":
+            pair_corpus(
+                paths,
+                config,
+                backend,
+                ffmpeg_version="ffmpeg-test-1",
+                run_command=_audio_command,
+            )
+        else:
+            align_corpus(paths, config, backend)
 
 
 @pytest.mark.parametrize(
