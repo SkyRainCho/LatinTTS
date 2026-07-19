@@ -85,19 +85,19 @@ git commit -m "fix: preserve review journal byte prefixes"
 - Consumes: fresh focused/full test, coverage, and quality-gate outputs.
 - Produces: the actual Task 11 final statistics and sixth remediation history.
 
-- [ ] **Step 1: Run focused review tests and full coverage suite**
+- [x] **Step 1: Run focused review tests and full coverage suite**
 
 Run review-focused pytest, then full pytest with `--cov-fail-under=95`; record exact pass/skip and coverage totals.
 
-- [ ] **Step 2: Run quality gates**
+- [x] **Step 2: Run quality gates**
 
 Run Ruff check/format, strict mypy, gold audit, and `git diff --check`.
 
-- [ ] **Step 3: Update and commit the report**
+- [x] **Step 3: Update and commit the report**
 
 Record the RED failure, preserved-prefix behavior, actual statistics, skip reasons, coverage, and abbreviated remediation commit.
 
-- [ ] **Step 4: Verify the final committed branch state**
+- [x] **Step 4: Verify the final committed branch state**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
