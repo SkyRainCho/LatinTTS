@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
@@ -23,6 +23,7 @@ from latintts.corpus.inventory import (
     inventory_from_manifests,
     write_intake_skeleton,
 )
+from latintts.corpus.mms_alignment import create_alignment_backend
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.pauses import PauseAnalysis, classify_pauses
 from latintts.corpus.records import (
@@ -1259,6 +1260,117 @@ def _ffmpeg_version() -> str:
     return first_line.strip()
 
 
+def _capture_environment_command(command: list[str], run_command: RunCommand) -> str:
+    try:
+        completed = run_command(
+            command,
+            capture_output=True,
+            check=True,
+            encoding="utf-8",
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        return f"unavailable: {error}"
+    return completed.stdout.strip()
+
+
+def alignment_smoke_test(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    cache_dir: Path | None = None,
+    local_files_only: bool = True,
+    module_loader: Callable[[str], Any] | None = None,
+    tool_commit_resolver: Callable[[], str] | None = None,
+    run_command: RunCommand = subprocess.run,
+    now: Callable[[], datetime] | None = None,
+) -> int:
+    """Load the pinned backend and persist a reproducible local runtime audit."""
+    timestamp = (now or (lambda: datetime.now(timezone.utc)))().isoformat()
+    pip_freeze = _capture_environment_command([sys.executable, "-m", "pip", "freeze"], run_command)
+    nvidia_smi = _capture_environment_command(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader",
+        ],
+        run_command,
+    )
+    code_commit = _capture_environment_command(["git", "rev-parse", "HEAD"], run_command)
+    alignment = config.raw.get("alignment")
+    model_revision = alignment.get("model_revision") if type(alignment) is dict else None
+    model_license = alignment.get("license") if type(alignment) is dict else None
+    success = False
+    failure_code: str | None = None
+    message = ""
+    runtime: Any | None = None
+    try:
+        backend = create_alignment_backend(
+            config,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+            module_loader=module_loader,
+            tool_commit_resolver=tool_commit_resolver,
+        )
+        runtime = backend.runtime_info()
+        success = True
+    except CorpusFailure as error:
+        failure_code = error.code
+        message = str(error)
+    except (OSError, TypeError, ValueError) as error:
+        failure_code = "MANIFEST_SCHEMA_MISMATCH"
+        message = str(error)
+    smoke = {
+        "schema_version": "1",
+        "success": success,
+        "failure_code": failure_code,
+        "message": message,
+        "timestamp": timestamp,
+        "python_version": sys.version,
+        "pip_freeze": pip_freeze,
+        "nvidia_smi": nvidia_smi,
+        "code_commit": code_commit,
+        "backend_version": runtime.aligner_version if runtime is not None else None,
+        "aligner_commit": runtime.aligner_commit if runtime is not None else None,
+        "torch_version": runtime.torch_version if runtime is not None else None,
+        "transformers_version": runtime.transformers_version if runtime is not None else None,
+        "cuda_available": runtime.cuda_available if runtime is not None else None,
+        "device_name": runtime.device_name if runtime is not None else None,
+        "peak_memory_bytes": runtime.peak_memory_bytes if runtime is not None else None,
+        "model_revision": model_revision,
+        "resolved_model_revision": (
+            runtime.resolved_model_revision if runtime is not None else None
+        ),
+        "model_weights_sha256": runtime.model_weights_sha256 if runtime is not None else None,
+        "model_license": model_license,
+    }
+    runtime_directory = paths.alignments / "runtime"
+    runtime_directory.mkdir(parents=True, exist_ok=True)
+    write_jsonl_atomic(runtime_directory / "smoke.json", (smoke,))
+    environment = "\n".join(
+        (
+            f"Python version: {sys.version}",
+            f"Timestamp: {timestamp}",
+            f"Code commit: {code_commit}",
+            f"Model revision: {model_revision}",
+            f"Model license: {model_license}",
+            f"Torch version: {smoke['torch_version']}",
+            f"Transformers version: {smoke['transformers_version']}",
+            f"CUDA available: {smoke['cuda_available']}",
+            f"ctc-forced-aligner commit: {smoke['aligner_commit']}",
+            "",
+            "pip freeze:",
+            pip_freeze,
+            "",
+            "nvidia-smi:",
+            nvidia_smi,
+            "",
+        )
+    )
+    (runtime_directory / "environment.txt").write_text(environment, encoding="utf-8")
+    return 0 if success else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare the local LatinTTS corpus")
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -1274,6 +1386,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepare_text_parser.add_argument("--replace", action="store_true")
     segment_parser = subparsers.add_parser("segment")
     segment_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
+    align_parser = subparsers.add_parser("align")
+    align_parser.add_argument("--smoke-test", action="store_true", required=True)
+    align_parser.add_argument("--allow-download", action="store_true")
+    align_parser.add_argument(
         "--config",
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
@@ -1331,6 +1451,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
         return 0
+    if args.command == "align":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            paths.ensure_layout()
+            return alignment_smoke_test(
+                paths,
+                config,
+                cache_dir=paths.local_data / "cache" / "huggingface",
+                local_files_only=not args.allow_download,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
     if args.command == "segment":
         paths = CorpusPaths.from_project_root(args.project_root)
         config_path = args.config
