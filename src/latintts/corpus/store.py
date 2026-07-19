@@ -85,7 +85,10 @@ def persist_recording_transition(
     event: ProcessingEvent,
 ) -> None:
     """Persist one transition in audit-first order without claiming cross-file atomicity."""
+    if recordings_path.resolve() == events_path.resolve():
+        raise ValueError("recordings_path and events_path must be distinct resolved paths")
     target_records = tuple(recordings)
+    target_rows = tuple(record.to_dict() for record in target_records)
     require_transition(event.previous_state, event.target_state)
     target_matches = [
         record for record in target_records if record.recording_id == event.recording_id
@@ -94,16 +97,38 @@ def persist_recording_transition(
         raise ValueError("target manifest must contain exactly one event recording_id")
     if target_matches[0].state is not event.target_state:
         raise ValueError("target manifest state must equal event target_state")
+    existing_rows = read_jsonl(recordings_path)
     existing_matches = [
-        row for row in read_jsonl(recordings_path) if row.get("recording_id") == event.recording_id
+        row for row in existing_rows if row.get("recording_id") == event.recording_id
     ]
     if len(existing_matches) != 1:
         raise ValueError("existing manifest must contain exactly one event recording_id")
     if existing_matches[0].get("state") != event.previous_state.value:
         raise ValueError("existing manifest state must equal event previous_state")
+    target_by_id = {row["recording_id"]: row for row in target_rows}
+    existing_by_id = {row.get("recording_id"): row for row in existing_rows}
+    if (
+        len(target_by_id) != len(target_rows)
+        or len(existing_by_id) != len(existing_rows)
+        or set(target_by_id) != set(existing_by_id)
+    ):
+        raise ValueError("target manifest recording_id set and count must remain unchanged")
+    for recording_id, existing_row in existing_by_id.items():
+        target_row = target_by_id[recording_id]
+        if recording_id == event.recording_id:
+            existing_without_state = {
+                key: value for key, value in existing_row.items() if key != "state"
+            }
+            target_without_state = {
+                key: value for key, value in target_row.items() if key != "state"
+            }
+            if target_without_state != existing_without_state:
+                raise ValueError("event recording may change only state")
+        elif target_row != existing_row:
+            raise ValueError("non-event recording must remain unchanged")
     append_jsonl_event(events_path, event.to_dict())
     try:
-        write_jsonl_atomic(recordings_path, (record.to_dict() for record in target_records))
+        write_jsonl_atomic(recordings_path, target_rows)
     except Exception as error:
         raise RecordingTransitionPersistenceError(
             f"event {event.event_id} persisted; recordings update failed; recovery required"

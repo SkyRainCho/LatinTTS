@@ -41,6 +41,16 @@ def _transition() -> tuple[RecordingRecord, RecordingRecord, ProcessingEvent]:
     return original, updated, event
 
 
+def _other_recording() -> RecordingRecord:
+    original, _, _ = _transition()
+    return replace(
+        original,
+        recording_id="rec-other",
+        relative_path="raw/spoken/other.wav",
+        sha256="c" * 64,
+    )
+
+
 def test_atomic_jsonl_round_trip_preserves_unicode(tmp_path: Path) -> None:
     path = tmp_path / "rows.jsonl"
     write_jsonl_atomic(path, ({"text": "cælum", "ordinal": 1},))
@@ -181,3 +191,99 @@ def test_write_jsonl_rejects_nonfinite_numbers_without_replacing_existing(
     with pytest.raises(ValueError):
         write_jsonl_atomic(path, ({"value": value},))
     assert read_jsonl(path) == ({"value": 1.0},)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "match"),
+    [
+        ("other_state", "non-event recording.*unchanged"),
+        ("delete_other", "recording_id.*count"),
+        ("add_other", "recording_id.*count"),
+        ("other_field", "non-event recording.*unchanged"),
+        ("target_field", "event recording.*only state"),
+    ],
+)
+def test_persist_transition_rejects_manifest_changes_outside_event_state(
+    tmp_path: Path, scenario: str, match: str
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    other = _other_recording()
+    existing = (original, other)
+    targets = (updated, other)
+    if scenario == "other_state":
+        targets = (updated, replace(other, state=CorpusState.INVENTORIED))
+    elif scenario == "delete_other":
+        targets = (updated,)
+    elif scenario == "add_other":
+        existing = (original,)
+    elif scenario == "other_field":
+        targets = (updated, replace(other, notes="changed"))
+    elif scenario == "target_field":
+        targets = (replace(updated, notes="changed"), other)
+    write_jsonl_atomic(recordings_path, (record.to_dict() for record in existing))
+
+    with pytest.raises(ValueError, match=match):
+        store.persist_recording_transition(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=targets,
+            event=event,
+        )
+
+    assert not events_path.exists()
+    assert read_jsonl(recordings_path) == tuple(record.to_dict() for record in existing)
+
+
+@pytest.mark.parametrize("alias_kind", ["same", "relative"])
+def test_persist_transition_rejects_path_alias_before_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_kind: str
+) -> None:
+    recordings_path = tmp_path / "same.jsonl"
+    events_path = recordings_path
+    if alias_kind == "relative":
+        events_path = tmp_path / "missing-directory" / ".." / "same.jsonl"
+    _, updated, event = _transition()
+
+    def reject_read(path: Path) -> tuple[dict[str, object], ...]:
+        raise AssertionError(f"I/O attempted through {path}")
+
+    monkeypatch.setattr(store, "read_jsonl", reject_read)
+    with pytest.raises(ValueError, match="distinct resolved paths"):
+        store.persist_recording_transition(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(updated,),
+            event=event,
+        )
+
+    assert not recordings_path.exists()
+
+
+def test_persist_transition_rejects_symlink_alias_before_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "events-link.jsonl"
+    recordings_path.write_bytes(b"unchanged")
+    try:
+        events_path.symlink_to(recordings_path)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    _, updated, event = _transition()
+
+    def reject_read(path: Path) -> tuple[dict[str, object], ...]:
+        raise AssertionError(f"I/O attempted through {path}")
+
+    monkeypatch.setattr(store, "read_jsonl", reject_read)
+    with pytest.raises(ValueError, match="distinct resolved paths"):
+        store.persist_recording_transition(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(updated,),
+            event=event,
+        )
+
+    assert recordings_path.read_bytes() == b"unchanged"
+    assert events_path.is_symlink()
