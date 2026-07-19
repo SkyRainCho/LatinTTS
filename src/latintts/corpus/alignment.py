@@ -419,6 +419,9 @@ def validate_alignment(
 
 
 def _validated_result(result: AlignmentResult) -> None:
+    stored_integrity = _require_digest(result.integrity_sha256, "integrity_sha256")
+    if stored_integrity != _result_integrity(result):
+        raise ValueError("alignment result integrity digest does not match current content")
     AlignmentResult(
         backend=result.backend,
         backend_version=result.backend_version,

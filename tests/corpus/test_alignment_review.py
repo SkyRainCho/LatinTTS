@@ -208,3 +208,33 @@ def test_result_from_dict_rejects_missing_integrity_digest(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="exact fields"):
         result_from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("model_license", "forged"),
+        (
+            "words",
+            (
+                WordSpan("ueni", 0.0, 0.4, 0.7, 0),
+                WordSpan("ueni", 0.4, 0.8, 0.8, 1),
+                WordSpan("iesus", 0.8, 1.2, 0.8, 2),
+            ),
+        ),
+        ("raw_output", {"segments": [{"score": 0.1}]}),
+    ),
+)
+@pytest.mark.parametrize("digest", ("", "0" * 64))
+def test_existing_result_consumers_reject_tampering_before_resigning(
+    tmp_path: Path, field: str, value: object, digest: str
+) -> None:
+    request = _request(tmp_path)
+    result = _result(request)
+    object.__setattr__(result, field, value)
+    object.__setattr__(result, "integrity_sha256", digest)
+
+    with pytest.raises(ValueError, match="integrity"):
+        result_to_dict(result)
+    with pytest.raises(ValueError, match="integrity"):
+        validate_alignment(result, request, audio_duration_seconds=1.2)
