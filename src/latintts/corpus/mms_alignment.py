@@ -46,6 +46,20 @@ _ALIGNMENT_CONFIG_FIELDS = {
 
 
 @dataclass(frozen=True, slots=True)
+class ModelWeightFile:
+    filename: str
+    sha256: str
+    size_bytes: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "filename": self.filename,
+            "sha256": self.sha256,
+            "size_bytes": self.size_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BackendRuntimeInfo:
     torch_version: str
     transformers_version: str
@@ -56,6 +70,13 @@ class BackendRuntimeInfo:
     resolved_model_revision: str = ""
     model_weights_sha256: str = ""
     cuda_available: bool = False
+    requested_device: str = ""
+    requested_dtype: str = ""
+    resolved_device: str = ""
+    resolved_dtype: str = ""
+    uroman_version: str = ""
+    model_weight_manifest: tuple[ModelWeightFile, ...] = ()
+    measurement_scope: str = ""
 
 
 def _installed_aligner_commit() -> str:
@@ -81,22 +102,75 @@ def _installed_aligner_commit() -> str:
     return commit
 
 
-def _weights_digest(snapshot: Path) -> str:
-    weights = tuple(
-        path
-        for path in sorted(snapshot.rglob("*"))
-        if path.is_file() and path.suffix in {".bin", ".pt", ".safetensors"}
-    )
-    if not weights:
-        raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS snapshot contains no model weights")
+def _file_digest(path: Path) -> str:
     digest = hashlib.sha256()
-    for path in weights:
-        digest.update(path.relative_to(snapshot).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
     return digest.hexdigest()
+
+
+def resolve_model_weights(snapshot: Path) -> tuple[str, tuple[ModelWeightFile, ...]]:
+    safetensors = tuple(sorted(snapshot.rglob("*.safetensors")))
+    indexes = tuple(sorted(snapshot.rglob("*.safetensors.index.json")))
+    if indexes:
+        if len(indexes) != 1:
+            raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS snapshot has conflicting shard indexes")
+        index = indexes[0]
+        try:
+            raw_index = json.loads(index.read_text(encoding="utf-8"))
+            weight_map = raw_index["weight_map"]
+        except (json.JSONDecodeError, KeyError, OSError, TypeError) as error:
+            raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS shard index is invalid") from error
+        if (
+            type(weight_map) is not dict
+            or not weight_map
+            or any(
+                type(key) is not str or type(value) is not str for key, value in weight_map.items()
+            )
+        ):
+            raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS shard index is invalid")
+        referenced: set[Path] = set()
+        for filename in weight_map.values():
+            candidate = (index.parent / filename).resolve()
+            try:
+                candidate.relative_to(snapshot.resolve())
+            except ValueError as error:
+                raise CorpusFailure(
+                    "ALIGNER_UNAVAILABLE", "MMS shard path escapes snapshot"
+                ) from error
+            if candidate.suffix != ".safetensors":
+                raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS shard index mixes weight formats")
+            referenced.add(candidate)
+        actual = {path.resolve() for path in safetensors}
+        if actual != referenced:
+            raise CorpusFailure(
+                "ALIGNER_UNAVAILABLE", "MMS shard index has missing or extra weight files"
+            )
+        selected = (index, *sorted(referenced))
+    elif len(safetensors) == 1:
+        selected = safetensors
+    elif len(safetensors) > 1:
+        raise CorpusFailure("ALIGNER_UNAVAILABLE", "multiple unindexed MMS safetensors files")
+    else:
+        bins = tuple(sorted(snapshot.rglob("*.bin")))
+        if len(bins) != 1:
+            raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS snapshot has no unique model weights")
+        selected = bins
+    manifest = tuple(
+        ModelWeightFile(
+            filename=path.relative_to(snapshot).as_posix(),
+            sha256=_file_digest(path),
+            size_bytes=path.stat().st_size,
+        )
+        for path in selected
+    )
+    encoded = json.dumps(
+        [item.to_dict() for item in manifest],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), manifest
 
 
 class MmsCtcAligner:
@@ -115,6 +189,7 @@ class MmsCtcAligner:
         local_files_only: bool = True,
         module_loader: Callable[[str], Any] | None = None,
         tool_commit_resolver: Callable[[], str] | None = None,
+        dependency_version_resolver: Callable[[str], str] | None = None,
         allow_cpu_fallback: bool = True,
     ) -> None:
         self.model_id = model_id
@@ -129,8 +204,14 @@ class MmsCtcAligner:
         self.local_files_only = local_files_only
         self.module_loader = module_loader or importlib.import_module
         self.tool_commit_resolver = tool_commit_resolver or _installed_aligner_commit
+        self.dependency_version_resolver = dependency_version_resolver or importlib.metadata.version
         self.allow_cpu_fallback = allow_cpu_fallback
-        self._runtime_info: BackendRuntimeInfo | None = None
+        injected_runtime = (
+            getattr(dependencies, "runtime_info", None) if dependencies is not None else None
+        )
+        self._runtime_info = (
+            injected_runtime if isinstance(injected_runtime, BackendRuntimeInfo) else None
+        )
 
     def _load(self) -> Any:
         if self.dependencies is not None:
@@ -158,7 +239,7 @@ class MmsCtcAligner:
                 raise CorpusFailure(
                     "ALIGNER_UNAVAILABLE", "MMS resolved model revision does not match the pin"
                 )
-            model_weights_sha256 = _weights_digest(model_path)
+            model_weights_sha256, model_weight_manifest = resolve_model_weights(model_path)
             runtime_device = self.device
             runtime_dtype = self.dtype_name
             cuda_available = bool(torch.cuda.is_available())
@@ -167,7 +248,12 @@ class MmsCtcAligner:
                     raise CorpusFailure("ALIGNER_UNAVAILABLE", "CUDA is unavailable")
                 runtime_device = "cpu"
                 runtime_dtype = "float32"
+            if runtime_device == "cpu" and runtime_dtype == "float16":
+                runtime_dtype = "float32"
             dtype = getattr(torch, runtime_dtype)
+            if runtime_device.startswith("cuda"):
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
             model = (
                 transformers.AutoModelForCTC.from_pretrained(
                     str(model_path),
@@ -190,11 +276,14 @@ class MmsCtcAligner:
             )
             torch_version = str(torch.__version__)
             transformers_version = str(transformers.__version__)
-            if not torch_version or not transformers_version:
+            uroman_version = str(self.dependency_version_resolver("uroman"))
+            if not torch_version or not transformers_version or not uroman_version:
                 raise CorpusFailure("ALIGNER_UNAVAILABLE", "dependency versions are unavailable")
             device_name = (
                 str(torch.cuda.get_device_name()) if runtime_device.startswith("cuda") else "CPU"
             )
+            if runtime_device.startswith("cuda"):
+                torch.cuda.synchronize()
             peak_memory = (
                 int(torch.cuda.max_memory_allocated())
                 if runtime_device.startswith("cuda")
@@ -202,7 +291,7 @@ class MmsCtcAligner:
             )
         except CorpusFailure:
             raise
-        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
+        except (ImportError, AssertionError, OSError, RuntimeError, ValueError) as error:
             raise CorpusFailure("ALIGNER_UNAVAILABLE", str(error)) from error
         self.dependencies = SimpleNamespace(
             torch=torch,
@@ -219,7 +308,14 @@ class MmsCtcAligner:
             aligner_commit=aligner_commit,
             resolved_model_revision=model_path.name,
             model_weights_sha256=model_weights_sha256,
+            model_weight_manifest=model_weight_manifest,
             cuda_available=cuda_available,
+            requested_device=self.device,
+            requested_dtype=self.dtype_name,
+            resolved_device=runtime_device,
+            resolved_dtype=runtime_dtype,
+            uroman_version=uroman_version,
+            measurement_scope="model-load",
         )
         return self.dependencies
 
@@ -230,6 +326,54 @@ class MmsCtcAligner:
                 "ALIGNER_UNAVAILABLE", "runtime info is unavailable for injected dependencies"
             )
         return self._runtime_info
+
+    def _effective_parameters(self, runtime: BackendRuntimeInfo) -> dict[str, object]:
+        return {
+            "language": "lat",
+            "romanize": True,
+            "split_size": "word",
+            "star_frequency": "edges",
+            "window_seconds": self.window_seconds,
+            "context_seconds": self.context_seconds,
+            "batch_size": self.batch_size,
+            "requested_device": runtime.requested_device,
+            "requested_dtype": runtime.requested_dtype,
+            "resolved_device": runtime.resolved_device,
+            "resolved_dtype": runtime.resolved_dtype,
+            "resolved_model_revision": runtime.resolved_model_revision,
+            "model_weights_sha256": runtime.model_weights_sha256,
+            "model_weight_manifest": [item.to_dict() for item in runtime.model_weight_manifest],
+            "aligner_version": runtime.aligner_version,
+            "aligner_commit": runtime.aligner_commit,
+            "torch_version": runtime.torch_version,
+            "transformers_version": runtime.transformers_version,
+            "uroman_version": runtime.uroman_version,
+            "model_license": MODEL_LICENSE,
+        }
+
+    def build_request(
+        self,
+        *,
+        audio_path: Path,
+        audio_sha256: str,
+        spoken_text: str,
+        segmentation_artifact_sha256: str,
+        config_sha256: str,
+    ) -> AlignmentRequest:
+        runtime = self.runtime_info()
+        return AlignmentRequest(
+            audio_path=audio_path,
+            audio_sha256=audio_sha256,
+            spoken_text=spoken_text,
+            segmentation_artifact_sha256=segmentation_artifact_sha256,
+            backend="mms-ctc",
+            backend_version=BACKEND_VERSION,
+            model_id=self.model_id,
+            model_revision=self.model_revision,
+            model_license=MODEL_LICENSE,
+            config_sha256=config_sha256,
+            effective_parameters=self._effective_parameters(runtime),
+        )
 
     def align(self, request: AlignmentRequest) -> AlignmentResult:
         expected_provenance = {
@@ -242,6 +386,15 @@ class MmsCtcAligner:
         for field, expected in expected_provenance.items():
             if getattr(request, field) != expected:
                 raise ValueError(f"alignment request {field} does not match the MMS backend")
+        expected_request = self.build_request(
+            audio_path=request.audio_path,
+            audio_sha256=request.audio_sha256,
+            spoken_text=request.spoken_text,
+            segmentation_artifact_sha256=request.segmentation_artifact_sha256,
+            config_sha256=request.config_sha256,
+        )
+        if request.effective_parameters != expected_request.effective_parameters:
+            raise ValueError("alignment request runtime identity does not match loaded runtime")
         dependencies = self._load()
         try:
             waveform = dependencies.aligner.load_audio(
@@ -255,7 +408,7 @@ class MmsCtcAligner:
                 self.batch_size,
             )
             tokens_starred, text_starred = dependencies.aligner.preprocess_text(
-                request.spoken_text, True, "lat", "word", "edges"
+                request.alignment_text, True, "lat", "word", "edges"
             )
             segments, scores, blank = dependencies.aligner.get_alignments(
                 emissions, tokens_starred, dependencies.tokenizer
@@ -264,7 +417,17 @@ class MmsCtcAligner:
             raw_results = dependencies.aligner.postprocess_results(
                 text_starred, spans, stride, scores
             )
-        except RuntimeError as error:
+            return normalize_mms_output(
+                spoken_text=request.spoken_text,
+                text_starred=tuple(text_starred),
+                tokens_starred=tuple(tokens_starred),
+                raw_results=tuple(raw_results),
+                backend_version=BACKEND_VERSION,
+                model_id=self.model_id,
+                model_revision=self.model_revision,
+                runtime_identity=self._effective_parameters(self.runtime_info()),
+            )
+        except (ImportError, AssertionError, OSError, RuntimeError, ValueError) as error:
             message = str(error)
             if "out of memory" in message.casefold():
                 raise CorpusFailure(
@@ -273,15 +436,6 @@ class MmsCtcAligner:
             raise CorpusFailure(
                 "ALIGNER_UNAVAILABLE", f"MMS alignment failed: {message}"
             ) from error
-        return normalize_mms_output(
-            spoken_text=request.spoken_text,
-            text_starred=tuple(text_starred),
-            tokens_starred=tuple(tokens_starred),
-            raw_results=tuple(raw_results),
-            backend_version=BACKEND_VERSION,
-            model_id=self.model_id,
-            model_revision=self.model_revision,
-        )
 
 
 def create_alignment_backend(
@@ -292,6 +446,7 @@ def create_alignment_backend(
     local_files_only: bool = True,
     module_loader: Callable[[str], Any] | None = None,
     tool_commit_resolver: Callable[[], str] | None = None,
+    dependency_version_resolver: Callable[[str], str] | None = None,
     allow_cpu_fallback: bool = True,
 ) -> MmsCtcAligner:
     """Create the sole licensed, pinned alignment backend from corpus config."""
@@ -331,6 +486,7 @@ def create_alignment_backend(
         local_files_only=local_files_only,
         module_loader=module_loader,
         tool_commit_resolver=tool_commit_resolver,
+        dependency_version_resolver=dependency_version_resolver,
         allow_cpu_fallback=allow_cpu_fallback,
     )
 
@@ -355,10 +511,15 @@ def normalize_mms_output(
     backend_version: str,
     model_id: str,
     model_revision: str,
+    runtime_identity: dict[str, object] | None = None,
 ) -> AlignmentResult:
     """Convert MMS output at the sole third-party/strict-contract boundary."""
-    display_words = tuple(item for item in text_starred if item)
-    alignment_forms = tuple(item.replace(" ", "") for item in tokens_starred if item)
+    display_words = tuple(item for item in text_starred if item and item != "<star>")
+    alignment_forms = tuple(
+        transform_latin_for_alignment(item.replace(" ", ""))
+        for item in tokens_starred
+        if item and item != "<star>"
+    )
     spoken_words = tokenize_words(spoken_text)
     if not raw_results:
         raise CorpusFailure("ALIGNMENT_LOW_CONFIDENCE", "MMS returned no word spans")
@@ -384,7 +545,7 @@ def normalize_mms_output(
         )
         for index, (display, item) in enumerate(zip(display_words, raw_results, strict=True))
     )
-    raw_output = {
+    raw_output: dict[str, object] = {
         "spoken_text": spoken_text,
         "segments": [
             {
@@ -398,6 +559,8 @@ def normalize_mms_output(
             for item, word in zip(raw_results, words, strict=True)
         ],
     }
+    if runtime_identity is not None:
+        raw_output["runtime_identity"] = runtime_identity
     return AlignmentResult(
         backend="mms-ctc",
         backend_version=backend_version,

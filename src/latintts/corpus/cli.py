@@ -4,9 +4,11 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -1260,18 +1262,56 @@ def _ffmpeg_version() -> str:
     return first_line.strip()
 
 
-def _capture_environment_command(command: list[str], run_command: RunCommand) -> str:
+def _capture_environment_command(
+    command: list[str], run_command: RunCommand, *, cwd: Path | None = None
+) -> str:
     try:
-        completed = run_command(
-            command,
-            capture_output=True,
-            check=True,
-            encoding="utf-8",
-            text=True,
-        )
+        options: dict[str, object] = {
+            "capture_output": True,
+            "check": True,
+            "encoding": "utf-8",
+            "text": True,
+        }
+        if cwd is not None:
+            options["cwd"] = cwd
+        completed = run_command(command, **options)
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
-        return f"unavailable: {error}"
+        return f"unavailable: {type(error).__name__}"
     return completed.stdout.strip()
+
+
+def _sanitize_pip_freeze(output: str) -> str:
+    sanitized: list[str] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        package, separator, _ = line.partition(" @ ")
+        if (
+            separator
+            and package
+            and all(character.isalnum() or character in "-_." for character in package)
+        ):
+            sanitized.append(f"{package} @ <redacted>")
+        elif "://" in line or "\\" in line or "/" in line or line.startswith("-e "):
+            sanitized.append("<direct-reference-redacted>")
+        else:
+            sanitized.append(line)
+    return "\n".join(sanitized)
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def alignment_smoke_test(
@@ -1282,12 +1322,15 @@ def alignment_smoke_test(
     local_files_only: bool = True,
     module_loader: Callable[[str], Any] | None = None,
     tool_commit_resolver: Callable[[], str] | None = None,
+    dependency_version_resolver: Callable[[str], str] | None = None,
     run_command: RunCommand = subprocess.run,
     now: Callable[[], datetime] | None = None,
 ) -> int:
     """Load the pinned backend and persist a reproducible local runtime audit."""
     timestamp = (now or (lambda: datetime.now(timezone.utc)))().isoformat()
-    pip_freeze = _capture_environment_command([sys.executable, "-m", "pip", "freeze"], run_command)
+    pip_freeze = _sanitize_pip_freeze(
+        _capture_environment_command([sys.executable, "-m", "pip", "freeze"], run_command)
+    )
     nvidia_smi = _capture_environment_command(
         [
             "nvidia-smi",
@@ -1296,10 +1339,15 @@ def alignment_smoke_test(
         ],
         run_command,
     )
-    code_commit = _capture_environment_command(["git", "rev-parse", "HEAD"], run_command)
+    code_commit = _capture_environment_command(
+        ["git", "rev-parse", "HEAD"], run_command, cwd=paths.project_root
+    )
     alignment = config.raw.get("alignment")
     model_revision = alignment.get("model_revision") if type(alignment) is dict else None
     model_license = alignment.get("license") if type(alignment) is dict else None
+    run_id = hashlib.sha256(f"{timestamp}\0{code_commit}\0{model_revision}".encode()).hexdigest()[
+        :24
+    ]
     success = False
     failure_code: str | None = None
     message = ""
@@ -1311,15 +1359,16 @@ def alignment_smoke_test(
             local_files_only=local_files_only,
             module_loader=module_loader,
             tool_commit_resolver=tool_commit_resolver,
+            dependency_version_resolver=dependency_version_resolver,
         )
         runtime = backend.runtime_info()
         success = True
     except CorpusFailure as error:
         failure_code = error.code
-        message = str(error)
-    except (OSError, TypeError, ValueError) as error:
+        message = "pinned alignment backend unavailable"
+    except (OSError, TypeError, ValueError):
         failure_code = "MANIFEST_SCHEMA_MISMATCH"
-        message = str(error)
+        message = "invalid alignment smoke configuration"
     smoke = {
         "schema_version": "1",
         "success": success,
@@ -1334,21 +1383,30 @@ def alignment_smoke_test(
         "aligner_commit": runtime.aligner_commit if runtime is not None else None,
         "torch_version": runtime.torch_version if runtime is not None else None,
         "transformers_version": runtime.transformers_version if runtime is not None else None,
+        "uroman_version": runtime.uroman_version if runtime is not None else None,
         "cuda_available": runtime.cuda_available if runtime is not None else None,
+        "requested_device": runtime.requested_device if runtime is not None else None,
+        "requested_dtype": runtime.requested_dtype if runtime is not None else None,
+        "resolved_device": runtime.resolved_device if runtime is not None else None,
+        "resolved_dtype": runtime.resolved_dtype if runtime is not None else None,
         "device_name": runtime.device_name if runtime is not None else None,
         "peak_memory_bytes": runtime.peak_memory_bytes if runtime is not None else None,
+        "measurement_scope": runtime.measurement_scope if runtime is not None else None,
         "model_revision": model_revision,
         "resolved_model_revision": (
             runtime.resolved_model_revision if runtime is not None else None
         ),
         "model_weights_sha256": runtime.model_weights_sha256 if runtime is not None else None,
+        "model_weight_manifest": (
+            [item.to_dict() for item in runtime.model_weight_manifest]
+            if runtime is not None
+            else None
+        ),
         "model_license": model_license,
     }
-    runtime_directory = paths.alignments / "runtime"
-    runtime_directory.mkdir(parents=True, exist_ok=True)
-    write_jsonl_atomic(runtime_directory / "smoke.json", (smoke,))
     environment = "\n".join(
         (
+            f"Run ID: {run_id}",
             f"Python version: {sys.version}",
             f"Timestamp: {timestamp}",
             f"Code commit: {code_commit}",
@@ -1367,7 +1425,12 @@ def alignment_smoke_test(
             "",
         )
     )
-    (runtime_directory / "environment.txt").write_text(environment, encoding="utf-8")
+    smoke["run_id"] = run_id
+    smoke["environment_sha256"] = hashlib.sha256(environment.encode("utf-8")).hexdigest()
+    runtime_directory = paths.alignments / "runtime"
+    runtime_directory.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(runtime_directory / "environment.txt", environment)
+    write_jsonl_atomic(runtime_directory / "smoke.json", (smoke,))
     return 0 if success else 1
 
 
