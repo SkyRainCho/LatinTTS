@@ -6,6 +6,7 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
+from latintts.corpus.inventory import inventory_from_manifests, write_intake_skeleton
 from latintts.corpus.paths import CorpusPaths
 
 
@@ -28,7 +29,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("doctor")
+    inventory_parser = subparsers.add_parser("inventory")
+    inventory_parser.add_argument("--init-intake", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
+    if args.command == "inventory":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        paths.ensure_layout()
+        if args.init_intake:
+            write_intake_skeleton(paths, paths.manifests / "intake.csv")
+        else:
+            inventory_from_manifests(paths)
+        return 0
     raise AssertionError(args.command)
