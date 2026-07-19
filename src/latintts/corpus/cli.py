@@ -1370,15 +1370,18 @@ def alignment_smoke_test(
                 artifact_field="pip_freeze",
             )
         )
-        environment_values["nvidia_smi"] = _capture_environment_command(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,driver_version,memory.total",
-                "--format=csv,noheader",
-            ],
-            run_command,
-            artifact_field="nvidia_smi",
-        )
+        try:
+            environment_values["nvidia_smi"] = _capture_environment_command(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,driver_version,memory.total",
+                    "--format=csv,noheader",
+                ],
+                run_command,
+                artifact_field="nvidia_smi",
+            )
+        except _EnvironmentCommandFailure as error:
+            environment_values[error.artifact_field] = error.evidence
         environment_values["code_commit"] = _capture_environment_command(
             ["git", "rev-parse", "HEAD"],
             run_command,

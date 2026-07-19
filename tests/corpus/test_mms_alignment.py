@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from latintts.corpus import mms_alignment as mms_alignment_module
 from latintts.corpus.alignment import AlignmentRequest, validate_alignment
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure
@@ -104,6 +105,64 @@ def _runtime_request(
         segmentation_artifact_sha256=_digest("segment"),
         config_sha256=_digest("config"),
     )
+
+
+def _cpu_loader_modules(snapshot: Path) -> dict[str, object]:
+    class FakeModel:
+        dtype = "float32"
+        device = "cpu"
+
+        def to(self, device: str) -> FakeModel:
+            self.device = device
+            return self
+
+        def eval(self) -> FakeModel:
+            return self
+
+    class ModelFactory:
+        @staticmethod
+        def from_pretrained(path: str, **kwargs: object) -> FakeModel:
+            return FakeModel()
+
+    class TokenizerFactory:
+        @staticmethod
+        def from_pretrained(path: str, **kwargs: object) -> str:
+            return "tokenizer"
+
+    class UnavailableCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    return {
+        "torch": SimpleNamespace(
+            __version__="2.5.1",
+            float16="float16",
+            float32="float32",
+            cuda=UnavailableCuda(),
+        ),
+        "huggingface_hub": SimpleNamespace(snapshot_download=lambda **kwargs: str(snapshot)),
+        "ctc_forced_aligner": SimpleNamespace(__version__="0.3.0"),
+        "transformers": SimpleNamespace(
+            __version__="4.48.0",
+            AutoModelForCTC=ModelFactory,
+            AutoTokenizer=TokenizerFactory,
+        ),
+    }
+
+
+def _record_weight_cache_roots(monkeypatch: pytest.MonkeyPatch) -> list[Path | None]:
+    roots: list[Path | None] = []
+    original = mms_alignment_module.resolve_model_weights
+
+    def recording_resolver(
+        snapshot: Path, *, cache_root: Path | None = None
+    ) -> tuple[str, tuple[ModelWeightFile, ...]]:
+        roots.append(cache_root)
+        return original(snapshot, cache_root=cache_root)
+
+    monkeypatch.setattr(mms_alignment_module, "resolve_model_weights", recording_resolver)
+    return roots
 
 
 def test_build_request_binds_resolved_runtime_identity_into_cache_key(tmp_path: Path) -> None:
@@ -649,6 +708,82 @@ def test_mms_aligner_calls_adapter_in_order_and_preserves_token_indexes(tmp_path
     assert calls[2][-5:] == (request.alignment_text, True, "lat", "word", "edges")
     assert [word.spoken_token_index for word in result.words] == [0, 1]
     validate_alignment(result, request, audio_duration_seconds=1.4)
+
+
+def test_mms_default_constructor_derives_standard_hf_repository_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    repository_cache = tmp_path / "hub" / "models--latin"
+    snapshot = repository_cache / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (repository_cache / "blobs").mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    roots = _record_weight_cache_roots(monkeypatch)
+    backend = MmsCtcAligner(
+        model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
+        model_revision=revision,
+        device="cpu",
+        dtype="float32",
+        window_seconds=30,
+        context_seconds=2,
+        batch_size=4,
+        module_loader=_cpu_loader_modules(snapshot).__getitem__,
+        tool_commit_resolver=lambda: ALIGNER_COMMIT,
+        dependency_version_resolver=lambda name: "1.3.1",
+    )
+
+    backend.runtime_info()
+
+    assert roots == [repository_cache]
+
+
+def test_alignment_backend_factory_derives_standard_hf_repository_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    repository_cache = tmp_path / "hub" / "models--latin"
+    snapshot = repository_cache / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (repository_cache / "blobs").mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    roots = _record_weight_cache_roots(monkeypatch)
+    backend = create_alignment_backend(
+        _alignment_config(),
+        module_loader=_cpu_loader_modules(snapshot).__getitem__,
+        tool_commit_resolver=lambda: ALIGNER_COMMIT,
+        dependency_version_resolver=lambda name: "1.3.1",
+    )
+
+    backend.runtime_info()
+
+    assert roots == [repository_cache]
+
+
+def test_mms_default_constructor_keeps_nonstandard_snapshot_root_conservative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    snapshot = tmp_path / "local-model" / revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    roots = _record_weight_cache_roots(monkeypatch)
+    backend = MmsCtcAligner(
+        model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
+        model_revision=revision,
+        device="cpu",
+        dtype="float32",
+        window_seconds=30,
+        context_seconds=2,
+        batch_size=4,
+        module_loader=_cpu_loader_modules(snapshot).__getitem__,
+        tool_commit_resolver=lambda: ALIGNER_COMMIT,
+        dependency_version_resolver=lambda name: "1.3.1",
+    )
+
+    backend.runtime_info()
+
+    assert roots == [snapshot]
 
 
 def test_mms_lazy_load_uses_pinned_revision_trust_and_cache_policy(tmp_path: Path) -> None:

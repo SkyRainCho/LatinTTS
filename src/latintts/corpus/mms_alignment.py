@@ -147,6 +147,19 @@ def _validate_cached_weight_path(path: Path, cache_root: Path) -> None:
         raise CorpusFailure("ALIGNER_UNAVAILABLE", "MMS weight path is not a file")
 
 
+def _effective_hf_cache_root(snapshot: Path, configured_cache: Path | None) -> Path:
+    if configured_cache is not None:
+        return configured_cache
+    repository_cache = snapshot.parent.parent
+    if (
+        snapshot.parent.name == "snapshots"
+        and repository_cache.name.startswith("models--")
+        and (repository_cache / "blobs").is_dir()
+    ):
+        return repository_cache
+    return snapshot
+
+
 def resolve_model_weights(
     snapshot: Path, *, cache_root: Path | None = None
 ) -> tuple[str, tuple[ModelWeightFile, ...]]:
@@ -277,7 +290,8 @@ class MmsCtcAligner:
                     "ALIGNER_UNAVAILABLE", "MMS resolved model revision does not match the pin"
                 )
             model_weights_sha256, model_weight_manifest = resolve_model_weights(
-                model_path, cache_root=self.cache_dir or model_path
+                model_path,
+                cache_root=_effective_hf_cache_root(model_path, self.cache_dir),
             )
             runtime_device = self.device
             runtime_dtype = self.dtype_name
