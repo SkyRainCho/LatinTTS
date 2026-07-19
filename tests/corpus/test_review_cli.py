@@ -219,6 +219,54 @@ def _two_recording_aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusC
     return paths, config
 
 
+def _two_recording_review_required_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
+    paths, config = _set_up(tmp_path)
+    config_path = tmp_path / "config" / "corpus" / "pilot-v1.json"
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    raw_config["pairing"]["minimum_duration_ratio"] = 1.0
+    raw_config["pairing"]["maximum_duration_ratio"] = 1.0
+    config_path.write_text(json.dumps(raw_config), encoding="utf-8")
+    config = CorpusConfig.load(config_path)
+    source_one = paths.raw_spoken / "rec-1.wav"
+    source_two = paths.raw_spoken / "rec-2.wav"
+    shutil.copyfile(source_one, source_two)
+    recordings = list(read_jsonl(paths.manifests / "recordings.jsonl"))
+    second_recording = deepcopy(recordings[0])
+    second_recording.update(
+        recording_id="rec-2",
+        relative_path="raw/spoken/rec-2.wav",
+        title_or_citation="rec-2",
+        sha256=hashlib.sha256(source_two.read_bytes()).hexdigest(),
+    )
+    write_jsonl_atomic(paths.manifests / "recordings.jsonl", (*recordings, second_recording))
+    transcripts = list(read_jsonl(paths.manifests / "transcripts.jsonl"))
+    second_transcript = deepcopy(transcripts[0])
+    second_transcript["recording_id"] = "rec-2"
+    for unit in second_transcript["spoken_units"]:
+        unit["unit_id"] = unit["unit_id"].replace("rec-1-", "rec-2-")
+    write_jsonl_atomic(paths.manifests / "transcripts.jsonl", (*transcripts, second_transcript))
+    write_jsonl_atomic(
+        paths.manifests / "pilot-selection.json",
+        (
+            {
+                "schema_version": "1",
+                "strategy": "explicit-v1",
+                "recording_ids": ["rec-1", "rec-2"],
+                "inventory_hashes": [recordings[0]["sha256"], second_recording["sha256"]],
+            },
+        ),
+    )
+    _segment(paths, config)
+    assert not pair_corpus(
+        paths,
+        config,
+        _FakeAligner(),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    return paths, config
+
+
 def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     tmp_path: Path,
 ) -> None:
@@ -563,6 +611,68 @@ def test_pairing_correction_retry_binds_new_transition_to_durable_review_whitesp
     )
 
 
+def test_later_pairing_correction_preserves_whitespace_bound_review_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _two_recording_review_required_project(tmp_path)
+    corrections = {
+        json.loads((directory / "decision.json").read_text(encoding="utf-8"))["recording_id"]: (
+            directory
+        )
+        for directory in export_review_bundle(paths, config)
+    }
+    _confirm_pairing_correction(corrections["rec-1"])
+    real_persist = review_module.persist_recording_transition
+    monkeypatch.setattr(
+        review_module,
+        "persist_recording_transition",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("before first transition")),
+    )
+    with pytest.raises(RuntimeError, match="before first transition"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(review_module, "persist_recording_transition", real_persist)
+
+    review_path = paths.manifests / "review.jsonl"
+    review_path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, separators=(", ", ": ")) + "\n"
+            for row in read_jsonl(review_path)
+        ),
+        encoding="utf-8",
+    )
+    first_prefix = review_path.read_bytes()
+    assert not import_review_bundle(paths, config)
+
+    processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    first_event = next(
+        row
+        for row in read_jsonl(processing_path)
+        if row["recording_id"] == "rec-1" and row["target_state"] == "PAIRED"
+    )
+    assert first_event["input_sha256s"][3] == hashlib.sha256(first_prefix).hexdigest()
+
+    _confirm_pairing_correction(corrections["rec-2"])
+    assert import_review_bundle(paths, config)
+
+    final_journal = review_path.read_bytes()
+    assert final_journal.startswith(first_prefix)
+    paired_events = {
+        row["recording_id"]: row
+        for row in read_jsonl(processing_path)
+        if row["target_state"] == "PAIRED"
+    }
+    for recording_id in ("rec-1", "rec-2"):
+        run_directory = paths.alignments / "runs" / config.digest / recording_id
+        automatic = pairing_from_dict(read_jsonl(run_directory / "pairing-automatic.json")[0])
+        corrected = pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0])
+        assert review_module.validate_pairing_review_snapshot(
+            review_path,
+            paired_events[recording_id]["input_sha256s"][3],
+            automatic,
+            corrected,
+        )
+
+
 def test_pairing_correction_retry_recovers_after_event_before_recordings_replace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -617,19 +727,26 @@ def test_pairing_correction_retry_recovers_after_journal_before_automatic_pairin
     paths, config, _ = _review_required_project(tmp_path)
     correction = export_review_bundle(paths, config)[0]
     _confirm_pairing_correction(correction)
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    automatic_path = run_directory / "pairing-automatic.json"
     real_write_bytes = review_module._write_bytes_atomic
+
+    def fail_automatic_write(path: Path, content: bytes) -> None:
+        if Path(path) == automatic_path:
+            raise RuntimeError("after review journal")
+        real_write_bytes(path, content)
+
     monkeypatch.setattr(
         review_module,
         "_write_bytes_atomic",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("after review journal")),
+        fail_automatic_write,
     )
 
     with pytest.raises(RuntimeError, match="after review journal"):
         import_review_bundle(paths, config)
 
-    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
     assert (paths.manifests / "review.jsonl").is_file()
-    assert not (run_directory / "pairing-automatic.json").exists()
+    assert not automatic_path.exists()
     assert any(
         outcome.status == "review"
         for outcome in pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0]).groups

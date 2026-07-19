@@ -1772,6 +1772,22 @@ def _review_events_bytes(events: tuple[ReviewEvent, ...]) -> bytes:
     return b"".join((_canonical_json(event.to_dict()) + "\n").encode("utf-8") for event in events)
 
 
+def _complete_review_journal_bytes(review_path: Path, existing: tuple[ReviewEvent, ...]) -> bytes:
+    journal = review_path.read_bytes() if review_path.exists() else b""
+    if not journal:
+        if existing:
+            raise ValueError("review journal changed during correction recovery")
+        return b""
+    snapshot_sha256 = hashlib.sha256(journal).hexdigest()
+    durable_events = tuple(
+        ReviewEvent.from_dict(row)
+        for row in _review_snapshot_rows_from_bytes(journal, snapshot_sha256)
+    )
+    if durable_events != existing:
+        raise ValueError("review journal changed during correction recovery")
+    return journal
+
+
 def _pairing_review_snapshot_sha256(
     review_path: Path,
     events_path: Path,
@@ -1883,10 +1899,9 @@ def _import_pairing_corrections(
     if not submissions:
         return all_confirmed
     review_path = paths.manifests / "review.jsonl"
-    prospective_events = (*existing, *new_events)
-    prospective_review_bytes = (
-        _review_events_bytes(prospective_events) if new_events else review_path.read_bytes()
-    )
+    prospective_review_bytes = _complete_review_journal_bytes(
+        review_path, existing
+    ) + _review_events_bytes(tuple(new_events))
     preflights: list[_PairingCorrectionPreflight] = []
     for recording, submission in submissions:
         corrected_sha256 = hashlib.sha256(submission.corrected_bytes).hexdigest()
@@ -1902,7 +1917,7 @@ def _import_pairing_corrections(
             )
         )
     if new_events:
-        write_jsonl_atomic(review_path, (event.to_dict() for event in prospective_events))
+        _write_bytes_atomic(review_path, prospective_review_bytes)
     if review_path.read_bytes() != prospective_review_bytes:
         raise ValueError("review journal differs from recovery preflight")
     current = recordings
