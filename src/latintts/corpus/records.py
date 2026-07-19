@@ -133,6 +133,82 @@ class IntakeRow:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceCandidateIntake:
+    source_id: str
+    source_url: str
+    source_version: str
+    accessed_at: str
+    source_file: str
+    selected: bool
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SourceCandidateIntake:
+        require_exact_fields(
+            raw,
+            frozenset(field.name for field in fields(cls)),
+            "source candidate intake",
+        )
+        for name in ("source_id", "source_url", "source_version", "accessed_at", "source_file"):
+            if not isinstance(raw[name], str):
+                raise TypeError(f"source candidate {name} must be a string")
+        if type(raw["selected"]) is not bool:
+            raise TypeError("source candidate selected must be a boolean")
+        return cls(**raw)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptIntakeRow:
+    recording_id: str
+    source_candidates: tuple[SourceCandidateIntake, ...]
+    spoken_units_file: str
+    pronunciation_overrides_file: str
+    confirmed: bool
+    asr_hypothesis_file: str
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> TranscriptIntakeRow:
+        require_exact_fields(
+            raw,
+            frozenset(field.name for field in fields(cls)),
+            "transcript intake row",
+        )
+        _require_nonempty_string(raw["recording_id"], "recording_id")
+        if type(raw["source_candidates"]) is not list:
+            raise TypeError("source_candidates must be an array")
+        candidates_list: list[SourceCandidateIntake] = []
+        for candidate in raw["source_candidates"]:
+            if type(candidate) is not dict:
+                raise TypeError("source candidate intake must be an object")
+            candidates_list.append(SourceCandidateIntake.from_dict(candidate))
+        candidates = tuple(candidates_list)
+        for name in (
+            "spoken_units_file",
+            "pronunciation_overrides_file",
+            "asr_hypothesis_file",
+        ):
+            if not isinstance(raw[name], str):
+                raise TypeError(f"{name} must be a string")
+        if type(raw["confirmed"]) is not bool:
+            raise TypeError("confirmed must be a boolean")
+        return cls(
+            recording_id=raw["recording_id"],
+            source_candidates=candidates,
+            spoken_units_file=raw["spoken_units_file"],
+            pronunciation_overrides_file=raw["pronunciation_overrides_file"],
+            confirmed=raw["confirmed"],
+            asr_hypothesis_file=raw["asr_hypothesis_file"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        raw = asdict(self)
+        raw["source_candidates"] = [candidate.to_dict() for candidate in self.source_candidates]
+        return raw
+
+
+@dataclass(frozen=True, slots=True)
 class AudioMetadata:
     duration_seconds: float
     sample_rate: int
