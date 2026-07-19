@@ -397,6 +397,7 @@ def test_import_review_rejects_tampered_history_and_nested_automatic_schema(
     write_jsonl_atomic(review_path, rows)
     with pytest.raises(ValueError, match=r"event ID|before"):
         import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "ALIGNED"
 
     review_path.unlink()
     automatic_path = groups[0] / "automatic.json"

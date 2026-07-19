@@ -277,6 +277,63 @@ def test_review_replay_strictly_validates_existing_history(failure: str) -> None
         replay_review_events({"segment_end": 1.4, "review_decision": "unreviewed"}, (first, second))
 
 
+@pytest.mark.parametrize(
+    ("field", "before", "after"),
+    [
+        ("unexpected", "old", "new"),
+        ("segment_end", 1.0, True),
+        ("segment_end", 1.0, float("inf")),
+        ("word:0:text", "Pater", ""),
+        ("word:0:start_seconds", 0.1, 0.6),
+    ],
+)
+def test_review_replay_rejects_disallowed_typed_and_invariant_breaking_events(
+    field: str, before: object, after: object
+) -> None:
+    automatic = {
+        "segment_start": 0.0,
+        "segment_end": 1.0,
+        "words": [{"text": "Pater", "start_seconds": 0.1, "end_seconds": 0.5}],
+        "review_decision": "unreviewed",
+        "unexpected": "old",
+    }
+    event = ReviewEvent(
+        "1",
+        "event-invalid",
+        "take-1",
+        field,
+        before,
+        after,
+        "malformed history",
+        "owner",
+        "2026-07-19T12:00:00+08:00",
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        replay_review_events(automatic, (event,), expected_entity_id="take-1")
+
+
+def test_review_replay_rejects_single_entity_history_for_another_expected_take() -> None:
+    event = ReviewEvent(
+        "1",
+        "event-wrong-entity",
+        "take-1",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        "listened in full",
+        "owner",
+        "2026-07-19T12:00:00+08:00",
+    )
+
+    with pytest.raises(ValueError, match="entity"):
+        replay_review_events(
+            {"review_decision": "unreviewed"},
+            (event,),
+            expected_entity_id="take-2",
+        )
+
+
 def test_review_event_from_dict_requires_exact_fields() -> None:
     raw = ReviewEvent(
         "1",
@@ -468,7 +525,7 @@ def test_replay_rejects_invalid_container_and_missing_nested_fields() -> None:
         "owner",
         "2026-07-19T12:00:00+08:00",
     )
-    with pytest.raises(ValueError, match="absent"):
+    with pytest.raises(ValueError, match=r"allowed|absent"):
         replay_review_events({}, (missing,))
     word = ReviewEvent(
         "1",

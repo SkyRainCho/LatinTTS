@@ -263,37 +263,89 @@ def read_textgrid(path: Path) -> ReviewedBoundaries:
 
 
 def replay_review_events(
-    automatic: dict[str, Any], events: tuple[ReviewEvent, ...]
+    automatic: dict[str, Any],
+    events: tuple[ReviewEvent, ...],
+    *,
+    expected_entity_id: str | None = None,
 ) -> dict[str, Any]:
     if type(automatic) is not dict:
         raise TypeError("automatic review values must be an object")
     if type(events) is not tuple or any(type(event) is not ReviewEvent for event in events):
         raise TypeError("review events must be a tuple of ReviewEvent values")
+    if expected_entity_id is not None and (
+        type(expected_entity_id) is not str or not expected_entity_id
+    ):
+        raise TypeError("expected_entity_id must be a non-empty string or null")
     event_ids = tuple(event.review_event_id for event in events)
     if len(event_ids) != len(set(event_ids)):
         raise ValueError("review event history contains duplicate review_event_id")
     entity_ids = {event.entity_id for event in events}
     if len(entity_ids) > 1:
         raise ValueError("review event history must contain exactly one entity")
+    if entity_ids and expected_entity_id is not None and entity_ids != {expected_entity_id}:
+        raise ValueError("review event history does not match the expected entity")
     effective = deepcopy(automatic)
     for event in events:
+        _validate_review_event_value(event.field, event.before, "before")
+        _validate_review_event_value(event.field, event.after, "after")
         before = _review_field_value(effective, event.field)
-        if before != event.before:
+        if type(before) is not type(event.before) or before != event.before:
             raise ValueError("review event before value does not match replay state")
-        if event.field == "review_decision" and (
-            event.before not in {"unreviewed", "approved", "rejected"}
-            or event.after
-            not in {
-                "approved",
-                "rejected",
-            }
-        ):
-            raise ValueError("review_decision event must use the decision enum")
         _set_review_field(effective, event.field, event.after)
+        _validate_effective_review_values(effective)
     return effective
 
 
 _WORD_FIELD = re.compile(r"word:(\d+):(text|start_seconds|end_seconds)")
+_TOP_LEVEL_REVIEW_FIELDS = frozenset({"segment_start", "segment_end", "review_decision"})
+
+
+def _validate_review_event_value(field: str, value: object, position: str) -> None:
+    match = _WORD_FIELD.fullmatch(field)
+    if match is None and field not in _TOP_LEVEL_REVIEW_FIELDS:
+        raise ValueError(f"review event field is not allowed: {field}")
+    key = match.group(2) if match is not None else field
+    if key == "review_decision":
+        if type(value) is not str or value not in {"unreviewed", "approved", "rejected"}:
+            raise ValueError(f"review event {position} decision must use the decision enum")
+        if position == "after" and value == "unreviewed":
+            raise ValueError("review decision events cannot restore unreviewed")
+    elif key == "text":
+        if type(value) is not str or not value:
+            raise ValueError(f"review event {position} word text must be non-empty")
+    else:
+        _finite_number(value, f"review event {position} {key}")
+
+
+def _validate_effective_review_values(values: dict[str, Any]) -> None:
+    start_raw = values.get("segment_start")
+    end_raw = values.get("segment_end")
+    start = _finite_number(start_raw, "effective segment_start") if start_raw is not None else 0.0
+    end = _finite_number(end_raw, "effective segment_end") if end_raw is not None else math.inf
+    if start < 0 or end <= start:
+        raise ValueError("effective segment bounds are invalid")
+    decision = values.get("review_decision")
+    if decision is not None and (
+        type(decision) is not str or decision not in {"unreviewed", "approved", "rejected"}
+    ):
+        raise ValueError("effective review_decision is invalid")
+    words = values.get("words")
+    if words is None:
+        return
+    if type(words) is not list:
+        raise TypeError("effective words must be an array")
+    cursor = start
+    for word in words:
+        if type(word) is not dict:
+            raise TypeError("effective word must be an object")
+        require_exact_fields(word, _WORD_VALUE_FIELDS, "effective word")
+        if type(word["text"]) is not str or not word["text"]:
+            raise ValueError("effective word text must be non-empty")
+        word_start = _finite_number(word["start_seconds"], "effective word start")
+        word_end = _finite_number(word["end_seconds"], "effective word end")
+        if word_start < cursor or word_end <= word_start or word_end > end:
+            raise ValueError("effective words must be ordered inside the segment")
+        cursor = word_end
 
 
 def _review_field_value(values: dict[str, Any], field: str) -> object:
@@ -1379,7 +1431,7 @@ def import_review_bundle(
     for entity_id in sorted(expected_entities):
         automatic = automatic_by_entity[entity_id]
         prior = tuple(events_by_entity.get(entity_id, ()))
-        effective = replay_review_events(automatic, prior)
+        effective = replay_review_events(automatic, prior, expected_entity_id=entity_id)
         decision = decision_rows[entity_id]
         if decision["decision"] == "unreviewed":
             effective_by_entity[entity_id] = effective
