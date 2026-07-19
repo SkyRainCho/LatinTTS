@@ -1,0 +1,90 @@
+[
+  {
+    "source_id": "liber-usualis-1962",
+    "title": "Liber Usualis 1962 - The reading and pronunciation of liturgical Latin",
+    "url": "https://archive.ccwatershed.org/media/pdfs/12/07/06/17-07-32_0.pdf",
+    "source_kind": "normative_traditional",
+    "authority_rank": 1,
+    "accessed_on": "2026-07-17",
+    "locator": "PDF pages 29-32, lines 1229-1357 in the searchable copy",
+    "license_or_terms": "Publicly accessible historical scan; verify jurisdiction before redistribution",
+    "usage_note": "Primary rule source for Roman-style liturgical pronunciation"
+  },
+  {
+    "source_id": "liber-usualis-1961-full-scan",
+    "title": "Liber Usualis 1961 - Complete Solesmes scan",
+    "url": "https://propria.org/wp-content/uploads/2019/10/liber-usualis-1961.pdf",
+    "source_kind": "liturgical_text_scan",
+    "authority_rank": 1,
+    "accessed_on": "2026-07-18",
+    "locator": "Complete 2340-page PDF scan; cite each occurrence by printed page, PDF page, section or prayer, and verse where applicable",
+    "license_or_terms": "Publicly accessible historical scan for reference; verify copyright and local jurisdiction before redistribution or training use",
+    "usage_note": "Liturgical text occurrence and printed acute stress evidence only; not a pronunciation-rule source"
+  },
+  {
+    "source_id": "ewtn-ecclesiastical-latin",
+    "title": "EWTN Ecclesiastical Latin pronunciation guide",
+    "url": "https://www.ewtn.com/catholicism/answers/latin-ecclesiastical-24788",
+    "source_kind": "secondary_guide",
+    "authority_rank": 2,
+    "accessed_on": "2026-07-17",
+    "locator": "Pronunciation tables adapted from the Liber Usualis",
+    "license_or_terms": "Reference use only; do not redistribute page content",
+    "usage_note": "Cross-check for explanatory wording, not a replacement for the primary source"
+  },
+  {
+    "source_id": "iveson-roman-pronunciation-1964",
+    "title": "William B. Iveson, The Roman Pronunciation of Latin, The Choral Journal (Oct-Nov 1964)",
+    "url": "https://acda-publications.s3.us-east-2.amazonaws.com/choral_journals/Oct_1964_Iveson_W.pdf",
+    "source_kind": "secondary_guide",
+    "authority_rank": 2,
+    "accessed_on": "2026-07-18",
+    "locator": "PDF page 1 (printed p. 14), lines 44-46",
+    "license_or_terms": "Copyrighted journal article; reference use only; do not redistribute page content",
+    "usage_note": "Direct source for PH pronounced as F; rules state they reflect clergy pronunciation in the Province of Rome"
+  },
+  {
+    "source_id": "allen-greenough-accents",
+    "title": "Allen and Greenough's New Latin Grammar - Accents",
+    "url": "https://dcc.dickinson.edu/sv/grammar/latin/accents",
+    "source_kind": "grammar_reference",
+    "authority_rank": 2,
+    "accessed_on": "2026-07-17",
+    "locator": "Section 12, Accents",
+    "license_or_terms": "Reference use with attribution; retain the suggested citation",
+    "usage_note": "Source for disyllable, penult, antepenult, and enclitic stress rules"
+  },
+  {
+    "source_id": "perseus-lewis-short",
+    "title": "Lewis and Short, A Latin Dictionary - Perseus XML source",
+    "url": "https://github.com/PerseusDL/lexica/tree/master/CTS_XML_TEI/perseus/pdllex/lat/ls",
+    "source_kind": "quantity_dictionary",
+    "authority_rank": 2,
+    "accessed_on": "2026-07-17",
+    "locator": "Per-entry XML lemma and orthography fields",
+    "license_or_terms": "CC BY-SA 4.0; credit Perseus, retain the availability statement, and offer Perseus any modifications",
+    "usage_note": "Lexical evidence for vowel quantity and stress; record the exact entry locator per lexicon row"
+  },
+  {
+    "source_id": "wikimedia-ecclesiastical-pronunciation",
+    "title": "Wikimedia Commons category: Ecclesiastic Latin pronunciation",
+    "url": "https://commons.wikimedia.org/wiki/Category:Ecclesiastic_Latin_pronunciation",
+    "source_kind": "evaluation_audio_index",
+    "authority_rank": 3,
+    "accessed_on": "2026-07-17",
+    "locator": "Per-file description and license pages",
+    "license_or_terms": "Each audio file has its own license and must be checked individually",
+    "usage_note": "Candidate evaluation audio; never auto-promote to normative or training data"
+  },
+  {
+    "source_id": "librivox-public-domain",
+    "title": "LibriVox public domain policy",
+    "url": "https://librivox.org/pages/public-domain/",
+    "source_kind": "candidate_audio_terms",
+    "authority_rank": 4,
+    "accessed_on": "2026-07-17",
+    "locator": "Public Domain page",
+    "license_or_terms": "Recordings are public domain in the United States; verify local jurisdiction",
+    "usage_note": "Candidate corpus index only; pronunciation variety requires manual screening"
+  }
+]
