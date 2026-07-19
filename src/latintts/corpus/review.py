@@ -24,8 +24,10 @@ from latintts.corpus.pairing import (
     PairingRecording,
     RepetitionGroup,
     TakeCandidate,
+    materialize_reviewed_pairing,
     pairing_from_dict,
     pairing_run_directory,
+    pairing_to_dict,
     require_safe_pairing_id,
 )
 from latintts.corpus.paths import CorpusPaths
@@ -408,6 +410,20 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     _write_text_atomic(path, _canonical_json(value) + "\n")
 
 
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _decode_recording(raw: dict[str, Any]) -> RecordingRecord:
     require_exact_fields(
         raw, frozenset(field.name for field in fields(RecordingRecord)), "recording"
@@ -511,6 +527,19 @@ def _load_pairing_and_alignment(
     if type(alignment["takes"]) is not list:
         raise TypeError("alignment takes must be an array")
     return run_directory, pairing, alignment
+
+
+def _load_pairing_only(
+    paths: CorpusPaths, config: CorpusConfig, recording: RecordingRecord
+) -> tuple[Path, PairingRecording]:
+    run_directory = pairing_run_directory(paths, config.digest, recording.recording_id)
+    rows = read_jsonl(run_directory / "pairing.json")
+    if len(rows) != 1:
+        raise ValueError("pairing artifact must contain exactly one row")
+    pairing = pairing_from_dict(rows[0])
+    if pairing.recording_id != recording.recording_id or pairing.config_sha256 != config.digest:
+        raise ValueError("pairing artifact identity does not match recording and config")
+    return run_directory, pairing
 
 
 def _alignment_by_take(
@@ -684,6 +713,88 @@ _BUNDLE_FILES = frozenset(
         "take-2.TextGrid",
     }
 )
+_PAIRING_CORRECTION_FILES = frozenset({"index.html", "automatic.json", "decision.json"})
+
+
+def _pairing_correction_candidate(candidate: Any) -> dict[str, Any]:
+    return {
+        "split_sample": candidate.split_sample,
+        "first_alignment_score": candidate.first_alignment_score,
+        "second_alignment_score": candidate.second_alignment_score,
+        "word_order_same": candidate.word_order_same,
+        "coverage": candidate.coverage,
+        "first_audio": candidate.first_audio.to_dict() if candidate.first_audio else None,
+        "second_audio": candidate.second_audio.to_dict() if candidate.second_audio else None,
+        "first_alignment_cache_key": candidate.first_alignment_cache_key,
+        "second_alignment_cache_key": candidate.second_alignment_cache_key,
+        "first_result_integrity_sha256": candidate.first_result_integrity_sha256,
+        "second_result_integrity_sha256": candidate.second_result_integrity_sha256,
+    }
+
+
+def _export_pairing_correction(
+    run_directory: Path, recording: RecordingRecord, pairing: PairingRecording
+) -> Path:
+    review_outcomes = tuple(outcome for outcome in pairing.groups if outcome.status == "review")
+    if not review_outcomes:
+        raise ValueError("SEGMENTED review export requires review-required pairing outcomes")
+    directory = _group_directory(run_directory, "pairing-correction")
+    directory.mkdir(parents=True, exist_ok=True)
+    if any(directory.iterdir()):
+        if {item.name for item in directory.iterdir()} != _PAIRING_CORRECTION_FILES:
+            raise ValueError("pairing correction bundle has an unexpected file schema")
+        for name in _PAIRING_CORRECTION_FILES:
+            _require_canonical_descendant(
+                directory.parent,
+                directory / name,
+                kind="pairing correction file",
+                require_file=True,
+            )
+        return directory
+    automatic = {
+        "schema_version": "2",
+        "recording_id": recording.recording_id,
+        "pairing_artifact_sha256": _digest(run_directory / "pairing.json"),
+        "pairing_cache_key": pairing.cache_key,
+        "pairing_integrity_sha256": pairing.integrity_sha256,
+        "review_units": [
+            {
+                "unit_id": outcome.unit_id,
+                "issue_code": outcome.issue_code,
+                "candidates": [
+                    _pairing_correction_candidate(candidate) for candidate in outcome.candidates
+                ],
+            }
+            for outcome in review_outcomes
+        ],
+    }
+    decision = {
+        "schema_version": "2",
+        "recording_id": recording.recording_id,
+        "pairing_selections": [
+            {
+                "unit_id": outcome.unit_id,
+                "split_sample": None,
+                "reason": "",
+                "reviewer": "",
+                "reviewed_at": "",
+            }
+            for outcome in review_outcomes
+        ],
+    }
+    _write_json(directory / "automatic.json", automatic)
+    _write_json(directory / "decision.json", decision)
+    rows = "\n".join(
+        f"<li>{html.escape(outcome.unit_id)}: {len(outcome.candidates)} saved candidates</li>"
+        for outcome in review_outcomes
+    )
+    _write_text_atomic(
+        directory / "index.html",
+        '<!doctype html>\n<meta charset="utf-8">\n'
+        f"<title>Pairing correction: {html.escape(recording.recording_id)}</title>\n"
+        f"<h1>Pairing correction</h1><ul>{rows}</ul>\n",
+    )
+    return directory
 
 
 def _export_group(
@@ -884,8 +995,12 @@ def export_review_bundle(
         recording = by_id.get(recording_id)
         if recording is None or recording.sha256 != expected_hash:
             raise ValueError("selection does not match recordings")
+        if recording.state is CorpusState.SEGMENTED:
+            run_directory, pairing = _load_pairing_only(paths, config, recording)
+            exported.append(_export_pairing_correction(run_directory, recording, pairing))
+            continue
         if recording.state not in {CorpusState.ALIGNED, CorpusState.REVIEWED}:
-            raise ValueError("review export requires ALIGNED or REVIEWED recording state")
+            raise ValueError("review export requires SEGMENTED, ALIGNED, or REVIEWED state")
         source = paths.resolve_local(recording.relative_path)
         if not source.is_file() or _digest(source) != recording.sha256:
             raise ValueError("source audio reference or hash is invalid")
@@ -1296,6 +1411,222 @@ def _validate_trusted_review_audio(
         raise ValueError("review audio does not match the trusted source-derived clip")
 
 
+_PAIRING_DECISION_FIELDS = frozenset(
+    {"unit_id", "split_sample", "reason", "reviewer", "reviewed_at"}
+)
+
+
+def _pairing_entity_id(recording_id: str, unit_id: str) -> str:
+    return f"pairing:{len(recording_id)}:{recording_id}:{len(unit_id)}:{unit_id}"
+
+
+def _load_pairing_correction_submission(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    recording: RecordingRecord,
+    existing: tuple[ReviewEvent, ...],
+) -> tuple[Path, PairingRecording, bytes, PairingRecording, tuple[ReviewEvent, ...]] | None:
+    run_directory, pairing = _load_pairing_only(paths, config, recording)
+    directory = _group_directory(run_directory, "pairing-correction")
+    if not directory.is_dir() or {item.name for item in directory.iterdir()} != (
+        _PAIRING_CORRECTION_FILES
+    ):
+        raise ValueError("pairing correction bundle has an unexpected file schema")
+    bundle = {
+        name: _require_canonical_descendant(
+            directory.parent,
+            directory / name,
+            kind="pairing correction file",
+            require_file=True,
+        )
+        for name in _PAIRING_CORRECTION_FILES
+    }
+    automatic = _read_json(bundle["automatic.json"])
+    require_exact_fields(
+        automatic,
+        frozenset(
+            {
+                "schema_version",
+                "recording_id",
+                "pairing_artifact_sha256",
+                "pairing_cache_key",
+                "pairing_integrity_sha256",
+                "review_units",
+            }
+        ),
+        "pairing correction automatic",
+    )
+    expected_units = [
+        {
+            "unit_id": outcome.unit_id,
+            "issue_code": outcome.issue_code,
+            "candidates": [
+                _pairing_correction_candidate(candidate) for candidate in outcome.candidates
+            ],
+        }
+        for outcome in pairing.groups
+        if outcome.status == "review"
+    ]
+    pairing_path = run_directory / "pairing.json"
+    original_bytes = pairing_path.read_bytes()
+    if automatic != {
+        "schema_version": "2",
+        "recording_id": recording.recording_id,
+        "pairing_artifact_sha256": hashlib.sha256(original_bytes).hexdigest(),
+        "pairing_cache_key": pairing.cache_key,
+        "pairing_integrity_sha256": pairing.integrity_sha256,
+        "review_units": expected_units,
+    }:
+        raise ValueError("pairing correction automatic values are stale or invalid")
+    decision = _read_json(bundle["decision.json"])
+    require_exact_fields(
+        decision,
+        frozenset({"schema_version", "recording_id", "pairing_selections"}),
+        "pairing correction decision",
+    )
+    if decision["schema_version"] != "2" or decision["recording_id"] != recording.recording_id:
+        raise ValueError("pairing correction decision identity is invalid")
+    rows = decision["pairing_selections"]
+    if type(rows) is not list or len(rows) != len(expected_units):
+        raise ValueError("pairing selections must exactly cover review-required units")
+    decoded: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if type(raw) is not dict:
+            raise TypeError("pairing selection must be an object")
+        require_exact_fields(raw, _PAIRING_DECISION_FIELDS, "pairing selection")
+        unit_id = raw["unit_id"]
+        if type(unit_id) is not str or unit_id in decoded:
+            raise ValueError("pairing selection unit_id must be unique")
+        split = raw["split_sample"]
+        if split is None:
+            if raw["reason"] or raw["reviewer"] or raw["reviewed_at"]:
+                raise ValueError("unreviewed pairing selection metadata must remain empty")
+        else:
+            if type(split) is not int:
+                raise TypeError("pairing selection split_sample must be an integer or null")
+            for field in ("reason", "reviewer"):
+                if type(raw[field]) is not str or not raw[field].strip():
+                    raise ValueError(f"pairing selection {field} must be non-empty")
+            if type(raw["reviewed_at"]) is not str:
+                raise TypeError("pairing selection reviewed_at must be a string")
+            try:
+                parsed = datetime.fromisoformat(raw["reviewed_at"])
+            except ValueError as error:
+                raise ValueError("pairing selection reviewed_at must be ISO-8601") from error
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError("pairing selection reviewed_at must include a timezone")
+        decoded[unit_id] = raw
+    expected_ids: set[str] = {
+        outcome.unit_id for outcome in pairing.groups if outcome.status == "review"
+    }
+    if set(decoded) != expected_ids:
+        raise ValueError("pairing selections must exactly cover review-required units")
+    if any(decoded[unit_id]["split_sample"] is None for unit_id in expected_ids):
+        return None
+    selections: dict[str, int] = {}
+    for unit_id in expected_ids:
+        split = decoded[unit_id]["split_sample"]
+        if type(split) is not int:
+            raise TypeError("confirmed pairing selection must contain an integer split")
+        selections[unit_id] = split
+    corrected = materialize_reviewed_pairing(pairing, selections)
+    new_events: list[ReviewEvent] = []
+    for unit_id in sorted(expected_ids):
+        row = decoded[unit_id]
+        event = _new_review_event(
+            _pairing_entity_id(recording.recording_id, unit_id),
+            "pairing_selected_split",
+            None,
+            row["split_sample"],
+            row,
+        )
+        prior = tuple(
+            item
+            for item in existing
+            if item.entity_id == event.entity_id and item.field == "pairing_selected_split"
+        )
+        if prior:
+            if len(prior) != 1 or prior[0] != event:
+                raise ValueError("pairing correction conflicts with existing review history")
+        else:
+            new_events.append(event)
+    return run_directory, pairing, original_bytes, corrected, tuple(new_events)
+
+
+def _import_pairing_corrections(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    selection: PilotSelection,
+    recordings: tuple[RecordingRecord, ...],
+    existing: tuple[ReviewEvent, ...],
+) -> bool | None:
+    by_id = {record.recording_id: record for record in recordings}
+    segmented_items: list[RecordingRecord] = []
+    for recording_id, expected_hash in zip(
+        selection.recording_ids, selection.inventory_hashes, strict=True
+    ):
+        record = by_id.get(recording_id)
+        if record is None or record.sha256 != expected_hash:
+            raise ValueError("selection does not match recordings")
+        if record.state is CorpusState.SEGMENTED:
+            segmented_items.append(record)
+    segmented = tuple(segmented_items)
+    if not segmented:
+        return None
+    submissions: list[tuple[RecordingRecord, Path, PairingRecording, bytes, PairingRecording]] = []
+    new_events: list[ReviewEvent] = []
+    all_confirmed = True
+    for recording in segmented:
+        submission = _load_pairing_correction_submission(
+            paths, config, recording, (*existing, *new_events)
+        )
+        if submission is None:
+            all_confirmed = False
+            continue
+        run_directory, pairing, original_bytes, corrected, events = submission
+        submissions.append((recording, run_directory, pairing, original_bytes, corrected))
+        new_events.extend(events)
+    review_path = paths.manifests / "review.jsonl"
+    if new_events:
+        write_jsonl_atomic(review_path, (event.to_dict() for event in (*existing, *new_events)))
+    current = recordings
+    indexes = {record.recording_id: index for index, record in enumerate(recordings)}
+    for recording, run_directory, pairing, original_bytes, corrected in submissions:
+        automatic_path = run_directory / "pairing-automatic.json"
+        if automatic_path.exists():
+            if _digest(automatic_path) != hashlib.sha256(original_bytes).hexdigest():
+                raise ValueError("preserved automatic pairing differs from submitted correction")
+        else:
+            _write_bytes_atomic(automatic_path, original_bytes)
+        pairing_path = run_directory / "pairing.json"
+        write_jsonl_atomic(pairing_path, (pairing_to_dict(corrected),))
+        index = indexes[recording.recording_id]
+        timestamp = datetime.now(timezone.utc).isoformat()
+        advanced, processing_event = advance_recording(
+            current[index],
+            CorpusState.PAIRED,
+            input_sha256s=(
+                recording.sha256,
+                hashlib.sha256(original_bytes).hexdigest(),
+                _digest(pairing_path),
+                _digest(review_path),
+            ),
+            config_sha256=config.digest,
+            tool_versions=("human-pairing-review-v1", pairing.ffmpeg_version),
+            started_at=timestamp,
+            finished_at=timestamp,
+            result="success",
+        )
+        current = (*current[:index], advanced, *current[index + 1 :])
+        persist_recording_transition(
+            recordings_path=paths.manifests / "recordings.jsonl",
+            events_path=run_directory.parent / "processing-events.jsonl",
+            recordings=current,
+            event=processing_event,
+        )
+    return all_confirmed
+
+
 def import_review_bundle(
     paths: CorpusPaths,
     config: CorpusConfig,
@@ -1320,8 +1651,15 @@ def import_review_bundle(
         raise ValueError("recordings contain duplicate recording_id")
     review_path = paths.manifests / "review.jsonl"
     existing = _load_existing_review_events(review_path)
+    correction_result = _import_pairing_corrections(paths, config, selection, recordings, existing)
+    if correction_result is not None:
+        return correction_result
     events_by_entity: dict[str, list[ReviewEvent]] = {}
     for event in existing:
+        if event.field == "pairing_selected_split":
+            if type(event.before) is not type(None) or type(event.after) is not int:
+                raise ValueError("pairing correction review history is invalid")
+            continue
         events_by_entity.setdefault(event.entity_id, []).append(event)
     automatic_by_entity: dict[str, dict[str, Any]] = {}
     decision_rows: dict[str, dict[str, Any]] = {}

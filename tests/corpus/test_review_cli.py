@@ -12,6 +12,7 @@ import pytest
 from latintts.corpus import store
 from latintts.corpus.cli import align_corpus, main, pair_corpus
 from latintts.corpus.config import CorpusConfig
+from latintts.corpus.pairing import pairing_from_dict
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.review import (
     ReviewedWordSpan,
@@ -77,6 +78,28 @@ def _aligned_project(tmp_path: Path) -> tuple[CorpusPaths, CorpusConfig]:
     )
     assert align_corpus(paths, config, backend)
     return paths, config
+
+
+def _review_required_project(
+    tmp_path: Path,
+) -> tuple[CorpusPaths, CorpusConfig, _FakeAligner]:
+    paths, config = _set_up(tmp_path)
+    config_path = tmp_path / "config" / "corpus" / "pilot-v1.json"
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    raw_config["pairing"]["minimum_duration_ratio"] = 1.0
+    raw_config["pairing"]["maximum_duration_ratio"] = 1.0
+    config_path.write_text(json.dumps(raw_config), encoding="utf-8")
+    config = CorpusConfig.load(config_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert not pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    return paths, config, backend
 
 
 def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
@@ -159,6 +182,48 @@ def test_export_review_bundle_writes_strict_human_artifacts_from_source_audio(
     html = (group / "index.html").read_text(encoding="utf-8")
     assert '<Pater & "Noster">' not in html
     assert "&lt;Pater &amp; &quot;Noster&quot;&gt;" in html
+
+
+def test_review_required_pairing_can_only_materialize_a_saved_human_selection(
+    tmp_path: Path,
+) -> None:
+    paths, config, backend = _review_required_project(tmp_path)
+
+    correction = export_review_bundle(paths, config)[0]
+    automatic = json.loads((correction / "automatic.json").read_text(encoding="utf-8"))
+    decision_path = correction / "decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    assert decision["schema_version"] == "2"
+    assert decision["pairing_selections"][0]["split_sample"] is None
+    assert not import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "SEGMENTED"
+
+    saved_splits = {
+        unit["unit_id"]: unit["candidates"][0]["split_sample"] for unit in automatic["review_units"]
+    }
+    for row in decision["pairing_selections"]:
+        row.update(
+            split_sample=saved_splits[row["unit_id"]],
+            reason="listened to both preserved candidates",
+            reviewer="owner",
+            reviewed_at="2026-07-19T12:00:00+08:00",
+        )
+    decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+    assert import_review_bundle(paths, config)
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "PAIRED"
+    event = read_jsonl(paths.manifests / "review.jsonl")[-1]
+    assert event["field"] == "pairing_selected_split"
+    assert event["after"] in saved_splits.values()
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    assert (run_directory / "pairing-automatic.json").is_file()
+    corrected = pairing_from_dict(read_jsonl(run_directory / "pairing.json")[0])
+    assert all(outcome.status == "selected" for outcome in corrected.groups)
+
+    assert align_corpus(paths, config, backend)
+    groups = export_review_bundle(paths, config)
+    assert len(groups) == 3
+    assert all(group.name != "pairing-correction" for group in groups)
 
 
 def _set_decisions(

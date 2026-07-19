@@ -1189,11 +1189,81 @@ def _enrich_group(group: RepetitionGroup) -> RepetitionGroup:
     )
 
 
+def materialize_reviewed_pairing(
+    pairing: PairingRecording, selections: dict[str, int]
+) -> PairingRecording:
+    """Select only preserved split evidence after an explicit human correction."""
+    if type(pairing) is not PairingRecording:
+        raise TypeError("pairing must be a PairingRecording")
+    if type(selections) is not dict or any(
+        type(unit_id) is not str or not unit_id or type(split) is not int
+        for unit_id, split in selections.items()
+    ):
+        raise TypeError("pairing selections must map unit IDs to integer split samples")
+    validated = pairing_from_dict(pairing_to_dict(pairing))
+    review_units = {outcome.unit_id for outcome in validated.groups if outcome.status == "review"}
+    if set(selections) != review_units:
+        raise ValueError("pairing selections must exactly cover review-required units")
+    windows = {window.unit_id: window for window in validated.windows}
+    corrected: list[PairingGroupOutcome] = []
+    for outcome in validated.groups:
+        if outcome.status == "selected":
+            corrected.append(outcome)
+            continue
+        selected = tuple(
+            candidate
+            for candidate in outcome.candidates
+            if candidate.split_sample == selections[outcome.unit_id]
+        )
+        if len(selected) != 1:
+            raise ValueError("pairing selection must identify exactly one saved candidate")
+        evidence = selected[0]
+        window = windows[outcome.unit_id]
+        group_id = (
+            window.unit_id
+            if window.unit_id.startswith(f"{validated.recording_id}-")
+            else f"{validated.recording_id}-{window.unit_id}"
+        )
+        group = _enrich_group(
+            RepetitionGroup(
+                group_id,
+                validated.recording_id,
+                window.unit_id,
+                window.text,
+                (
+                    TakeCandidate(1, window.start_sample, evidence.split_sample),
+                    TakeCandidate(2, evidence.split_sample, window.end_sample),
+                ),
+                evidence,
+            )
+        )
+        corrected.append(
+            PairingGroupOutcome(outcome.unit_id, "selected", None, outcome.candidates, group)
+        )
+    result = PairingRecording(
+        validated.schema_version,
+        validated.recording_id,
+        validated.config_sha256,
+        validated.segmentation_artifact_sha256,
+        validated.analysis_audio_relative_path,
+        validated.analysis_audio_sha256,
+        validated.ffmpeg_version,
+        validated.alignment_runtime_sha256s,
+        validated.cache_key,
+        validated.pairing_parameters,
+        validated.windows,
+        tuple(corrected),
+    )
+    return pairing_from_dict(pairing_to_dict(result))
+
+
 def _validate_cached_evidence(
     result: PairingRecording,
     paths: CorpusPaths,
     backend: PairingBackend,
     run_directory: Path,
+    *,
+    allow_reviewed_selection: bool = False,
 ) -> None:
     _validate_analysis_reference(
         result.analysis_audio_relative_path, result.analysis_audio_sha256, paths
@@ -1319,7 +1389,14 @@ def _validate_cached_evidence(
             expected_outcome = PairingGroupOutcome(
                 window.unit_id, "selected", None, candidates, group
             )
-        if outcome != expected_outcome:
+        human_selected_saved_candidate = (
+            allow_reviewed_selection
+            and outcome.status == "selected"
+            and outcome.group is not None
+            and outcome.candidates == candidates
+            and outcome.group.selected_evidence in candidates
+        )
+        if outcome != expected_outcome and not human_selected_saved_candidate:
             raise ValueError("cached pairing decision does not match recomputed evidence")
     if tuple(sorted(runtime_sha256s)) != result.alignment_runtime_sha256s:
         raise ValueError("cached alignment runtime identities do not match pairing")
@@ -1528,10 +1605,18 @@ def load_selected_alignments(
     pairing: PairingRecording,
     paths: CorpusPaths,
     backend: PairingBackend,
+    *,
+    allow_reviewed_selection: bool = False,
 ) -> tuple[SelectedTakeAlignment, ...]:
     """Load and strictly validate selected alignment cache entries without recomputation."""
     run_directory = pairing_run_directory(paths, pairing.config_sha256, pairing.recording_id)
-    _validate_cached_evidence(pairing, paths, backend, run_directory)
+    _validate_cached_evidence(
+        pairing,
+        paths,
+        backend,
+        run_directory,
+        allow_reviewed_selection=allow_reviewed_selection,
+    )
     selected: list[SelectedTakeAlignment] = []
     for outcome in pairing.groups:
         if outcome.status == "review":

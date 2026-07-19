@@ -44,6 +44,7 @@ from latintts.corpus.records import (
     AudioMetadata,
     ProcessingEvent,
     RecordingRecord,
+    ReviewEvent,
     SourceCandidateIntake,
     TranscriptIntakeRow,
     advance_recording,
@@ -1537,6 +1538,67 @@ def _pairing_tool_versions(pairing: PairingRecording, stage: str) -> tuple[str, 
     )
 
 
+def _human_pairing_transition_exists(
+    events: tuple[dict[str, Any], ...],
+    record: RecordingRecord,
+    pairing: PairingRecording,
+    pairing_sha256: str,
+    config: CorpusConfig,
+    paths: CorpusPaths,
+    run_directory: Path,
+) -> bool:
+    automatic_path = run_directory / "pairing-automatic.json"
+    review_path = paths.manifests / "review.jsonl"
+    if not automatic_path.is_file() or not review_path.is_file():
+        return False
+    automatic_sha256 = hashlib.sha256(automatic_path.read_bytes()).hexdigest()
+    automatic_rows = read_jsonl(automatic_path)
+    if len(automatic_rows) != 1:
+        return False
+    automatic_pairing = pairing_from_dict(automatic_rows[0])
+    review_events = tuple(ReviewEvent.from_dict(row) for row in read_jsonl(review_path))
+    selected_by_unit = {outcome.unit_id: outcome for outcome in pairing.groups}
+    for original in automatic_pairing.groups:
+        corrected = selected_by_unit.get(original.unit_id)
+        if original.status == "selected":
+            if corrected != original:
+                return False
+            continue
+        if corrected is None or corrected.status != "selected" or corrected.group is None:
+            return False
+        entity_id = (
+            f"pairing:{len(record.recording_id)}:{record.recording_id}:"
+            f"{len(original.unit_id)}:{original.unit_id}"
+        )
+        matching_events = tuple(
+            event
+            for event in review_events
+            if event.entity_id == entity_id and event.field == "pairing_selected_split"
+        )
+        if (
+            len(matching_events) != 1
+            or matching_events[0].before is not None
+            or matching_events[0].after != corrected.group.selected_evidence.split_sample
+        ):
+            return False
+    decoded = tuple(ProcessingEvent.from_dict(row) for row in events)
+    matching = tuple(
+        event
+        for event in decoded
+        if event.recording_id == record.recording_id
+        and event.previous_state is CorpusState.SEGMENTED
+        and event.target_state is CorpusState.PAIRED
+        and len(event.input_sha256s) == 4
+        and event.input_sha256s[0] == record.sha256
+        and event.input_sha256s[1] == automatic_sha256
+        and event.input_sha256s[2] == pairing_sha256
+        and event.config_sha256 == config.digest
+        and event.tool_versions == ("human-pairing-review-v1", pairing.ffmpeg_version)
+        and event.result == "success"
+    )
+    return len(matching) == 1 and processing_event_exists(events, matching[0])
+
+
 def pair_corpus(
     paths: CorpusPaths,
     config: CorpusConfig,
@@ -1650,10 +1712,14 @@ def _alignment_row(
     pairing: Any,
     paths: CorpusPaths,
     backend: PairingBackend,
+    *,
+    allow_reviewed_pairing: bool = False,
 ) -> dict[str, Any]:
     if any(outcome.status != "selected" or outcome.group is None for outcome in pairing.groups):
         raise ValueError("alignment requires selected outcomes for every spoken unit")
-    selected = load_selected_alignments(pairing, paths, backend)
+    selected = load_selected_alignments(
+        pairing, paths, backend, allow_reviewed_selection=allow_reviewed_pairing
+    )
     issues: list[dict[str, Any]] = []
     pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
     takes = [
@@ -1733,9 +1799,18 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
             )
             events_path = run_directory.parent / "processing-events.jsonl"
             events = read_jsonl(events_path)
-            if not processing_event_exists(events, paired_event):
+            human_reviewed = _human_pairing_transition_exists(
+                events, record, pairing, pairing_sha256, config, paths, run_directory
+            )
+            if not human_reviewed and not processing_event_exists(events, paired_event):
                 raise ValueError("pairing artifact is not bound to its PAIRED event")
-            expected = _alignment_row(pairing_path, pairing, paths, backend)
+            expected = _alignment_row(
+                pairing_path,
+                pairing,
+                paths,
+                backend,
+                allow_reviewed_pairing=human_reviewed,
+            )
         except (KeyError, OSError, TypeError, ValueError) as error:
             raise CorpusFailure(
                 "CACHE_ARTIFACT_INVALID", "selected alignment cache is invalid"

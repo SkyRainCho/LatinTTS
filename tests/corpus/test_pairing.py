@@ -25,6 +25,7 @@ from latintts.corpus.pairing import (
     TextUnitWindow,
     choose_split,
     map_text_units,
+    materialize_reviewed_pairing,
     pair_recording,
     pairing_from_dict,
     pairing_run_directory,
@@ -427,6 +428,40 @@ def test_pair_recording_preserves_text_mismatch_evidence_for_review(tmp_path: Pa
     assert outcome.group is None
     assert len(outcome.candidates) == 1
     assert outcome.candidates[0].word_order_same is False
+
+    corrected = materialize_reviewed_pairing(result, {"unit-1": outcome.candidates[0].split_sample})
+
+    selected = corrected.groups[0]
+    assert selected.status == "selected"
+    assert selected.issue_code is None
+    assert selected.group is not None
+    assert selected.group.selected_evidence == outcome.candidates[0]
+    assert selected.group.takes[0].end_sample == outcome.candidates[0].split_sample
+    assert pairing_from_dict(pairing_to_dict(corrected)) == corrected
+
+
+def test_materialize_reviewed_pairing_rejects_unsaved_or_incomplete_selection(
+    tmp_path: Path,
+) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    result = pair_recording(
+        "rec-1",
+        (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(mismatched=True),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    split = result.groups[0].candidates[0].split_sample
+
+    with pytest.raises(ValueError, match=r"saved|candidate"):
+        materialize_reviewed_pairing(result, {"unit-1": split + 1})
+    with pytest.raises(ValueError, match=r"exact|selection"):
+        materialize_reviewed_pairing(result, {})
 
 
 def test_pair_recording_preserves_word_text_drift_as_text_mismatch_review(tmp_path: Path) -> None:
