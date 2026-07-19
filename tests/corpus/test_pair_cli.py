@@ -307,6 +307,21 @@ def test_pair_corpus_rejects_sung_or_wrong_state_before_writing(
     assert not (paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json").exists()
 
 
+def test_pair_rejects_constructed_root_before_reading_segmentation(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    drifted = replace(paths, alignments=paths.alignments / "unexpected")
+    with pytest.raises(ValueError, match="fixed corpus root"):
+        pair_corpus(
+            drifted,
+            config,
+            _FakeAligner(),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert not (drifted.alignments / "runs").exists()
+
+
 def test_pair_corpus_rejects_tampered_strict_pairing_cache(tmp_path: Path) -> None:
     paths, config = _set_up(tmp_path)
     _segment(paths, config)

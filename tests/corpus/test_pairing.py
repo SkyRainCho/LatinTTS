@@ -15,7 +15,7 @@ from latintts.corpus.alignment import (
     AlignmentToken,
     WordSpan,
 )
-from latintts.corpus.audio import derive_analysis_audio
+from latintts.corpus.audio import DerivedAudio, derive_analysis_audio
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure
 from latintts.corpus.pairing import (
@@ -1036,6 +1036,298 @@ def test_pair_recording_recomputes_cached_decision_despite_valid_artifact_integr
             run_command=_audio_command,
         )
     assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def _resign_candidate(raw: dict[str, object], **changes: object) -> dict[str, object]:
+    resigned = deepcopy(raw)
+    resigned.update(changes)
+    identity = {
+        "schema_version": "1",
+        "mode": resigned["mode"],
+        "source_relative_path": resigned["source_relative_path"],
+        "source_sha256": resigned["source_sha256"],
+        "config_sha256": resigned["config_sha256"],
+        "output_config_sha256": resigned["output_config_sha256"],
+        "ffmpeg_version": resigned["ffmpeg_version"],
+        "start_seconds": float(resigned["start_seconds"]).hex(),
+        "end_seconds": float(resigned["end_seconds"]).hex(),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    cache_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    resigned["cache_key"] = cache_key
+    resigned["relative_path"] = f"derived/corpus-v1/segments/candidates/candidate-{cache_key}.wav"
+    return resigned
+
+
+def test_pair_recording_rejects_candidate_swapped_from_another_window(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    source_window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    source = pair_recording(
+        "rec-1",
+        (source_window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    evidence = source.groups[0].candidates[0]
+    extracted = iter((evidence.first_audio, evidence.second_audio))
+
+    with pytest.raises(ValueError, match=r"boundary|sample"):
+        pair_recording(
+            "rec-2",
+            (TextUnitWindow("unit-2", "Pater noster", 8_000, 160_000, ((78_000, 82_000),), 0, 2),),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+            extract_candidate=lambda *_args, **_kwargs: next(extracted),  # type: ignore[arg-type]
+        )
+
+
+def test_pair_recording_rejects_candidate_pcm_count_drift(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    source = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    evidence = source.groups[0].candidates[0]
+    audio_items: list[DerivedAudio] = []
+    for audio in (evidence.first_audio, evidence.second_audio):
+        assert audio is not None and audio.metrics is not None
+        audio_items.append(
+            replace(
+                audio, metrics=replace(audio.metrics, sample_count=audio.metrics.sample_count + 2)
+            )
+        )
+    extracted = iter(audio_items)
+    with pytest.raises(ValueError, match="sample_count"):
+        pair_recording(
+            "rec-2",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+            extract_candidate=lambda *_args, **_kwargs: next(extracted),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("mismatch", ("path", "hash"))
+def test_pair_recording_rejects_alignment_request_candidate_mismatch(
+    tmp_path: Path, mismatch: str
+) -> None:
+    class MismatchedRequestAligner(_FakeAligner):
+        def build_request(self, **kwargs: object) -> AlignmentRequest:
+            request = super().build_request(**kwargs)  # type: ignore[arg-type]
+            return AlignmentRequest(
+                audio_path=(
+                    request.audio_path.with_name("wrong.wav")
+                    if mismatch == "path"
+                    else request.audio_path
+                ),
+                audio_sha256="f" * 64 if mismatch == "hash" else request.audio_sha256,
+                spoken_text=request.spoken_text,
+                segmentation_artifact_sha256=request.segmentation_artifact_sha256,
+                backend=request.backend,
+                backend_version=request.backend_version,
+                model_id=request.model_id,
+                model_revision=request.model_revision,
+                model_license=request.model_license,
+                config_sha256=request.config_sha256,
+                effective_parameters=dict(request.effective_parameters),
+                alignment_transform_version=request.alignment_transform_version,
+            )
+
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    with pytest.raises(ValueError, match=r"request.*audio"):
+        pair_recording(
+            "rec-1",
+            (TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2),),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            MismatchedRequestAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+
+def test_pair_recording_rejects_resigned_cached_candidate_source(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    result = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    raw = pairing_to_dict(result)
+    original_audio = raw["groups"][0]["candidates"][0]["first_audio"]
+    resigned = _resign_candidate(original_audio, source_sha256="f" * 64)
+    original_path = paths.resolve_local(original_audio["relative_path"])
+    resigned_path = paths.resolve_local(resigned["relative_path"])
+    resigned_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(original_path, resigned_path)
+    raw["groups"][0]["candidates"][0]["first_audio"] = deepcopy(resigned)
+    raw["groups"][0]["group"]["selected_evidence"]["first_audio"] = deepcopy(resigned)
+    raw["groups"][0]["group"]["takes"][0]["audio_relative_path"] = resigned["relative_path"]
+    payload = {key: value for key, value in raw.items() if key != "integrity_sha256"}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    raw["integrity_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    write_jsonl_atomic(paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json", (raw,))
+    with pytest.raises(CorpusFailure) as error:
+        pair_recording(
+            "rec-1",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_pair_recording_rejects_resigned_cached_candidate_boundary(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    result = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    raw = pairing_to_dict(result)
+    original_audio = raw["groups"][0]["candidates"][0]["first_audio"]
+    resigned = _resign_candidate(original_audio, start_seconds=0.5, end_seconds=5.5)
+    original_path = paths.resolve_local(original_audio["relative_path"])
+    resigned_path = paths.resolve_local(resigned["relative_path"])
+    resigned_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(original_path, resigned_path)
+    raw["groups"][0]["candidates"][0]["first_audio"] = deepcopy(resigned)
+    raw["groups"][0]["group"]["selected_evidence"]["first_audio"] = deepcopy(resigned)
+    raw["groups"][0]["group"]["takes"][0]["audio_relative_path"] = resigned["relative_path"]
+    payload = {key: value for key, value in raw.items() if key != "integrity_sha256"}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    raw["integrity_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    write_jsonl_atomic(paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json", (raw,))
+    with pytest.raises(CorpusFailure) as error:
+        pair_recording(
+            "rec-1",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_pair_recording_rejects_resigned_candidate_output_format(tmp_path: Path) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    source = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        _FakeAligner(),
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    evidence = source.groups[0].candidates[0]
+    resigned_items: list[DerivedAudio] = []
+    for audio in (evidence.first_audio, evidence.second_audio):
+        assert audio is not None
+        resigned_raw = _resign_candidate(audio.to_dict(), output_config_sha256="f" * 64)
+        resigned = DerivedAudio.from_dict(resigned_raw)
+        original_path = paths.resolve_local(audio.relative_path)
+        resigned_path = paths.resolve_local(resigned.relative_path)
+        resigned_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(original_path, resigned_path)
+        resigned_items.append(resigned)
+    extracted = iter(resigned_items)
+    with pytest.raises(ValueError, match=r"format|PCM16"):
+        pair_recording(
+            "rec-2",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            _FakeAligner(),
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+            extract_candidate=lambda *_args, **_kwargs: next(extracted),  # type: ignore[arg-type]
+        )
+
+
+def test_pairing_run_directory_rejects_constructed_layout_field_drift(tmp_path: Path) -> None:
+    paths, config, _ = _analysis_fixture(tmp_path)
+    drifted = replace(paths, local_data=tmp_path / "other-local-data")
+    with pytest.raises(ValueError, match="fixed corpus root"):
+        pairing_run_directory(drifted, config.digest, "rec-1")
+
+
+def test_pairing_run_directory_rejects_ancestor_alias(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside-local-data"
+    outside.mkdir()
+    try:
+        (project / "local-data").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this Windows host")
+    paths = CorpusPaths.from_project_root(project)
+    with pytest.raises(ValueError, match="alias"):
+        pairing_run_directory(paths, "a" * 64, "rec-1")
 
 
 def test_pair_recording_rejects_aliased_config_run_root(tmp_path: Path) -> None:
