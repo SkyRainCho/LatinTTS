@@ -1454,6 +1454,13 @@ class _PairingCorrectionSubmission:
     new_events: tuple[ReviewEvent, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _PairingCorrectionPreflight:
+    corrected_sha256: str
+    review_snapshot_sha256: str
+    correction_events: tuple[ReviewEvent, ...]
+
+
 def _pairing_entity_id(recording_id: str, unit_id: str) -> str:
     return f"pairing:{len(recording_id)}:{recording_id}:{len(unit_id)}:{unit_id}"
 
@@ -1693,8 +1700,9 @@ def _load_pairing_correction_submission(
     )
 
 
-def _review_snapshot_rows(review_path: Path, expected_sha256: str) -> tuple[dict[str, Any], ...]:
-    journal = review_path.read_bytes()
+def _review_snapshot_rows_from_bytes(
+    journal: bytes, expected_sha256: str
+) -> tuple[dict[str, Any], ...]:
     digest = hashlib.sha256()
     prefix_length = 0
     for encoded_line in journal.splitlines(keepends=True):
@@ -1731,6 +1739,23 @@ def _review_snapshot_rows(review_path: Path, expected_sha256: str) -> tuple[dict
     return tuple(rows)
 
 
+def _review_snapshot_rows(review_path: Path, expected_sha256: str) -> tuple[dict[str, Any], ...]:
+    return _review_snapshot_rows_from_bytes(review_path.read_bytes(), expected_sha256)
+
+
+def _validate_pairing_review_snapshot_bytes(
+    journal: bytes,
+    snapshot_sha256: str,
+    original: PairingRecording,
+    corrected: PairingRecording,
+) -> tuple[ReviewEvent, ...]:
+    prefix_events = tuple(
+        ReviewEvent.from_dict(row)
+        for row in _review_snapshot_rows_from_bytes(journal, snapshot_sha256)
+    )
+    return validate_pairing_correction_events(original, corrected, prefix_events)
+
+
 def validate_pairing_review_snapshot(
     review_path: Path,
     snapshot_sha256: str,
@@ -1738,10 +1763,13 @@ def validate_pairing_review_snapshot(
     corrected: PairingRecording,
 ) -> tuple[ReviewEvent, ...]:
     _load_existing_review_events(review_path)
-    prefix_events = tuple(
-        ReviewEvent.from_dict(row) for row in _review_snapshot_rows(review_path, snapshot_sha256)
+    return _validate_pairing_review_snapshot_bytes(
+        review_path.read_bytes(), snapshot_sha256, original, corrected
     )
-    return validate_pairing_correction_events(original, corrected, prefix_events)
+
+
+def _review_events_bytes(events: tuple[ReviewEvent, ...]) -> bytes:
+    return b"".join((_canonical_json(event.to_dict()) + "\n").encode("utf-8") for event in events)
 
 
 def _pairing_review_snapshot_sha256(
@@ -1751,7 +1779,8 @@ def _pairing_review_snapshot_sha256(
     submission: _PairingCorrectionSubmission,
     config: CorpusConfig,
     corrected_sha256: str,
-) -> tuple[str, tuple[ReviewEvent, ...]]:
+    prospective_review_bytes: bytes,
+) -> _PairingCorrectionPreflight:
     automatic_sha256 = hashlib.sha256(submission.original_bytes).hexdigest()
     tool_versions = (
         "human-pairing-review-v1",
@@ -1759,29 +1788,38 @@ def _pairing_review_snapshot_sha256(
     )
     rows = read_jsonl(events_path) if events_path.exists() else ()
     decoded = tuple(ProcessingEvent.from_dict(row) for row in rows)
-    matching = tuple(
+    transitions = tuple(
         event
         for event in decoded
         if event.recording_id == recording.recording_id
         and event.previous_state is CorpusState.SEGMENTED
         and event.target_state is CorpusState.PAIRED
-        and len(event.input_sha256s) == 4
+    )
+    matching = tuple(
+        event
+        for event in transitions
+        if len(event.input_sha256s) == 4
         and event.input_sha256s[:3] == (recording.sha256, automatic_sha256, corrected_sha256)
         and event.config_sha256 == config.digest
         and event.tool_versions == tool_versions
         and event.result == "success"
     )
     if not matching:
-        snapshot_sha256 = _digest(review_path)
-        correction_events = validate_pairing_review_snapshot(
-            review_path,
+        if transitions:
+            raise ValueError("pairing correction has a conflicting processing transition")
+        snapshot_sha256 = hashlib.sha256(prospective_review_bytes).hexdigest()
+        correction_events = _validate_pairing_review_snapshot_bytes(
+            prospective_review_bytes,
             snapshot_sha256,
             submission.original_pairing,
             submission.corrected_pairing,
         )
-        return snapshot_sha256, correction_events
+        return _PairingCorrectionPreflight(corrected_sha256, snapshot_sha256, correction_events)
     if len(matching) != 1:
         raise ValueError("pairing correction has duplicate processing transitions")
+    automatic_path = submission.run_directory / "pairing-automatic.json"
+    if not automatic_path.is_file() or submission.pairing_needs_write:
+        raise ValueError("pairing correction processing transition precedes durable artifacts")
     snapshot_sha256 = matching[0].input_sha256s[3]
     correction_events = validate_pairing_review_snapshot(
         review_path,
@@ -1807,7 +1845,7 @@ def _pairing_review_snapshot_sha256(
     )
     if not processing_event_exists(rows, expected):
         raise ValueError("pairing correction processing transition is invalid")
-    return snapshot_sha256, correction_events
+    return _PairingCorrectionPreflight(corrected_sha256, snapshot_sha256, correction_events)
 
 
 def _import_pairing_corrections(
@@ -1843,11 +1881,27 @@ def _import_pairing_corrections(
         submissions.append((recording, submission))
         new_events.extend(submission.new_events)
     review_path = paths.manifests / "review.jsonl"
+    prospective_events = (*existing, *new_events)
+    prospective_review_bytes = _review_events_bytes(prospective_events)
+    preflights: list[_PairingCorrectionPreflight] = []
+    for recording, submission in submissions:
+        corrected_sha256 = hashlib.sha256(submission.corrected_bytes).hexdigest()
+        preflights.append(
+            _pairing_review_snapshot_sha256(
+                review_path,
+                submission.run_directory.parent / "processing-events.jsonl",
+                recording,
+                submission,
+                config,
+                corrected_sha256,
+                prospective_review_bytes,
+            )
+        )
     if new_events:
-        write_jsonl_atomic(review_path, (event.to_dict() for event in (*existing, *new_events)))
+        write_jsonl_atomic(review_path, (event.to_dict() for event in prospective_events))
     current = recordings
     indexes = {record.recording_id: index for index, record in enumerate(recordings)}
-    for recording, submission in submissions:
+    for (recording, submission), preflight in zip(submissions, preflights, strict=True):
         run_directory = submission.run_directory
         automatic_path = run_directory / "pairing-automatic.json"
         if automatic_path.exists():
@@ -1868,16 +1922,10 @@ def _import_pairing_corrections(
             raise ValueError("corrected pairing bytes changed during correction recovery")
         index = indexes[recording.recording_id]
         corrected_sha256 = _digest(pairing_path)
+        if corrected_sha256 != preflight.corrected_sha256:
+            raise ValueError("corrected pairing differs from recovery preflight")
         events_path = run_directory.parent / "processing-events.jsonl"
-        review_snapshot_sha256, bound_correction_events = _pairing_review_snapshot_sha256(
-            review_path,
-            events_path,
-            recording,
-            submission,
-            config,
-            corrected_sha256,
-        )
-        timestamp = max(event.reviewed_at for event in bound_correction_events)
+        timestamp = max(event.reviewed_at for event in preflight.correction_events)
         advanced, processing_event = advance_recording(
             current[index],
             CorpusState.PAIRED,
@@ -1885,7 +1933,7 @@ def _import_pairing_corrections(
                 recording.sha256,
                 hashlib.sha256(submission.original_bytes).hexdigest(),
                 corrected_sha256,
-                review_snapshot_sha256,
+                preflight.review_snapshot_sha256,
             ),
             config_sha256=config.digest,
             tool_versions=(

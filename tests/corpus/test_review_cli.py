@@ -762,6 +762,57 @@ def test_pairing_correction_recovery_rejects_snapshot_before_correction_without_
     assert _file_snapshot(observed_paths) == before
 
 
+def test_pairing_correction_preflight_rejects_old_event_before_appending_missing_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config, _ = _review_required_project(tmp_path)
+    correction = export_review_bundle(paths, config)[0]
+    _confirm_pairing_correction(correction)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    real_replace = store.os.replace
+
+    def fail_recordings_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == recordings_path:
+            raise OSError("recordings replace failed")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store.os, "replace", fail_recordings_replace)
+    with pytest.raises(store.RecordingTransitionPersistenceError, match="recovery required"):
+        import_review_bundle(paths, config)
+    monkeypatch.setattr(store.os, "replace", real_replace)
+
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    review_path = paths.manifests / "review.jsonl"
+    processing_path = run_directory.parent / "processing-events.jsonl"
+    unrelated = review_module._new_review_event(
+        "review:old-prefix-only",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "earlier independent review",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T11:00:00+08:00",
+        },
+    )
+    write_jsonl_atomic(review_path, (unrelated.to_dict(),))
+    _bind_pairing_transition_to_prefix(processing_path, review_path.read_bytes())
+    assert all(row["field"] != "pairing_selected_split" for row in read_jsonl(review_path))
+    observed_paths = (
+        review_path,
+        run_directory / "pairing-automatic.json",
+        run_directory / "pairing.json",
+        processing_path,
+        recordings_path,
+    )
+    before = _file_snapshot(observed_paths)
+
+    with pytest.raises(ValueError, match=r"snapshot|correction"):
+        import_review_bundle(paths, config)
+
+    assert _file_snapshot(observed_paths) == before
+
+
 @pytest.mark.parametrize("operation", ("pair", "align"))
 def test_repeated_pair_and_align_reject_reparse_marked_automatic_pairing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
