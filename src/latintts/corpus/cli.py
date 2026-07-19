@@ -26,6 +26,7 @@ from latintts.corpus.inventory import (
     inventory_from_manifests,
     write_intake_skeleton,
 )
+from latintts.corpus.manifest import build_manifest_corpus
 from latintts.corpus.mms_alignment import create_alignment_backend
 from latintts.corpus.pairing import (
     PairingBackend,
@@ -2155,6 +2156,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
     )
+    build_manifest_parser = subparsers.add_parser("build-manifest")
+    build_manifest_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
@@ -2208,6 +2215,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
         return 0
+    if args.command == "build-manifest":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            paths.ensure_layout()
+            successful = build_manifest_corpus(
+                paths,
+                config,
+                ffmpeg_version=_ffmpeg_version(),
+            )
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
+        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
+        return 0 if successful else 1
     if args.command in {"export-review", "import-review"}:
         paths = CorpusPaths.from_project_root(args.project_root)
         config_path = args.config

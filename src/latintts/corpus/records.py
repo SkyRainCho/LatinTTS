@@ -6,7 +6,12 @@ import math
 import re
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import date, datetime
-from typing import Any, Literal
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from latintts.corpus.alignment import WordSpan
+    from latintts.corpus.audio import PcmMetrics
 
 from latintts.corpus.domain import CorpusState, require_transition
 
@@ -335,6 +340,189 @@ class ProcessingEvent:
         raw["target_state"] = self.target_state.value
         raw["input_sha256s"] = list(self.input_sha256s)
         raw["tool_versions"] = list(self.tool_versions)
+        return raw
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentRecord:
+    schema_version: str
+    corpus_version: str
+    config_sha256: str
+    segment_id: str
+    recording_id: str
+    text_unit_id: str
+    repetition_group_id: str
+    take_index: int
+    source_audio_sha256: str
+    source_start_sample: int
+    source_end_sample: int
+    derived_audio_relative_path: str
+    derived_audio_sha256: str
+    source_text_id: str
+    spoken_text: str
+    normalized_text: str
+    pronunciation_schema_version: str
+    rule_version: str
+    ipa_by_token: tuple[str, ...]
+    model_phonemes_by_token: tuple[tuple[str, ...], ...]
+    word_spans: tuple[WordSpan, ...]
+    alignment_backend: str
+    alignment_model_id: str
+    alignment_model_revision: str
+    alignment_model_license: str
+    alignment_level: Literal["word"]
+    phoneme_timing_status: Literal["not_estimated"]
+    quality_metrics: PcmMetrics
+    quality_metric_audio_sha256: str
+    quality_labels: tuple[str, ...]
+    review_event_ids: tuple[str, ...]
+    rights_id: str
+    split: Literal["unassigned"]
+
+    def __post_init__(self) -> None:
+        from latintts.corpus.alignment import WordSpan
+        from latintts.corpus.audio import PcmMetrics
+
+        _require_schema_version(self.schema_version)
+        if self.corpus_version != "corpus-v1" or type(self.corpus_version) is not str:
+            raise ValueError("corpus_version must be corpus-v1")
+        _require_sha256(self.config_sha256, "config_sha256")
+        for value, field in (
+            (self.segment_id, "segment_id"),
+            (self.recording_id, "recording_id"),
+            (self.text_unit_id, "text_unit_id"),
+            (self.repetition_group_id, "repetition_group_id"),
+            (self.source_text_id, "source_text_id"),
+            (self.spoken_text, "spoken_text"),
+            (self.normalized_text, "normalized_text"),
+            (self.alignment_backend, "alignment_backend"),
+            (self.alignment_model_id, "alignment_model_id"),
+            (self.alignment_model_revision, "alignment_model_revision"),
+            (self.alignment_model_license, "alignment_model_license"),
+            (self.rights_id, "rights_id"),
+        ):
+            _require_nonempty_string(value, field)
+        if self.take_index not in (1, 2) or type(self.take_index) is not int:
+            raise ValueError("take_index must be one or two")
+        _require_sha256(self.source_audio_sha256, "source_audio_sha256")
+        if (
+            type(self.source_start_sample) is not int
+            or type(self.source_end_sample) is not int
+            or self.source_start_sample < 0
+            or self.source_end_sample <= self.source_start_sample
+        ):
+            raise ValueError("source sample bounds must be a positive half-open range")
+        path = self.derived_audio_relative_path
+        if (
+            not isinstance(path, str)
+            or not path.startswith("derived/corpus-v1/segments/lossless/")
+            or "\\" in path
+            or PurePosixPath(path).is_absolute()
+            or PurePosixPath(path).as_posix() != path
+            or any(part in ("", ".", "..") for part in path.split("/"))
+        ):
+            raise ValueError("derived_audio_relative_path must be a canonical lossless path")
+        _require_sha256(self.derived_audio_sha256, "derived_audio_sha256")
+        if self.pronunciation_schema_version != "1":
+            raise ValueError("pronunciation_schema_version must be '1'")
+        if self.rule_version != "ecclesiastical-roman-v1":
+            raise ValueError("rule_version must be ecclesiastical-roman-v1")
+        if (
+            type(self.ipa_by_token) is not tuple
+            or not self.ipa_by_token
+            or any(not isinstance(value, str) or not value for value in self.ipa_by_token)
+        ):
+            raise ValueError("ipa_by_token must contain non-empty strings")
+        if (
+            type(self.model_phonemes_by_token) is not tuple
+            or len(self.model_phonemes_by_token) != len(self.ipa_by_token)
+            or any(
+                type(phonemes) is not tuple
+                or not phonemes
+                or any(not isinstance(value, str) or not value for value in phonemes)
+                for phonemes in self.model_phonemes_by_token
+            )
+        ):
+            raise ValueError("model phonemes must be non-empty for every pronunciation token")
+        if (
+            type(self.word_spans) is not tuple
+            or len(self.word_spans) != len(self.ipa_by_token)
+            or any(type(span) is not WordSpan for span in self.word_spans)
+        ):
+            raise ValueError("word_spans must cover every pronunciation token")
+        if any(
+            left.end_seconds > right.start_seconds
+            for left, right in zip(self.word_spans, self.word_spans[1:], strict=False)
+        ):
+            raise ValueError("word_spans must be ordered and non-overlapping")
+        if self.alignment_level != "word" or self.phoneme_timing_status != "not_estimated":
+            raise ValueError("manifest alignment must be word-level without phoneme timing")
+        if type(self.quality_metrics) is not PcmMetrics:
+            raise TypeError("quality_metrics must be PcmMetrics")
+        _require_sha256(self.quality_metric_audio_sha256, "quality_metric_audio_sha256")
+        if type(self.quality_labels) is not tuple or any(
+            not isinstance(label, str) or not label.strip() for label in self.quality_labels
+        ):
+            raise ValueError("quality_labels must be non-empty strings in a tuple")
+        if len(self.quality_labels) != len(set(self.quality_labels)):
+            raise ValueError("quality_labels must be unique")
+        if (
+            type(self.review_event_ids) is not tuple
+            or not self.review_event_ids
+            or any(
+                not isinstance(event_id, str) or not event_id.startswith("review-")
+                for event_id in self.review_event_ids
+            )
+            or len(self.review_event_ids) != len(set(self.review_event_ids))
+        ):
+            raise ValueError("review_event_ids must contain a unique human review event chain")
+        if self.split != "unassigned" or type(self.split) is not str:
+            raise ValueError("split must be unassigned")
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SegmentRecord:
+        from latintts.corpus.alignment import WordSpan
+        from latintts.corpus.audio import PcmMetrics
+
+        require_exact_fields(raw, frozenset(field.name for field in fields(cls)), "segment row")
+        values = dict(raw)
+        tuple_fields = (
+            "ipa_by_token",
+            "model_phonemes_by_token",
+            "word_spans",
+            "quality_labels",
+            "review_event_ids",
+        )
+        if any(type(values[field]) is not list for field in tuple_fields):
+            raise TypeError("segment array fields must be arrays")
+        model = values["model_phonemes_by_token"]
+        if any(type(item) is not list for item in model):
+            raise TypeError("model_phonemes_by_token rows must be arrays")
+        words = values["word_spans"]
+        if any(type(item) is not dict for item in words):
+            raise TypeError("word_spans rows must be objects")
+        metrics = values["quality_metrics"]
+        if type(metrics) is not dict:
+            raise TypeError("quality_metrics must be an object")
+        word_fields = frozenset(field.name for field in fields(WordSpan))
+        for word in words:
+            require_exact_fields(word, word_fields, "segment word span")
+        values["ipa_by_token"] = tuple(values["ipa_by_token"])
+        values["model_phonemes_by_token"] = tuple(tuple(item) for item in model)
+        values["word_spans"] = tuple(WordSpan(**item) for item in words)
+        values["quality_metrics"] = PcmMetrics.from_dict(metrics)
+        values["quality_labels"] = tuple(values["quality_labels"])
+        values["review_event_ids"] = tuple(values["review_event_ids"])
+        return cls(**values)
+
+    def to_dict(self) -> dict[str, Any]:
+        raw = asdict(self)
+        raw["ipa_by_token"] = list(self.ipa_by_token)
+        raw["model_phonemes_by_token"] = [list(item) for item in self.model_phonemes_by_token]
+        raw["word_spans"] = [asdict(word) for word in self.word_spans]
+        raw["quality_metrics"] = self.quality_metrics.to_dict()
+        raw["quality_labels"] = list(self.quality_labels)
+        raw["review_event_ids"] = list(self.review_event_ids)
         return raw
 
 
