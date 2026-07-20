@@ -228,10 +228,7 @@ def persist_recording_transitions(
 
     existing_rows = read_jsonl(recordings_path)
     existing_by_id = {row.get("recording_id"): row for row in existing_rows}
-    if (
-        len(existing_by_id) != len(existing_rows)
-        or set(existing_by_id) != set(target_by_id)
-    ):
+    if len(existing_by_id) != len(existing_rows) or set(existing_by_id) != set(target_by_id):
         raise ValueError("target manifest recording_id set and count must remain unchanged")
     for recording_id, target_record in target_by_id.items():
         existing_row = existing_by_id[recording_id]
