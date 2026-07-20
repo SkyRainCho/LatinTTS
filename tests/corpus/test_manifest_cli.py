@@ -15,10 +15,10 @@ from latintts.corpus import store as store_module
 from latintts.corpus.alignment import result_from_dict
 from latintts.corpus.audio import DerivedAudio, PcmMetrics
 from latintts.corpus.config import CorpusConfig
-from latintts.corpus.domain import CorpusFailure
+from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.manifest import build_approved_segments, build_manifest_corpus
 from latintts.corpus.pairing import pairing_from_dict
-from latintts.corpus.records import ReviewEvent, RightsRecord
+from latintts.corpus.records import ReviewEvent, RightsRecord, advance_recording
 from latintts.corpus.store import read_jsonl, write_jsonl_atomic
 from tests.corpus.test_pairing import _audio_command
 from tests.corpus.test_review_cli import (
@@ -144,7 +144,10 @@ def test_build_manifest_extracts_approved_source_clips_and_advances_state(
         return _audio_command(command, **kwargs)
 
     def probe(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
-        samples = sample_counts[Path(command[-1])]
+        target = Path(command[-1])
+        samples = sample_counts.get(target)
+        if samples is None:
+            samples = int(target.read_bytes().removeprefix(b"fLaCsynthetic"))
         payload = {
             "format": {"duration": str(samples / 48_000)},
             "streams": [
@@ -225,6 +228,43 @@ def test_build_manifest_extracts_approved_source_clips_and_advances_state(
     automatic_path.write_bytes(automatic_bytes)
 
     processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    processing_rows = read_jsonl(processing_path)
+    current_recording = review_module._decode_recording(
+        read_jsonl(paths.manifests / "recordings.jsonl")[0]
+    )
+    reviewed_recording = replace(current_recording, state=CorpusState.REVIEWED)
+    _, legacy_event = advance_recording(
+        reviewed_recording,
+        CorpusState.APPROVED,
+        input_sha256s=(
+            reviewed_recording.sha256,
+            review_module._digest(
+                paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json"
+            ),
+            review_module._digest(
+                paths.alignments / "runs" / config.digest / "rec-1" / "alignment.json"
+            ),
+            review_module._digest(paths.manifests / "review.jsonl"),
+            review_module._digest(manifest_path),
+        ),
+        config_sha256=config.digest,
+        tool_versions=("approved-manifest-v1", "ffmpeg-test-1"),
+        started_at="1970-01-01T00:00:00+00:00",
+        finished_at="1970-01-01T00:00:00+00:00",
+        result="success",
+    )
+    write_jsonl_atomic(processing_path, (*processing_rows[:-1], legacy_event.to_dict()))
+    write_jsonl_atomic(paths.manifests / "recordings.jsonl", (reviewed_recording.to_dict(),))
+    assert build_manifest_corpus(
+        paths,
+        config,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=transcode,
+        probe_command=probe,
+        decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+    )
+    assert read_jsonl(processing_path)[-1] == legacy_event.to_dict()
+
     terminal_events = read_jsonl(processing_path)
     write_jsonl_atomic(processing_path, (*terminal_events, terminal_events[-1]))
     with pytest.raises(ValueError, match=r"duplicate|history"):
