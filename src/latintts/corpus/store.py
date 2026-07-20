@@ -198,3 +198,68 @@ def persist_recording_transition(
         raise RecordingTransitionPersistenceError(
             f"event {event.event_id} persisted; recordings update failed; recovery required"
         ) from error
+
+
+def persist_recording_transitions(
+    *,
+    recordings_path: Path,
+    events_path: Path,
+    recordings: Iterable[RecordingRecord],
+    events: Iterable[ProcessingEvent],
+) -> None:
+    """Publish a complete transition set audit-first, with one replace per durable file."""
+    if recordings_path.resolve() == events_path.resolve():
+        raise ValueError("recordings_path and events_path must be distinct resolved paths")
+    target_records = tuple(recordings)
+    target_rows = tuple(record.to_dict() for record in target_records)
+    expected_events = tuple(events)
+    if not target_records or not expected_events:
+        raise ValueError("batch transition requires non-empty recordings and events")
+    target_by_id = {record.recording_id: record for record in target_records}
+    event_by_id = {event.recording_id: event for event in expected_events}
+    if len(target_by_id) != len(target_records) or len(event_by_id) != len(expected_events):
+        raise ValueError("batch transition identities must be unique")
+    if set(target_by_id) != set(event_by_id):
+        raise ValueError("batch transition must cover every target recording exactly once")
+    for recording_id, event in event_by_id.items():
+        require_transition(event.previous_state, event.target_state)
+        if target_by_id[recording_id].state is not event.target_state:
+            raise ValueError("target manifest state must equal event target_state")
+
+    existing_rows = read_jsonl(recordings_path)
+    existing_by_id = {row.get("recording_id"): row for row in existing_rows}
+    if (
+        len(existing_by_id) != len(existing_rows)
+        or set(existing_by_id) != set(target_by_id)
+    ):
+        raise ValueError("target manifest recording_id set and count must remain unchanged")
+    for recording_id, target_record in target_by_id.items():
+        existing_row = existing_by_id[recording_id]
+        event = event_by_id[recording_id]
+        existing_state = existing_row.get("state")
+        if existing_state not in {event.previous_state.value, event.target_state.value}:
+            raise ValueError("existing manifest state is outside the recoverable transition")
+        target_row = target_record.to_dict()
+        if {key: value for key, value in existing_row.items() if key != "state"} != {
+            key: value for key, value in target_row.items() if key != "state"
+        }:
+            raise ValueError("batch transition may change only recording state")
+
+    existing_events = read_jsonl(events_path) if events_path.exists() else ()
+    missing: list[ProcessingEvent] = []
+    for event in expected_events:
+        exists = processing_event_exists(existing_events, event)
+        existing_state = existing_by_id[event.recording_id]["state"]
+        if existing_state == event.target_state.value and not exists:
+            raise ValueError("terminal recording state lacks its durable processing event")
+        if not exists:
+            missing.append(event)
+    if missing:
+        write_jsonl_atomic(events_path, (*existing_events, *(event.to_dict() for event in missing)))
+    try:
+        write_jsonl_atomic(recordings_path, target_rows)
+    except Exception as error:
+        event_ids = ", ".join(event.event_id for event in expected_events)
+        raise RecordingTransitionPersistenceError(
+            f"events {event_ids} persisted; recordings update failed; recovery required"
+        ) from error

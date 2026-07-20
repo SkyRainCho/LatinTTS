@@ -150,6 +150,85 @@ def test_persist_transition_recovers_manifest_without_duplicate_event(tmp_path: 
     assert read_jsonl(recordings_path) == (updated.to_dict(),)
 
 
+def test_persist_transitions_publishes_all_events_then_one_recordings_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    other = replace(
+        original,
+        recording_id="rec-other",
+        relative_path="raw/spoken/other.wav",
+        sha256="c" * 64,
+    )
+    other_updated, other_event = advance_recording(
+        other,
+        CorpusState.INVENTORIED,
+        input_sha256s=(other.sha256,),
+        config_sha256="b" * 64,
+        tool_versions=("ffprobe=test",),
+        started_at="2026-07-19T10:00:00+08:00",
+        finished_at="2026-07-19T10:00:01+08:00",
+        result="success",
+    )
+    write_jsonl_atomic(recordings_path, (original.to_dict(), other.to_dict()))
+    destinations: list[Path] = []
+    real_replace = store.os.replace
+
+    def observe_replace(source: Path, destination: Path) -> None:
+        destinations.append(Path(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store.os, "replace", observe_replace)
+    store.persist_recording_transitions(
+        recordings_path=recordings_path,
+        events_path=events_path,
+        recordings=(updated, other_updated),
+        events=(event, other_event),
+    )
+
+    assert destinations == [events_path, recordings_path]
+    assert read_jsonl(events_path) == (event.to_dict(), other_event.to_dict())
+    assert read_jsonl(recordings_path) == (updated.to_dict(), other_updated.to_dict())
+
+
+def test_persist_transitions_recovers_mixed_states_and_durable_events_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    other = replace(
+        original,
+        recording_id="rec-other",
+        relative_path="raw/spoken/other.wav",
+        sha256="c" * 64,
+    )
+    other_updated, other_event = advance_recording(
+        other,
+        CorpusState.INVENTORIED,
+        input_sha256s=(other.sha256,),
+        config_sha256="b" * 64,
+        tool_versions=("ffprobe=test",),
+        started_at="2026-07-19T10:00:00+08:00",
+        finished_at="2026-07-19T10:00:01+08:00",
+        result="success",
+    )
+    write_jsonl_atomic(recordings_path, (updated.to_dict(), other.to_dict()))
+    write_jsonl_atomic(events_path, (event.to_dict(), other_event.to_dict()))
+
+    store.persist_recording_transitions(
+        recordings_path=recordings_path,
+        events_path=events_path,
+        recordings=(updated, other_updated),
+        events=(event, other_event),
+    )
+
+    assert read_jsonl(events_path) == (event.to_dict(), other_event.to_dict())
+    assert read_jsonl(recordings_path) == (updated.to_dict(), other_updated.to_dict())
+
+
 @pytest.mark.parametrize(
     ("case", "match"),
     (
