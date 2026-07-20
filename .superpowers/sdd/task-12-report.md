@@ -159,3 +159,48 @@
 - 全量中的 9 个既有 symlink 用例仍因当前 Windows token 缺少 symlink privilege 而条件 skip；本轮新增的 Windows junction/reparse 攻击测试实际执行且通过，不依赖该 privilege。
 - coverage raw value 为 `95.01773870121856%`，严格高于 `95%` 门禁；新增生产分支仍应同步增加行为覆盖。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-20 第三轮审查整改
+
+### Mixed legacy recovery
+
+- terminal recovery 改为逐 recording 证明，不再把全局 `audit_ahead` 误解为“所有 terminal events 必须已经存在”。
+- 已有 terminal recording 必须精确匹配其当前 deterministic 7-input event 或受支持的 legacy 5-input event；legacy inputs 仍严格绑定 raw、pairing、alignment、review 和已持久化 manifest digest，且 recording state 与重建目标一致。
+- 仍为 `REVIEWED` 且没有 terminal event 的 recording 使用当前 7-input 格式生成缺失 event，包含 rights/transcript digests；`persist_recording_transitions()` 对 existing legacy prefix 加 missing current suffix 做 prospective 全 journal 验证后，一次 replace events、一次 replace recordings。
+- all-rejected 与 rec1 approved/rec2 rejected 两种 mixed fixture 均验证 legacy event 原 ID/顺序不变、只追加 rec2 current event、event IDs 唯一、rerun bytes 幂等。
+- legacy input、已持久化 manifest row、terminal state 任一冲突均在写入前 fail closed；review、manifest、events、recordings 和 clips 保持逐字节不变。
+
+### Handle-relative final publication
+
+- Windows 不使用 `SetFileInformationByHandle(FileLinkInfo)`（本机实测返回 `WinError 87`），也没有退回裸 `os.link(full_path)`。实现使用标准库 `ctypes` 调用 `ntdll!NtSetInformationFile(FileLinkInformation)`，以已打开 canonical destination directory handle 作为 `RootDirectory`，只提交 final basename。
+- `CreateFileW`、`GetFileInformationByHandle`、`CloseHandle`、`NtSetInformationFile`、`RtlNtStatusToDosError` 均显式声明 64-bit-safe `argtypes/restype`；unsupported/capability/syscall failure 一律 fail closed。
+- mode-root handle 使用 `FILE_ADD_FILE | FILE_READ_ATTRIBUTES`、`FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`，share mode 不含 `FILE_SHARE_DELETE`。PublicationGuard 持有 candidate/lossless roots，直到 manifest、events、recordings 全部发布并完成最终 identity 复验后才关闭。
+- 每次新 link 前后都验证 lexical root 与 pinned volume/file-index identity；新 target 还要求 source/target file identity 相同、canonical regular file 与 SHA-256 相同。已有 target 只有 canonical 且 hash 精确匹配才幂等接受，否则拒绝。
+- POSIX 分支使用 `O_DIRECTORY | O_NOFOLLOW` 打开根目录，并用 `os.link(..., dst_dir_fd=...)` 做 handle-relative 发布；Windows 全量门禁将该平台专属分支排除 coverage 统计。
+
+### 第三轮 RED -> GREEN 证据
+
+1. mixed all-rejected 与 approved/rejected 旧实现均失败于 `durable terminal event batch is incomplete or conflicts`；逐 recording recovery 后两例 GREEN。
+2. 最后检查/link seam 首先因接口缺失 RED；实现 native handle link 后，正常发布 GREEN，且在最后检查后尝试 `rmdir + junction` 时 sharing violation 阻止替换、outside 为空、manifest/events/state 未发布。
+3. terminal commit seam 在 `persist_recording_transitions()` 入口尝试 rename `lossless` root；PublicationGuard 仍持有 handle，rename 被 sharing violation 阻止，随后正常完成 state commit。
+4. Windows guard 另覆盖 missing root、junction/reparse root、lexical handle identity drift、source/target identity mismatch、unsupported mode 与 guard-close failure。
+5. 新 native 分支首次全量为 `94.52%` 且一个既有并发缓存测试在 coverage 压力下偶发超时；独立/expanded focused 均通过。明确排除不可在 Windows 执行的 POSIX 分支并补齐上述 Windows 防御行为后，最终全量无失败并达到 raw `95.05204404887616%`。
+
+### 第三轮最终门禁
+
+- expanded focused `tests/corpus/test_manifest.py tests/corpus/test_manifest_cli.py tests/corpus/test_audio.py tests/corpus/test_audio_review.py tests/corpus/test_store.py tests/corpus/test_paths.py`：`212 passed, 2 skipped`。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1424 passed, 9 skipped`
+  - displayed coverage：`95.05%`
+  - raw coverage：`95.05204404887616%`（`6629` statements，`328` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（72 files already formatted）。
+- `python -m mypy src`：PASS（31 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第三轮残余边界
+
+- Windows native implementation 依赖 NTFS-compatible `FileLinkInformation`；不支持该能力的卷或运行时会明确 fail closed，不按可替换完整路径回退。
+- 全量 9 个既有 skip 仍来自当前 Windows token 缺少 symlink privilege；本轮 junction/reparse、handle identity 与 sharing-violation 用例均实际执行。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

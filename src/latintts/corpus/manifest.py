@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
@@ -64,6 +66,7 @@ from latintts.normalization import tokenize_words
 
 LosslessExtractor = Callable[..., DerivedAudio]
 AnalysisExtractor = Callable[..., DerivedAudio]
+BeforePublishLink = Callable[[Path], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,8 +616,303 @@ def build_approved_segments(
     return built
 
 
+def _windows_handle_identity(handle: object, *, kind: str) -> tuple[int, int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    ]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    information = ByHandleFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if information.dwFileAttributes & reparse_flag:
+        raise ValueError(f"{kind} handle is a reparse point")
+    return (
+        information.dwVolumeSerialNumber,
+        information.nFileIndexHigh,
+        information.nFileIndexLow,
+    )
+
+
+def _windows_open_handle(
+    path: Path,
+    *,
+    desired_access: int,
+    share_mode: int,
+    flags: int,
+) -> object:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(
+        str(path),
+        desired_access,
+        share_mode,
+        None,
+        3,  # OPEN_EXISTING
+        flags,
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return handle
+
+
+def _windows_close_handle(handle: object) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    if not kernel32.CloseHandle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+@dataclass(slots=True)
+class _PublicationGuard:
+    root: Path
+    handle: object
+    identity: tuple[int, ...]
+    windows: bool
+
+    def validate(self) -> None:
+        require_canonical_descendant(self.root, self.root, kind="publication mode root")
+        identity: tuple[int, ...]
+        if self.windows:
+            current = _windows_open_handle(
+                self.root,
+                desired_access=0x80,
+                share_mode=0x1 | 0x2,
+                flags=0x02000000 | 0x00200000,
+            )
+            try:
+                identity = _windows_handle_identity(current, kind="publication directory")
+            finally:
+                _windows_close_handle(current)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            metadata = os.stat(self.root, follow_symlinks=False)
+            identity = (metadata.st_dev, metadata.st_ino)
+        if identity != self.identity:
+            raise ValueError("publication directory identity changed")
+
+    def close(self) -> None:
+        if self.windows:
+            _windows_close_handle(self.handle)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            os.close(self.handle)  # type: ignore[arg-type]
+
+
+def _open_publication_guard(root: Path) -> _PublicationGuard:
+    if os.name == "nt":
+        handle = _windows_open_handle(
+            root,
+            desired_access=0x2 | 0x80,  # FILE_ADD_FILE | FILE_READ_ATTRIBUTES
+            share_mode=0x1 | 0x2,  # deliberately deny FILE_SHARE_DELETE
+            flags=0x02000000 | 0x00200000,
+        )
+        try:
+            identity = _windows_handle_identity(handle, kind="publication directory")
+        except Exception:
+            _windows_close_handle(handle)
+            raise
+        return _PublicationGuard(root, handle, identity, True)
+    else:  # pragma: no cover - exercised on POSIX hosts
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(root, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            os.close(descriptor)
+            raise ValueError("publication root handle is not a directory")
+        return _PublicationGuard(root, descriptor, (metadata.st_dev, metadata.st_ino), False)
+
+
+def _windows_link_from_pinned_directory(
+    staged: Path,
+    final: Path,
+    guard: _PublicationGuard,
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    source_handle = _windows_open_handle(
+        staged,
+        desired_access=0x00010000 | 0x80,
+        share_mode=0x1 | 0x2 | 0x4,
+        flags=0x00200000,
+    )
+    try:
+        source_identity = _windows_handle_identity(source_handle, kind="staged artifact")
+
+        class FileLinkInformation(ctypes.Structure):
+            _fields_ = [
+                ("ReplaceIfExists", wintypes.BOOLEAN),
+                ("RootDirectory", wintypes.HANDLE),
+                ("FileNameLength", wintypes.DWORD),
+                ("FileName", wintypes.WCHAR * 1),
+            ]
+
+        filename = final.name.encode("utf-16-le")
+        filename_offset = FileLinkInformation.FileName.offset
+        buffer = ctypes.create_string_buffer(filename_offset + len(filename))
+        information = FileLinkInformation.from_buffer(buffer)
+        information.ReplaceIfExists = False
+        information.RootDirectory = guard.handle
+        information.FileNameLength = len(filename)
+        ctypes.memmove(ctypes.addressof(buffer) + filename_offset, filename, len(filename))
+
+        class IoStatusBlock(ctypes.Structure):
+            _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+        io_status = IoStatusBlock()
+        ntdll: Any = ctypes.WinDLL("ntdll")
+        ntdll.NtSetInformationFile.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(IoStatusBlock),
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            ctypes.c_int,
+        ]
+        ntdll.NtSetInformationFile.restype = ctypes.c_long
+        status = ntdll.NtSetInformationFile(
+            source_handle,
+            ctypes.byref(io_status),
+            buffer,
+            len(buffer),
+            11,  # FileLinkInformation
+        )
+        if status < 0 and status & 0xFFFFFFFF != 0xC0000035:  # STATUS_OBJECT_NAME_COLLISION
+            ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_long]
+            ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+            failure = ctypes.WinError(ntdll.RtlNtStatusToDosError(status))
+            raise ValueError("publication hard-link creation failed closed") from failure
+        target_handle = _windows_open_handle(
+            final,
+            desired_access=0x80,
+            share_mode=0x1 | 0x2 | 0x4,
+            flags=0x00200000,
+        )
+        try:
+            target_identity = _windows_handle_identity(target_handle, kind="published artifact")
+        finally:
+            _windows_close_handle(target_handle)
+        if target_identity != source_identity:
+            raise ValueError("published artifact identity differs from staged source")
+    finally:
+        _windows_close_handle(source_handle)
+
+
+def _link_from_pinned_directory(
+    staged: Path,
+    final: Path,
+    guard: _PublicationGuard,
+    before_link: BeforePublishLink | None,
+) -> None:
+    if before_link is not None:
+        try:
+            before_link(guard.root)
+        except OSError as error:
+            raise ValueError("publication directory changed during hard-link creation") from error
+    guard.validate()
+    if os.name == "nt":
+        _windows_link_from_pinned_directory(staged, final, guard)
+    else:  # pragma: no cover - exercised on POSIX hosts
+        with suppress(FileExistsError):
+            os.link(
+                staged,
+                final.name,
+                dst_dir_fd=guard.handle,  # type: ignore[arg-type]
+                follow_symlinks=False,
+            )
+        source = os.stat(staged, follow_symlinks=False)
+        target = os.stat(final, follow_symlinks=False)
+        if (source.st_dev, source.st_ino) != (target.st_dev, target.st_ino):
+            raise ValueError("published artifact identity differs from staged source")
+    guard.validate()
+
+
+def _publication_guards(
+    paths: CorpusPaths,
+    artifacts: tuple[DerivedAudio, ...],
+) -> dict[str, _PublicationGuard]:
+    local_root = Path(os.path.abspath(paths.local_data))
+    guards: dict[str, _PublicationGuard] = {}
+    try:
+        for mode in sorted({artifact.mode for artifact in artifacts}):
+            if mode not in {"candidate", "lossless"}:
+                raise ValueError("manifest staging contains an unsupported audio mode")
+            mode_root = require_canonical_descendant(
+                local_root,
+                Path(
+                    os.path.abspath(
+                        paths.segments / {"candidate": "candidates", "lossless": "lossless"}[mode]
+                    )
+                ),
+                kind=f"{mode} mode root",
+            )
+            mode_root.mkdir(parents=True, exist_ok=True)
+            require_canonical_descendant(local_root, mode_root, kind=f"{mode} mode root")
+            guards[mode] = _open_publication_guard(mode_root)
+        return guards
+    except Exception:
+        for guard in reversed(tuple(guards.values())):
+            guard.close()
+        raise
+
+
+def _close_publication_guards(guards: dict[str, _PublicationGuard]) -> None:
+    failure: OSError | None = None
+    for guard in reversed(tuple(guards.values())):
+        try:
+            guard.close()
+        except OSError as error:
+            failure = error
+    if failure is not None:
+        raise failure
+
+
+def _validate_publication_guards(guards: dict[str, _PublicationGuard]) -> None:
+    for guard in guards.values():
+        guard.validate()
+
+
 def _publish_staged_audio(
-    paths: CorpusPaths, staging_root: Path, artifacts: tuple[DerivedAudio, ...]
+    paths: CorpusPaths,
+    staging_root: Path,
+    artifacts: tuple[DerivedAudio, ...],
+    guards: dict[str, _PublicationGuard],
+    *,
+    before_link: BeforePublishLink | None = None,
 ) -> None:
     local_root = Path(os.path.abspath(paths.local_data))
     segments_root = require_canonical_descendant(
@@ -627,19 +925,12 @@ def _publish_staged_audio(
         Path(os.path.abspath(staging_root)),
         kind="audio staging root",
     )
+    pending_hook = before_link
     for artifact in artifacts:
         if artifact.mode not in {"candidate", "lossless"}:
             raise ValueError("manifest staging contains an unsupported audio mode")
-        mode_root = require_canonical_descendant(
-            local_root,
-            Path(
-                os.path.abspath(
-                    paths.segments
-                    / {"candidate": "candidates", "lossless": "lossless"}[artifact.mode]
-                )
-            ),
-            kind=f"{artifact.mode} mode root",
-        )
+        guard = guards[artifact.mode]
+        mode_root = guard.root
         staged = require_canonical_descendant(
             staging_root,
             staging_root / Path(*artifact.relative_path.split("/")),
@@ -653,7 +944,6 @@ def _publish_staged_audio(
         )
         if _digest(staged) != artifact.sha256:
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
-        final.parent.mkdir(parents=True, exist_ok=True)
         final = require_canonical_descendant(
             mode_root,
             final,
@@ -680,7 +970,16 @@ def _publish_staged_audio(
             final,
             kind="final audio artifact",
         )
-        os.link(staged, final)
+        _link_from_pinned_directory(staged, final, guard, pending_hook)
+        pending_hook = None
+        require_canonical_descendant(
+            mode_root,
+            final,
+            kind="published audio artifact",
+            require_file=True,
+        )
+        if _digest(final) != artifact.sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "published audio artifact is invalid")
 
 
 def _load_rights(paths: CorpusPaths) -> dict[str, RightsRecord]:
@@ -878,6 +1177,7 @@ def build_manifest_corpus(
     run_command: RunCommand = subprocess.run,
     probe_command: RunCommand = subprocess.run,
     decode_command: RunCommand = subprocess.run,
+    _before_publish_link: BeforePublishLink | None = None,
 ) -> bool:
     if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
         raise TypeError("build_manifest_corpus requires CorpusPaths and CorpusConfig")
@@ -1118,81 +1418,93 @@ def build_manifest_corpus(
         raise ValueError("approved segments contain duplicate segment_id")
     if existing_segments is not None and sorted_rows != existing_segments:
         raise ValueError("existing manifest row order differs from deterministic expected order")
-    if not recovery_only:
-        _publish_staged_audio(paths, staging_root, tuple(artifacts))
-    manifest_path = paths.manifests / "segments.jsonl"
-    if not recovery_only:
-        write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
-    manifest_sha256 = _digest(manifest_path)
-    rights_sha256 = _digest(paths.manifests / "rights.jsonl")
-    transcripts_sha256 = _digest(paths.manifests / "transcripts.jsonl")
-    current = recordings
-    terminal_events: list[ProcessingEvent] = []
-    for context in contexts:
-        approved_count, total_takes = decisions_by_recording[context.recording.recording_id]
-        target = CorpusState.APPROVED if approved_count else CorpusState.REJECTED
-        if approved_count > total_takes:
-            raise AssertionError("approved count exceeds reviewed take count")
-        timestamp = "1970-01-01T00:00:00+00:00"
-        base = replace(current[context.recording_index], state=CorpusState.REVIEWED)
-        advanced, event = advance_recording(
-            base,
-            target,
-            input_sha256s=(
-                context.recording.sha256,
-                rights_sha256,
-                transcripts_sha256,
-                context.pairing_sha256,
-                context.alignment_sha256,
-                review_sha256,
-                manifest_sha256,
-            ),
-            config_sha256=config.digest,
-            tool_versions=("approved-manifest-v1", ffmpeg_version),
-            started_at=timestamp,
-            finished_at=timestamp,
-            result="success",
+    publication_guards: dict[str, _PublicationGuard] = {}
+    try:
+        if not recovery_only:
+            publication_guards = _publication_guards(paths, tuple(artifacts))
+            _publish_staged_audio(
+                paths,
+                staging_root,
+                tuple(artifacts),
+                publication_guards,
+                before_link=_before_publish_link,
+            )
+            _validate_publication_guards(publication_guards)
+        manifest_path = paths.manifests / "segments.jsonl"
+        if not recovery_only:
+            write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
+        manifest_sha256 = _digest(manifest_path)
+        rights_sha256 = _digest(paths.manifests / "rights.jsonl")
+        transcripts_sha256 = _digest(paths.manifests / "transcripts.jsonl")
+        current = recordings
+        terminal_events: list[ProcessingEvent] = []
+        for context in contexts:
+            approved_count, total_takes = decisions_by_recording[context.recording.recording_id]
+            target = CorpusState.APPROVED if approved_count else CorpusState.REJECTED
+            if approved_count > total_takes:
+                raise AssertionError("approved count exceeds reviewed take count")
+            timestamp = "1970-01-01T00:00:00+00:00"
+            base = replace(current[context.recording_index], state=CorpusState.REVIEWED)
+            advanced, event = advance_recording(
+                base,
+                target,
+                input_sha256s=(
+                    context.recording.sha256,
+                    rights_sha256,
+                    transcripts_sha256,
+                    context.pairing_sha256,
+                    context.alignment_sha256,
+                    review_sha256,
+                    manifest_sha256,
+                ),
+                config_sha256=config.digest,
+                tool_versions=("approved-manifest-v1", ffmpeg_version),
+                started_at=timestamp,
+                finished_at=timestamp,
+                result="success",
+            )
+            legacy_advanced, legacy_event = advance_recording(
+                base,
+                target,
+                input_sha256s=(
+                    context.recording.sha256,
+                    context.pairing_sha256,
+                    context.alignment_sha256,
+                    review_sha256,
+                    manifest_sha256,
+                ),
+                config_sha256=config.digest,
+                tool_versions=("approved-manifest-v1", ffmpeg_version),
+                started_at=timestamp,
+                finished_at=timestamp,
+                result="success",
+            )
+            del legacy_advanced
+            processing_by_id = {
+                item.event_id: item
+                for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
+            }
+            if event.event_id in processing_by_id:
+                if processing_by_id[event.event_id] != event:
+                    raise ValueError("existing terminal event conflicts with deterministic event")
+            elif legacy_event.event_id in processing_by_id:
+                if processing_by_id[legacy_event.event_id] != legacy_event:
+                    raise ValueError("legacy terminal event conflicts with deterministic evidence")
+                event = legacy_event
+            current = (
+                *current[: context.recording_index],
+                advanced,
+                *current[context.recording_index + 1 :],
+            )
+            terminal_events.append(event)
+        _validate_publication_guards(publication_guards)
+        persist_recording_transitions(
+            recordings_path=paths.manifests / "recordings.jsonl",
+            events_path=processing_path,
+            recordings=current,
+            events=terminal_events,
         )
-        legacy_advanced, legacy_event = advance_recording(
-            base,
-            target,
-            input_sha256s=(
-                context.recording.sha256,
-                context.pairing_sha256,
-                context.alignment_sha256,
-                review_sha256,
-                manifest_sha256,
-            ),
-            config_sha256=config.digest,
-            tool_versions=("approved-manifest-v1", ffmpeg_version),
-            started_at=timestamp,
-            finished_at=timestamp,
-            result="success",
-        )
-        del legacy_advanced
-        processing_by_id = {
-            item.event_id: item
-            for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
-        }
-        if event.event_id in processing_by_id:
-            if processing_by_id[event.event_id] != event:
-                raise ValueError("existing terminal event conflicts with deterministic event")
-        elif legacy_event.event_id in processing_by_id:
-            if processing_by_id[legacy_event.event_id] != legacy_event:
-                raise ValueError("legacy terminal event conflicts with deterministic evidence")
-            event = legacy_event
-        if audit_ahead and not processing_event_exists(processing_rows, event):
-            raise ValueError("durable terminal event batch is incomplete or conflicts")
-        current = (
-            *current[: context.recording_index],
-            advanced,
-            *current[context.recording_index + 1 :],
-        )
-        terminal_events.append(event)
-    persist_recording_transitions(
-        recordings_path=paths.manifests / "recordings.jsonl",
-        events_path=processing_path,
-        recordings=current,
-        events=terminal_events,
-    )
-    return True
+        _validate_publication_guards(publication_guards)
+        return True
+    finally:
+        _close_publication_guards(publication_guards)

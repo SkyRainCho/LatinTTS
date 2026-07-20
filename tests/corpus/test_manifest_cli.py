@@ -130,6 +130,7 @@ def _build_with_fake_audio(
     config: CorpusConfig,
     *,
     after_transcode: Callable[[], None] | None = None,
+    before_publish_link: Callable[[Path], None] | None = None,
 ) -> bool:
     sample_counts: dict[Path, int] = {}
 
@@ -178,6 +179,7 @@ def _build_with_fake_audio(
         run_command=transcode,
         probe_command=probe,
         decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+        _before_publish_link=before_publish_link,
     )
 
 
@@ -390,6 +392,171 @@ def test_build_manifest_rechecks_final_mode_root_alias_before_link_or_state_publ
     assert {path: path.read_bytes() for path in protected} == before
     assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
     assert not tuple(outside.rglob("*"))
+
+
+def test_build_manifest_pins_final_directory_against_last_check_link_race(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    outside = tmp_path / "outside-last-check-race"
+    outside.mkdir()
+    attempted = False
+    replaced = False
+
+    def replace_mode_root(mode_root: Path) -> None:
+        nonlocal attempted, replaced
+        attempted = True
+        mode_root.rmdir()
+        _make_directory_alias(mode_root, outside)
+        replaced = True
+
+    protected = (
+        paths.manifests / "review.jsonl",  # type: ignore[attr-defined]
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl",  # type: ignore[attr-defined]
+        paths.manifests / "recordings.jsonl",  # type: ignore[attr-defined]
+    )
+    before = {path: path.read_bytes() for path in protected}
+
+    with pytest.raises(ValueError, match=r"publication|directory|alias|reparse|canonical"):
+        _build_with_fake_audio(paths, config, before_publish_link=replace_mode_root)
+
+    assert attempted
+    assert not replaced
+    assert {path: path.read_bytes() for path in protected} == before
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+    assert not tuple(outside.rglob("*"))
+
+
+def test_build_manifest_holds_publication_guard_through_terminal_state_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    real_persist = manifest_module.persist_recording_transitions
+    blocked = False
+
+    def persist_with_rename_attempt(**kwargs: object) -> None:
+        nonlocal blocked
+        lossless_root = paths.segments / "lossless"  # type: ignore[attr-defined]
+        try:
+            lossless_root.rename(tmp_path / "moved-lossless")
+        except OSError:
+            blocked = True
+        else:
+            raise AssertionError("publication mode root was not pinned through state commit")
+        real_persist(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        persist_with_rename_attempt,
+    )
+
+    assert _build_with_fake_audio(paths, config)
+    assert blocked
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "APPROVED"  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication-handle contract")
+@pytest.mark.parametrize("case", ("missing", "junction"))
+def test_windows_publication_guard_rejects_invalid_root(tmp_path: Path, case: str) -> None:
+    root = tmp_path / "mode-root"
+    if case == "junction":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        _make_directory_alias(root, outside)
+
+    with pytest.raises((OSError, ValueError), match=r"cannot find|找不到|reparse|access"):
+        manifest_module._open_publication_guard(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication-handle contract")
+def test_windows_publication_guard_detects_lexical_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "mode-root"
+    root.mkdir()
+    guard = manifest_module._open_publication_guard(root)
+    try:
+        monkeypatch.setattr(
+            manifest_module,
+            "_windows_handle_identity",
+            lambda *_args, **_kwargs: (0, 0, 0),
+        )
+        with pytest.raises(ValueError, match="identity changed"):
+            guard.validate()
+    finally:
+        guard.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication-handle contract")
+def test_windows_publication_rejects_source_target_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "mode-root"
+    root.mkdir()
+    staged = tmp_path / "staged.flac"
+    staged.write_bytes(b"audio")
+    final = root / "final.flac"
+    guard = manifest_module._open_publication_guard(root)
+    identities = iter(((1, 2, 3), (4, 5, 6)))
+    try:
+        monkeypatch.setattr(
+            manifest_module,
+            "_windows_handle_identity",
+            lambda *_args, **_kwargs: next(identities),
+        )
+        with pytest.raises(ValueError, match="identity differs"):
+            manifest_module._windows_link_from_pinned_directory(staged, final, guard)
+    finally:
+        guard.close()
+
+
+def test_publication_guard_helpers_fail_closed_for_unsupported_mode_and_close_error(
+    tmp_path: Path,
+) -> None:
+    paths = cli.CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    source_relative = "raw/spoken/source.wav"
+    source_sha256 = "a" * 64
+    config_sha256 = "b" * 64
+    output_sha256 = "c" * 64
+    cache_key = audio_module._cache_identity(
+        mode="review",
+        source_relative_path=source_relative,
+        source_sha256=source_sha256,
+        config_sha256=config_sha256,
+        output_config_sha256=output_sha256,
+        ffmpeg_version="ffmpeg-test-1",
+        start_seconds=0.0,
+        end_seconds=1.0,
+    )
+    artifact = DerivedAudio(
+        "1",
+        "review",
+        audio_module._artifact_relative_path("review", cache_key),
+        "d" * 64,
+        source_relative,
+        source_sha256,
+        config_sha256,
+        output_sha256,
+        "ffmpeg-test-1",
+        cache_key,
+        0.0,
+        1.0,
+        None,
+    )
+    with pytest.raises(ValueError, match="unsupported audio mode"):
+        manifest_module._publication_guards(paths, (artifact,))
+
+    class BrokenGuard:
+        def close(self) -> None:
+            raise OSError("injected guard close failure")
+
+    with pytest.raises(OSError, match="guard close"):
+        manifest_module._close_publication_guards({"lossless": BrokenGuard()})  # type: ignore[dict-item]
 
 
 def test_build_manifest_extracts_approved_source_clips_and_advances_state(
@@ -757,6 +924,146 @@ def test_build_manifest_recovers_batch_commit_checkpoints_without_duplicate_even
     event_ids = [row["event_id"] for row in terminal_events]
     assert len(event_ids) == len(set(event_ids))
     assert all(row["state"] == "REJECTED" for row in read_jsonl(recordings_path))
+
+
+def _materialize_mixed_legacy_terminal_state(
+    paths: object, config: CorpusConfig
+) -> tuple[str, str]:
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    events_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    recordings = list(read_jsonl(recordings_path))
+    rec1 = review_module._decode_recording(recordings[0])
+    rec2 = review_module._decode_recording(recordings[1])
+    terminal_rows = [
+        ProcessingEvent.from_dict(row)
+        for row in read_jsonl(events_path)
+        if row["previous_state"] == "REVIEWED"
+    ]
+    rec1_current = next(event for event in terminal_rows if event.recording_id == rec1.recording_id)
+    _, legacy = advance_recording(
+        replace(rec1, state=CorpusState.REVIEWED),
+        rec1.state,
+        input_sha256s=(
+            rec1_current.input_sha256s[0],
+            rec1_current.input_sha256s[3],
+            rec1_current.input_sha256s[4],
+            rec1_current.input_sha256s[5],
+            rec1_current.input_sha256s[6],
+        ),
+        config_sha256=rec1_current.config_sha256,
+        tool_versions=rec1_current.tool_versions,
+        started_at=rec1_current.started_at,
+        finished_at=rec1_current.finished_at,
+        result=rec1_current.result,
+    )
+    nonterminal_rows = tuple(
+        row for row in read_jsonl(events_path) if row["previous_state"] != "REVIEWED"
+    )
+    write_jsonl_atomic(events_path, (*nonterminal_rows, legacy.to_dict()))
+    recordings[1] = replace(rec2, state=CorpusState.REVIEWED).to_dict()
+    write_jsonl_atomic(recordings_path, recordings)
+    return legacy.event_id, rec2.recording_id
+
+
+@pytest.mark.parametrize("rec1_decision", ("rejected", "approved"))
+def test_build_manifest_recovers_mixed_legacy_subset_and_appends_only_missing_current_event(
+    tmp_path: Path,
+    rec1_decision: str,
+) -> None:
+    paths, config = _two_recording_aligned_project(tmp_path)
+    _write_rights(paths)
+    groups = export_review_bundle(paths, config)
+    for group in groups:
+        recording_id = json.loads((group / "automatic.json").read_text(encoding="utf-8"))[
+            "recording_id"
+        ]
+        decision = rec1_decision if recording_id == "rec-1" else "rejected"
+        _set_decisions(group, decision=decision, reason=f"fixture {decision}")
+    assert import_review_bundle(paths, config)
+    builder = _build_with_fake_audio if rec1_decision == "approved" else build_manifest_corpus
+    if builder is build_manifest_corpus:
+        assert builder(paths, config, ffmpeg_version="ffmpeg-test-1")  # type: ignore[arg-type]
+    else:
+        assert builder(paths, config)
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    recordings_path = paths.manifests / "recordings.jsonl"
+    legacy_id, missing_recording_id = _materialize_mixed_legacy_terminal_state(paths, config)
+    mixed_events = events_path.read_bytes()
+
+    if builder is build_manifest_corpus:
+        assert builder(paths, config, ffmpeg_version="ffmpeg-test-1")  # type: ignore[arg-type]
+    else:
+        assert builder(paths, config)
+
+    rows = read_jsonl(events_path)
+    terminals = [
+        ProcessingEvent.from_dict(row) for row in rows if row["previous_state"] == "REVIEWED"
+    ]
+    assert [event.event_id for event in terminals[:-1]] == [legacy_id]
+    assert terminals[-1].recording_id == missing_recording_id
+    assert len(terminals[-1].input_sha256s) == 7
+    assert events_path.read_bytes().startswith(mixed_events)
+    assert all(row["state"] in {"APPROVED", "REJECTED"} for row in read_jsonl(recordings_path))
+    durable = {path: path.read_bytes() for path in (events_path, recordings_path)}
+
+    if builder is build_manifest_corpus:
+        assert builder(paths, config, ffmpeg_version="ffmpeg-test-1")  # type: ignore[arg-type]
+    else:
+        assert builder(paths, config)
+    assert {path: path.read_bytes() for path in durable} == durable
+
+
+@pytest.mark.parametrize("conflict", ("legacy-input", "manifest-row", "terminal-state"))
+def test_build_manifest_mixed_legacy_recovery_conflicts_fail_without_writes(
+    tmp_path: Path,
+    conflict: str,
+) -> None:
+    paths, config = _two_recording_aligned_project(tmp_path)
+    _write_rights(paths)
+    groups = export_review_bundle(paths, config)
+    for group in groups:
+        recording_id = json.loads((group / "automatic.json").read_text(encoding="utf-8"))[
+            "recording_id"
+        ]
+        decision = "approved" if recording_id == "rec-1" else "rejected"
+        _set_decisions(group, decision=decision, reason=f"fixture {decision}")
+    assert import_review_bundle(paths, config)
+    assert _build_with_fake_audio(paths, config)
+    _materialize_mixed_legacy_terminal_state(paths, config)
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    recordings_path = paths.manifests / "recordings.jsonl"
+    manifest_path = paths.manifests / "segments.jsonl"
+    if conflict == "legacy-input":
+        events = list(read_jsonl(events_path))
+        terminal = next(row for row in events if row["previous_state"] == "REVIEWED")
+        terminal["input_sha256s"][1] = "f" * 64
+        write_jsonl_atomic(events_path, events)
+    elif conflict == "manifest-row":
+        segments = list(read_jsonl(manifest_path))
+        segments[0]["spoken_text"] += " corrupt"
+        write_jsonl_atomic(manifest_path, segments)
+    else:
+        recordings = list(read_jsonl(recordings_path))
+        recordings[0]["state"] = "REJECTED"
+        write_jsonl_atomic(recordings_path, recordings)
+    protected = (
+        paths.manifests / "review.jsonl",
+        manifest_path,
+        events_path,
+        recordings_path,
+    )
+    before = {path: path.read_bytes() for path in protected}
+    clips_before = {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match=r"event|manifest|recording|state|evidence|history"):
+        _build_with_fake_audio(paths, config)
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()} == (
+        clips_before
+    )
 
 
 def test_build_manifest_classifies_audit_ahead_before_any_writable_review_import(
