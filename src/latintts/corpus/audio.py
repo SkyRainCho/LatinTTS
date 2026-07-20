@@ -566,6 +566,7 @@ def _make_plan(
     ffmpeg_version: str,
     start_seconds: float | None,
     end_seconds: float | None,
+    staging_root: Path | None = None,
 ) -> _ArtifactPlan:
     if not isinstance(ffmpeg_version, str) or not ffmpeg_version.strip():
         raise ValueError("ffmpeg_version must be a non-empty string")
@@ -583,10 +584,27 @@ def _make_plan(
         end_seconds=end_seconds,
     )
     relative_path = _artifact_relative_path(mode, cache_key)
-    root = _prepare_output_root(paths, mode)
-    destination = _lexical(paths.local_data / Path(*relative_path.split("/")))
-    if destination.parent != root:
-        raise ValueError("derived target escapes its fixed mode root")
+    if staging_root is None:
+        root = _prepare_output_root(paths, mode)
+        destination = _lexical(paths.local_data / Path(*relative_path.split("/")))
+        if destination.parent != root:
+            raise ValueError("derived target escapes its fixed mode root")
+    else:
+        _validate_fixed_roots(paths)
+        stage = _lexical(staging_root)
+        try:
+            stage.relative_to(_lexical(paths.segments))
+        except ValueError as error:
+            raise ValueError("audio staging root must be inside the fixed segments root") from error
+        if stage.exists() and stage.resolve() != stage:
+            raise ValueError("audio staging root contains an alias")
+        stage.mkdir(parents=True, exist_ok=True)
+        destination = _lexical(stage / Path(*relative_path.split("/")))
+        try:
+            destination.relative_to(stage)
+        except ValueError as error:
+            raise ValueError("staged derived target escapes its transaction root") from error
+        destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         raise ValueError("derived target is an alias")
     return _ArtifactPlan(
@@ -680,11 +698,21 @@ def _materialize(
     validate_output: Callable[[Path], PcmMetrics | None],
     run_command: RunCommand,
     source_is_derived: bool,
+    allow_unrecorded_existing: bool = False,
 ) -> DerivedAudio:
     _validate_source_hash(plan.source, plan.source_sha256, derived=source_is_derived)
     if plan.destination.exists():
         if cached is None:
-            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "cache artifact lacks metadata")
+            if not allow_unrecorded_existing:
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "cache artifact lacks metadata")
+            try:
+                metrics = validate_output(plan.destination)
+                digest = _sha256_file(plan.destination)
+            except (OSError, TypeError, ValueError, CorpusFailure) as error:
+                raise CorpusFailure(
+                    "CACHE_ARTIFACT_INVALID", "staged cache artifact is invalid"
+                ) from error
+            return _build_derived(plan, digest, metrics)
         return _validate_cached(plan, cached, validate_output)
     if cached is not None:
         raise CorpusFailure("CACHE_ARTIFACT_INVALID", "recorded cache artifact is missing")
@@ -773,6 +801,7 @@ def extract_analysis_segment(
     ffmpeg_version: str,
     cached: DerivedAudio | None = None,
     run_command: RunCommand = subprocess.run,
+    _staging_root: Path | None = None,
 ) -> DerivedAudio:
     source = _analysis_source(analysis, paths)
     try:
@@ -794,6 +823,7 @@ def extract_analysis_segment(
         ffmpeg_version=ffmpeg_version,
         start_seconds=start_seconds,
         end_seconds=end_seconds,
+        staging_root=_staging_root,
     )
 
     def validate_candidate(path: Path) -> PcmMetrics | None:
@@ -819,6 +849,7 @@ def extract_analysis_segment(
         validate_output=validate_candidate,
         run_command=run_command,
         source_is_derived=True,
+        allow_unrecorded_existing=_staging_root is not None,
     )
 
 
@@ -893,6 +924,7 @@ def extract_lossless_segment(
     run_command: RunCommand = subprocess.run,
     probe_command: RunCommand = subprocess.run,
     decode_command: RunCommand = subprocess.run,
+    _staging_root: Path | None = None,
 ) -> DerivedAudio:
     source = _raw_source(record, paths)
     _validate_segment_bounds(start_seconds, end_seconds, record.metadata.duration_seconds)
@@ -915,6 +947,7 @@ def extract_lossless_segment(
         ffmpeg_version=ffmpeg_version,
         start_seconds=start_seconds,
         end_seconds=end_seconds,
+        staging_root=_staging_root,
     )
     expected_samples = round((end_seconds - start_seconds) * record.metadata.sample_rate)
 
@@ -946,4 +979,5 @@ def extract_lossless_segment(
         validate_output=validate_flac,
         run_command=run_command,
         source_is_derived=False,
+        allow_unrecorded_existing=_staging_root is not None,
     )

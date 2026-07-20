@@ -7,10 +7,13 @@ from subprocess import CompletedProcess
 
 import pytest
 
+from latintts.corpus import audio as audio_module
 from latintts.corpus import cli
+from latintts.corpus import manifest as manifest_module
 from latintts.corpus import review as review_module
+from latintts.corpus import store as store_module
 from latintts.corpus.alignment import result_from_dict
-from latintts.corpus.audio import DerivedAudio
+from latintts.corpus.audio import DerivedAudio, PcmMetrics
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure
 from latintts.corpus.manifest import build_approved_segments, build_manifest_corpus
@@ -173,6 +176,7 @@ def test_build_manifest_extracts_approved_source_clips_and_advances_state(
     ]
     assert all(row["phoneme_timing_status"] == "not_estimated" for row in rows)
     assert all(row["review_event_ids"] for row in rows)
+    assert rows[0]["spoken_text"].split()[0] == rows[0]["word_spans"][0]["text"]
     assert all(row["quality_metrics"]["sample_count"] > 0 for row in rows)
     assert all(row["quality_metric_audio_sha256"] != row["derived_audio_sha256"] for row in rows)
     assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "APPROVED"
@@ -187,6 +191,38 @@ def test_build_manifest_extracts_approved_source_clips_and_advances_state(
             AssertionError("terminal rerun must validate existing clips without extraction")
         ),
     )
+
+    rights_path = paths.manifests / "rights.jsonl"
+    rights_rows = read_jsonl(rights_path)
+    revoked = dict(rights_rows[0])
+    revoked["allow_model_training"] = False
+    write_jsonl_atomic(rights_path, (revoked,))
+    with pytest.raises(CorpusFailure) as revoked_error:
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    assert revoked_error.value.code == "RIGHTS_SCOPE_UNCONFIRMED"
+    write_jsonl_atomic(rights_path, rights_rows)
+
+    manifest_path = paths.manifests / "segments.jsonl"
+    original_manifest = read_jsonl(manifest_path)
+    changed_manifest = [dict(row) for row in original_manifest]
+    changed_manifest[0]["spoken_text"] = "stale terminal text"
+    write_jsonl_atomic(manifest_path, changed_manifest)
+    with pytest.raises(ValueError, match=r"manifest|segment|expected"):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    write_jsonl_atomic(manifest_path, original_manifest)
+
+    automatic_path = next(
+        (paths.alignments / "runs" / config.digest / "rec-1" / "review").glob(  # type: ignore[attr-defined]
+            "*/automatic.json"
+        )
+    )
+    automatic_bytes = automatic_path.read_bytes()
+    automatic = json.loads(automatic_bytes)
+    automatic["takes"][0]["automatic_values"]["segment_end"] -= 0.01
+    automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"automatic|review|stale"):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    automatic_path.write_bytes(automatic_bytes)
 
     processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
     terminal_events = read_jsonl(processing_path)
@@ -220,6 +256,204 @@ def test_build_manifest_rejects_tampered_raw_before_writing_any_final_clip(
 
     assert error.value.code == "INVENTORY_HASH_MISMATCH"
     assert not tuple((paths.segments / "lossless").glob("*.flac"))  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("failure_point", ("later-take", "later-recording", "quality"))
+def test_build_manifest_stages_all_audio_before_publishing_final_clips(
+    tmp_path: Path, failure_point: str
+) -> None:
+    if failure_point == "later-recording":
+        paths, config = _two_recording_aligned_project(tmp_path)
+        _write_rights(paths)
+        groups = export_review_bundle(paths, config)
+        for group in groups:
+            _set_decisions(group)
+        assert import_review_bundle(paths, config)
+    else:
+        paths, config = _reviewed_project(tmp_path)
+    before_lossless = set((paths.segments / "lossless").rglob("*.flac"))  # type: ignore[attr-defined]
+    before_candidates = set((paths.segments / "candidates").rglob("*.wav"))  # type: ignore[attr-defined]
+    sample_counts: dict[Path, int] = {}
+    lossless_calls = 0
+
+    def transcode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        nonlocal lossless_calls
+        output = Path(command[-1])
+        if output.suffix == ".flac":
+            lossless_calls += 1
+            if (failure_point == "later-take" and lossless_calls == 2) or (
+                failure_point == "later-recording" and lossless_calls == 7
+            ):
+                raise RuntimeError(f"injected {failure_point} extraction failure")
+            start = float(command[command.index("-ss") + 1])
+            end = float(command[command.index("-to") + 1])
+            sample_counts[output] = round((end - start) * 48_000)
+            output.write_bytes(b"fLaCsynthetic" + str(sample_counts[output]).encode("ascii"))
+            return CompletedProcess(command, 0, "", "")
+        if failure_point == "quality" and ".manifest-staging" in output.parts:
+            raise RuntimeError("injected quality extraction failure")
+        return _audio_command(command, **kwargs)
+
+    def probe(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        target = Path(command[-1])
+        samples = sample_counts.get(target)
+        if samples is None:
+            samples = int(target.read_bytes().removeprefix(b"fLaCsynthetic"))
+        return CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "format": {"duration": str(samples / 48_000)},
+                    "streams": [
+                        {
+                            "codec_type": "audio",
+                            "codec_name": "flac",
+                            "sample_rate": "48000",
+                            "channels": 1,
+                            "duration_ts": str(samples),
+                            "time_base": "1/48000",
+                        }
+                    ],
+                }
+            ),
+            "",
+        )
+
+    with pytest.raises(RuntimeError, match=failure_point):
+        build_manifest_corpus(
+            paths,  # type: ignore[arg-type]
+            config,  # type: ignore[arg-type]
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=transcode,
+            probe_command=probe,
+            decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+        )
+
+    assert set((paths.segments / "lossless").rglob("*.flac")) == before_lossless  # type: ignore[attr-defined]
+    assert set((paths.segments / "candidates").rglob("*.wav")) == before_candidates  # type: ignore[attr-defined]
+
+
+def test_build_manifest_recovers_after_manifest_replace_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    sample_counts: dict[Path, int] = {}
+
+    def transcode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        output = Path(command[-1])
+        if output.suffix == ".flac":
+            start = float(command[command.index("-ss") + 1])
+            end = float(command[command.index("-to") + 1])
+            sample_counts[output] = round((end - start) * 48_000)
+            output.write_bytes(b"fLaCsynthetic" + str(sample_counts[output]).encode("ascii"))
+            return CompletedProcess(command, 0, "", "")
+        return _audio_command(command, **kwargs)
+
+    def probe(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        target = Path(command[-1])
+        samples = sample_counts.get(target)
+        if samples is None:
+            samples = int(target.read_bytes().removeprefix(b"fLaCsynthetic"))
+        return CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "format": {"duration": str(samples / 48_000)},
+                    "streams": [
+                        {
+                            "codec_type": "audio",
+                            "codec_name": "flac",
+                            "sample_rate": "48000",
+                            "channels": 1,
+                            "duration_ts": str(samples),
+                            "time_base": "1/48000",
+                        }
+                    ],
+                }
+            ),
+            "",
+        )
+
+    real_write = manifest_module.write_jsonl_atomic
+
+    def fail_manifest(path: Path, rows: object) -> None:
+        if path == paths.manifests / "segments.jsonl":  # type: ignore[attr-defined]
+            raise OSError("injected manifest replace failure")
+        real_write(path, rows)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(manifest_module, "write_jsonl_atomic", fail_manifest)
+    with pytest.raises(OSError, match="manifest replace"):
+        build_manifest_corpus(
+            paths,  # type: ignore[arg-type]
+            config,  # type: ignore[arg-type]
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=transcode,
+            probe_command=probe,
+            decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+        )
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "REVIEWED"  # type: ignore[attr-defined]
+    monkeypatch.setattr(manifest_module, "write_jsonl_atomic", real_write)
+
+    assert build_manifest_corpus(
+        paths,  # type: ignore[arg-type]
+        config,  # type: ignore[arg-type]
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=transcode,
+        probe_command=probe,
+        decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+    )
+    events = read_jsonl(
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    event_ids = [row["event_id"] for row in events]
+    assert len(event_ids) == len(set(event_ids))
+
+
+@pytest.mark.parametrize("checkpoint", ("events", "recordings"))
+def test_build_manifest_recovers_batch_commit_checkpoints_without_duplicate_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    paths, config = _two_recording_aligned_project(tmp_path)
+    _write_rights(paths)
+    groups = export_review_bundle(paths, config)
+    for group in groups:
+        _set_decisions(group, decision="rejected", reason="fixture rejection")
+    assert import_review_bundle(paths, config)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    before_events = read_jsonl(events_path)
+    real_replace = store_module.os.replace
+
+    def fail_checkpoint(source: Path, destination: Path) -> None:
+        target = events_path if checkpoint == "events" else recordings_path
+        if Path(destination) == target:
+            raise OSError(f"injected {checkpoint} replace failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store_module.os, "replace", fail_checkpoint)
+    expected_error = OSError if checkpoint == "events" else RuntimeError
+    expected_message = checkpoint if checkpoint == "events" else "recovery required"
+    with pytest.raises(expected_error, match=expected_message):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    assert all(row["state"] == "REVIEWED" for row in read_jsonl(recordings_path))
+    if checkpoint == "events":
+        assert read_jsonl(events_path) == before_events
+    monkeypatch.setattr(store_module.os, "replace", real_replace)
+
+    assert build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    terminal_events = read_jsonl(events_path)
+    event_ids = [row["event_id"] for row in terminal_events]
+    assert len(event_ids) == len(set(event_ids))
+    assert all(row["state"] == "REJECTED" for row in read_jsonl(recordings_path))
+
+    mixed = list(read_jsonl(recordings_path))
+    mixed[0]["state"] = "REVIEWED"
+    write_jsonl_atomic(recordings_path, mixed)
+    assert build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    assert read_jsonl(events_path) == terminal_events
+    assert all(row["state"] == "REJECTED" for row in read_jsonl(recordings_path))
 
 
 def test_build_manifest_revalidates_review_snapshot_instead_of_trusting_events(
@@ -522,4 +756,135 @@ def test_build_approved_segments_rejects_extractor_provenance_drift(tmp_path: Pa
     values["extract_analysis"] = lambda *_args, **_kwargs: analysis
 
     with pytest.raises(ValueError, match="lossless derived clip provenance"):
+        build_approved_segments(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("drift", ("lossless-interval", "quality-interval"))
+def test_build_approved_segments_rejects_structurally_valid_wrong_extractor_interval(
+    tmp_path: Path, drift: str
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    values = _direct_builder_inputs(paths, config)
+    values["_validate_only"] = False
+
+    def lossless(
+        recording: object,
+        _paths: object,
+        start: float,
+        end: float,
+        *,
+        ffmpeg_version: str,
+        **_kwargs: object,
+    ) -> DerivedAudio:
+        output_config = audio_module._canonical_output_config(
+            {
+                "codec": "flac",
+                "compression_level": 5,
+                "channels": recording.metadata.channels,  # type: ignore[attr-defined]
+                "sample_rate": recording.metadata.sample_rate,  # type: ignore[attr-defined]
+            }
+        )
+        if drift == "lossless-interval":
+            start += 0.01
+        key = audio_module._cache_identity(
+            mode="lossless",
+            source_relative_path=recording.relative_path,  # type: ignore[attr-defined]
+            source_sha256=recording.sha256,  # type: ignore[attr-defined]
+            config_sha256=output_config,
+            output_config_sha256=output_config,
+            ffmpeg_version=ffmpeg_version,
+            start_seconds=start,
+            end_seconds=end,
+        )
+        return DerivedAudio(
+            "1",
+            "lossless",
+            audio_module._artifact_relative_path("lossless", key),
+            "d" * 64,
+            recording.relative_path,  # type: ignore[attr-defined]
+            recording.sha256,  # type: ignore[attr-defined]
+            output_config,
+            output_config,
+            ffmpeg_version,
+            key,
+            start,
+            end,
+            None,
+        )
+
+    def quality(
+        analysis: DerivedAudio,
+        _paths: object,
+        start: float,
+        end: float,
+        *,
+        ffmpeg_version: str,
+        **_kwargs: object,
+    ) -> DerivedAudio:
+        output_config = audio_module._canonical_output_config(
+            {"codec": "pcm_s16le", "channels": 1, "sample_rate": 16000}
+        )
+        if drift == "quality-interval":
+            end -= 0.01
+        key = audio_module._cache_identity(
+            mode="candidate",
+            source_relative_path=analysis.relative_path,
+            source_sha256=analysis.sha256,
+            config_sha256=analysis.config_sha256,
+            output_config_sha256=output_config,
+            ffmpeg_version=ffmpeg_version,
+            start_seconds=start,
+            end_seconds=end,
+        )
+        return DerivedAudio(
+            "1",
+            "candidate",
+            audio_module._artifact_relative_path("candidate", key),
+            "e" * 64,
+            analysis.relative_path,
+            analysis.sha256,
+            analysis.config_sha256,
+            output_config,
+            ffmpeg_version,
+            key,
+            start,
+            end,
+            PcmMetrics(100, 0.1, 0.1, 0.0, 0.0),
+        )
+
+    values["extract_lossless"] = lossless
+    values["extract_analysis"] = quality
+    with pytest.raises(ValueError, match=r"provenance|quality|lossless"):
+        build_approved_segments(**values)  # type: ignore[arg-type]
+
+
+def test_build_approved_segments_rejects_reviewed_word_text_stale_against_transcript(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    values = _direct_builder_inputs(paths, config)
+    events = values["review_events"]
+    assert isinstance(events, tuple)
+    first = events[0]
+    assert isinstance(first, ReviewEvent)
+    alignment = next(iter(values["alignments"].values()))  # type: ignore[union-attr]
+    before = alignment.words[0].text
+    provisional = ReviewEvent(
+        "1",
+        "pending",
+        first.entity_id,
+        "word:0:text",
+        before,
+        "Mater",
+        "manual transcription correction",
+        "owner",
+        "2026-07-19T11:59:00+08:00",
+    )
+    correction = replace(
+        provisional,
+        review_event_id=review_module._event_identity(provisional),
+    )
+    values["review_events"] = (correction, *events)
+
+    with pytest.raises(ValueError, match=r"stale|text|transcript|pronunciation"):
         build_approved_segments(**values)  # type: ignore[arg-type]

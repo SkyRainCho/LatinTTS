@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -12,10 +13,14 @@ from latintts.corpus.alignment import AlignmentResult, WordSpan
 from latintts.corpus.audio import (
     DerivedAudio,
     RunCommand,
+    _artifact_relative_path,
+    _cache_identity,
+    _canonical_output_config,
     _raw_source,
     _validate_source_hash,
     extract_analysis_segment,
     extract_lossless_segment,
+    measure_pcm16,
 )
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
@@ -47,7 +52,7 @@ from latintts.corpus.review import (
     replay_review_events,
 )
 from latintts.corpus.store import (
-    persist_recording_transition,
+    persist_recording_transitions,
     processing_event_exists,
     read_jsonl,
     write_jsonl_atomic,
@@ -227,6 +232,86 @@ class _ApprovedProposal:
     cached_quality: DerivedAudio | None
 
 
+def _expected_lossless_audio(
+    recording: RecordingRecord,
+    proposal: _ApprovedProposal,
+    ffmpeg_version: str,
+    sha256: str,
+) -> DerivedAudio:
+    output_config = _canonical_output_config(
+        {
+            "codec": "flac",
+            "compression_level": 5,
+            "channels": recording.metadata.channels,
+            "sample_rate": recording.metadata.sample_rate,
+        }
+    )
+    start = proposal.source_start / recording.metadata.sample_rate
+    end = proposal.source_end / recording.metadata.sample_rate
+    cache_key = _cache_identity(
+        mode="lossless",
+        source_relative_path=recording.relative_path,
+        source_sha256=recording.sha256,
+        config_sha256=output_config,
+        output_config_sha256=output_config,
+        ffmpeg_version=ffmpeg_version,
+        start_seconds=start,
+        end_seconds=end,
+    )
+    return DerivedAudio(
+        "1",
+        "lossless",
+        _artifact_relative_path("lossless", cache_key),
+        sha256,
+        recording.relative_path,
+        recording.sha256,
+        output_config,
+        output_config,
+        ffmpeg_version,
+        cache_key,
+        start,
+        end,
+        None,
+    )
+
+
+def _expected_quality_audio(
+    analysis: DerivedAudio,
+    proposal: _ApprovedProposal,
+    ffmpeg_version: str,
+    sha256: str,
+    metrics: Any,
+) -> DerivedAudio:
+    output_config = _canonical_output_config(
+        {"codec": "pcm_s16le", "channels": 1, "sample_rate": 16000}
+    )
+    cache_key = _cache_identity(
+        mode="candidate",
+        source_relative_path=analysis.relative_path,
+        source_sha256=analysis.sha256,
+        config_sha256=analysis.config_sha256,
+        output_config_sha256=output_config,
+        ffmpeg_version=ffmpeg_version,
+        start_seconds=proposal.absolute_start,
+        end_seconds=proposal.absolute_end,
+    )
+    return DerivedAudio(
+        "1",
+        "candidate",
+        _artifact_relative_path("candidate", cache_key),
+        sha256,
+        analysis.relative_path,
+        analysis.sha256,
+        analysis.config_sha256,
+        output_config,
+        ffmpeg_version,
+        cache_key,
+        proposal.absolute_start,
+        proposal.absolute_end,
+        metrics,
+    )
+
+
 def build_approved_segments(
     *,
     recording: RecordingRecord,
@@ -246,6 +331,9 @@ def build_approved_segments(
     extract_lossless: LosslessExtractor = extract_lossless_segment,
     extract_analysis: AnalysisExtractor = extract_analysis_segment,
     _validate_only: bool = False,
+    _staging_root: Path | None = None,
+    _artifacts: list[DerivedAudio] | None = None,
+    _existing_segments: Mapping[tuple[str, int], SegmentRecord] | None = None,
 ) -> tuple[SegmentRecord, ...]:
     if recording.rights_id not in rights:
         raise ValueError("recording rights_id does not exist")
@@ -308,6 +396,27 @@ def build_approved_segments(
                 review_decision=decision,
                 pronunciation_warning_codes=warning_codes,
             )
+            effective_words = effective.get("words")
+            expected_words = tuple(word.surface for word in tokenize_words(unit.text))
+            reviewed_words = (
+                tuple(word.get("text") if type(word) is dict else None for word in effective_words)
+                if type(effective_words) is list
+                else ()
+            )
+            if len(reviewed_words) != len(expected_words) or any(
+                not isinstance(actual, str) or actual.casefold() != expected.casefold()
+                for actual, expected in zip(reviewed_words, expected_words, strict=True)
+            ):
+                raise ValueError("reviewed word text is stale against transcript and pronunciation")
+            if len(result.words) != len(expected_words) or any(
+                word.text.casefold() != expected.casefold()
+                for word, expected in zip(result.words, expected_words, strict=True)
+            ):
+                raise ValueError("alignment word text is stale against transcript")
+            assert isinstance(effective_words, list)
+            for reviewed_word, expected_word in zip(effective_words, expected_words, strict=True):
+                assert type(reviewed_word) is dict
+                reviewed_word["text"] = expected_word
             local_start = effective["segment_start"]
             local_end = effective["segment_end"]
             if type(local_start) not in (int, float) or type(local_end) not in (int, float):
@@ -367,29 +476,85 @@ def build_approved_segments(
         return ()
     rows_with_order: list[tuple[int, SegmentRecord]] = []
     for proposal in proposals:
-        lossless = extract_lossless(
-            recording,
-            paths,
-            proposal.source_start / recording.metadata.sample_rate,
-            proposal.source_end / recording.metadata.sample_rate,
-            ffmpeg_version=ffmpeg_version,
-            run_command=run_command,
-            probe_command=probe_command,
-            decode_command=decode_command,
+        existing = (
+            _existing_segments.get((proposal.repetition_group_id, proposal.take_index))
+            if _existing_segments is not None
+            else None
         )
-        quality = extract_analysis(
-            analysis_audio,
-            paths,
-            proposal.absolute_start,
-            proposal.absolute_end,
-            ffmpeg_version=ffmpeg_version,
-            cached=proposal.cached_quality,
-            run_command=run_command,
+        cached_lossless = (
+            _expected_lossless_audio(
+                recording, proposal, ffmpeg_version, existing.derived_audio_sha256
+            )
+            if existing is not None
+            else None
         )
-        if lossless.mode != "lossless" or lossless.source_sha256 != recording.sha256:
+        cached_quality = (
+            _expected_quality_audio(
+                analysis_audio,
+                proposal,
+                ffmpeg_version,
+                existing.quality_metric_audio_sha256,
+                existing.quality_metrics,
+            )
+            if existing is not None
+            else (None if _staging_root is not None else proposal.cached_quality)
+        )
+        if existing is not None:
+            assert cached_lossless is not None and cached_quality is not None
+            lossless_path = _require_canonical_descendant(
+                paths.segments / "lossless",
+                paths.resolve_local(cached_lossless.relative_path),
+                kind="manifest lossless clip",
+                require_file=True,
+            )
+            quality_path = _require_canonical_descendant(
+                paths.segments / "candidates",
+                paths.resolve_local(cached_quality.relative_path),
+                kind="manifest quality clip",
+                require_file=True,
+            )
+            if _digest(lossless_path) != cached_lossless.sha256 or (
+                _digest(quality_path) != cached_quality.sha256
+                or measure_pcm16(quality_path) != cached_quality.metrics
+            ):
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "terminal audio cache is invalid")
+            lossless = cached_lossless
+            quality = cached_quality
+        else:
+            lossless = extract_lossless(
+                recording,
+                paths,
+                proposal.source_start / recording.metadata.sample_rate,
+                proposal.source_end / recording.metadata.sample_rate,
+                ffmpeg_version=ffmpeg_version,
+                cached=cached_lossless,
+                run_command=run_command,
+                probe_command=probe_command,
+                decode_command=decode_command,
+                _staging_root=_staging_root,
+            )
+            quality = extract_analysis(
+                analysis_audio,
+                paths,
+                proposal.absolute_start,
+                proposal.absolute_end,
+                ffmpeg_version=ffmpeg_version,
+                cached=cached_quality,
+                run_command=run_command,
+                _staging_root=_staging_root,
+            )
+        expected_lossless = _expected_lossless_audio(
+            recording, proposal, ffmpeg_version, lossless.sha256
+        )
+        if lossless != expected_lossless:
             raise ValueError("lossless derived clip provenance does not match raw recording")
-        if quality.mode != "candidate" or quality.metrics is None:
+        expected_quality = _expected_quality_audio(
+            analysis_audio, proposal, ffmpeg_version, quality.sha256, quality.metrics
+        )
+        if quality != expected_quality or quality.metrics is None:
             raise ValueError("quality metric clip must be a 16 kHz analysis segment")
+        if _artifacts is not None:
+            _artifacts.extend((lossless, quality))
         row = SegmentRecord(
             schema_version="1",
             corpus_version="corpus-v1",
@@ -430,13 +595,36 @@ def build_approved_segments(
             split="unassigned",
         )
         rows_with_order.append((proposal.ordinal, row))
-    return tuple(
+    built = tuple(
         row
         for _, row in sorted(
             rows_with_order,
             key=lambda item: (recording.recording_id, item[0], item[1].take_index),
         )
     )
+    if _existing_segments is not None:
+        existing_rows = tuple(
+            _existing_segments[(row.repetition_group_id, row.take_index)] for row in built
+        )
+        if len(_existing_segments) != len(built) or existing_rows != built:
+            raise ValueError("existing manifest segments differ from deterministic expected rows")
+    return built
+
+
+def _publish_staged_audio(
+    paths: CorpusPaths, staging_root: Path, artifacts: tuple[DerivedAudio, ...]
+) -> None:
+    for artifact in artifacts:
+        staged = staging_root / Path(*artifact.relative_path.split("/"))
+        final = paths.resolve_local(artifact.relative_path)
+        if not staged.is_file() or staged.is_symlink() or _digest(staged) != artifact.sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
+        final.parent.mkdir(parents=True, exist_ok=True)
+        if final.exists():
+            if final.is_symlink() or _digest(final) != artifact.sha256:
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "final audio artifact conflicts")
+            continue
+        os.link(staged, final)
 
 
 def _load_rights(paths: CorpusPaths) -> dict[str, RightsRecord]:
@@ -527,7 +715,13 @@ def _validate_processing_history(
         left.target_state is not right.previous_state for left, right in pairwise(recording_events)
     ):
         raise ValueError("processing history contains a stale state chain")
-    if recording_events[-1].target_state is not context.recording.state:
+    final_state = recording_events[-1]
+    recoverable_audit_ahead = (
+        context.recording.state is CorpusState.REVIEWED
+        and final_state.previous_state is CorpusState.REVIEWED
+        and final_state.target_state in {CorpusState.APPROVED, CorpusState.REJECTED}
+    )
+    if final_state.target_state is not context.recording.state and not recoverable_audit_ahead:
         raise ValueError("recording state is not bound to processing history")
     paired = _expected_cached_transition(
         context.recording,
@@ -724,19 +918,25 @@ def build_manifest_corpus(
         if item[1].rights_id not in rights:
             raise ValueError("recording rights_id does not exist")
     terminal = {CorpusState.APPROVED, CorpusState.REJECTED}
-    if all(record.state in terminal for _, record in by_id.values()):
-        existing_segments = _validate_existing_manifest(paths)
-        _validate_terminal_history(paths, config, recordings, existing_segments, ffmpeg_version)
-        return True
-    if any(record.state is not CorpusState.REVIEWED for _, record in by_id.values()):
+    if any(record.state not in {CorpusState.REVIEWED, *terminal} for _, record in by_id.values()):
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
-    if not import_review_bundle(
+    all_reviewed = all(record.state is CorpusState.REVIEWED for record in recordings)
+    if all_reviewed:
+        if not import_review_bundle(
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        ):
+            raise CorpusFailure("REVIEW_REQUIRED", "review import is incomplete")
+    elif not import_review_bundle(
         paths,
         config,
         ffmpeg_version=ffmpeg_version,
         run_command=run_command,
+        _validate_only=True,
     ):
-        raise CorpusFailure("REVIEW_REQUIRED", "review import is incomplete")
+        raise CorpusFailure("REVIEW_REQUIRED", "terminal review replay is incomplete")
     review_path = paths.manifests / "review.jsonl"
     review_events = _load_existing_review_events(review_path)
     review_sha256 = _digest(review_path)
@@ -818,8 +1018,36 @@ def build_manifest_corpus(
             ffmpeg_version=ffmpeg_version,
             _validate_only=True,
         )
+    existing_segments: tuple[SegmentRecord, ...] | None = None
+    existing_by_recording: dict[str, dict[tuple[str, int], SegmentRecord]] = {}
+    if not all_reviewed:
+        existing_segments = _validate_existing_manifest(paths)
+        for segment in existing_segments:
+            existing_by_recording.setdefault(segment.recording_id, {})[
+                (segment.repetition_group_id, segment.take_index)
+            ] = segment
     all_rows: list[tuple[str, int, int, SegmentRecord]] = []
     decisions_by_recording: dict[str, tuple[int, int]] = {}
+    staging_identity = hashlib.sha256(
+        "\0".join(
+            (
+                config.digest,
+                review_sha256,
+                _digest(paths.manifests / "rights.jsonl"),
+                _digest(paths.manifests / "transcripts.jsonl"),
+                *(
+                    value
+                    for context in contexts
+                    for value in (
+                        context.pairing_sha256,
+                        context.alignment_sha256,
+                    )
+                ),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    staging_root = paths.segments / ".manifest-staging" / staging_identity
+    artifacts: list[DerivedAudio] = []
     for context in contexts:
         alignments = {key: value["alignment_result"] for key, value in context.alignments.items()}
         rows = build_approved_segments(
@@ -837,6 +1065,13 @@ def build_manifest_corpus(
             run_command=run_command,
             probe_command=probe_command,
             decode_command=decode_command,
+            _staging_root=staging_root if all_reviewed else None,
+            _artifacts=artifacts,
+            _existing_segments=(
+                existing_by_recording.get(context.recording.recording_id, {})
+                if not all_reviewed
+                else None
+            ),
         )
         ordinal_by_id = {unit.unit_id: unit.ordinal for unit in context.units}
         all_rows.extend(
@@ -852,18 +1087,45 @@ def build_manifest_corpus(
     identities = tuple(row.segment_id for row in sorted_rows)
     if len(identities) != len(set(identities)):
         raise ValueError("approved segments contain duplicate segment_id")
+    if existing_segments is not None and sorted_rows != existing_segments:
+        raise ValueError("existing manifest row order differs from deterministic expected order")
+    if all_reviewed:
+        _publish_staged_audio(paths, staging_root, tuple(artifacts))
     manifest_path = paths.manifests / "segments.jsonl"
-    write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
+    if all_reviewed:
+        write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
     manifest_sha256 = _digest(manifest_path)
+    rights_sha256 = _digest(paths.manifests / "rights.jsonl")
+    transcripts_sha256 = _digest(paths.manifests / "transcripts.jsonl")
     current = recordings
+    terminal_events: list[ProcessingEvent] = []
     for context in contexts:
         approved_count, total_takes = decisions_by_recording[context.recording.recording_id]
         target = CorpusState.APPROVED if approved_count else CorpusState.REJECTED
         if approved_count > total_takes:
             raise AssertionError("approved count exceeds reviewed take count")
         timestamp = "1970-01-01T00:00:00+00:00"
+        base = replace(current[context.recording_index], state=CorpusState.REVIEWED)
         advanced, event = advance_recording(
-            current[context.recording_index],
+            base,
+            target,
+            input_sha256s=(
+                context.recording.sha256,
+                rights_sha256,
+                transcripts_sha256,
+                context.pairing_sha256,
+                context.alignment_sha256,
+                review_sha256,
+                manifest_sha256,
+            ),
+            config_sha256=config.digest,
+            tool_versions=("approved-manifest-v1", ffmpeg_version),
+            started_at=timestamp,
+            finished_at=timestamp,
+            result="success",
+        )
+        legacy_advanced, legacy_event = advance_recording(
+            base,
             target,
             input_sha256s=(
                 context.recording.sha256,
@@ -878,15 +1140,28 @@ def build_manifest_corpus(
             finished_at=timestamp,
             result="success",
         )
+        del legacy_advanced
+        decoded_processing = {
+            item.event_id: item
+            for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
+        }
+        if event.event_id in decoded_processing:
+            if decoded_processing[event.event_id] != event:
+                raise ValueError("existing terminal event conflicts with deterministic event")
+        elif legacy_event.event_id in decoded_processing:
+            if decoded_processing[legacy_event.event_id] != legacy_event:
+                raise ValueError("legacy terminal event conflicts with deterministic evidence")
+            event = legacy_event
         current = (
             *current[: context.recording_index],
             advanced,
             *current[context.recording_index + 1 :],
         )
-        persist_recording_transition(
-            recordings_path=paths.manifests / "recordings.jsonl",
-            events_path=processing_path,
-            recordings=current,
-            event=event,
-        )
+        terminal_events.append(event)
+    persist_recording_transitions(
+        recordings_path=paths.manifests / "recordings.jsonl",
+        events_path=processing_path,
+        recordings=current,
+        events=terminal_events,
+    )
     return True

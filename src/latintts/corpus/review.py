@@ -2033,6 +2033,7 @@ def import_review_bundle(
     *,
     ffmpeg_version: str | None = None,
     run_command: RunCommand | None = None,
+    _validate_only: bool = False,
 ) -> bool:
     if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
         raise TypeError("import_review_bundle requires CorpusPaths and CorpusConfig")
@@ -2051,9 +2052,12 @@ def import_review_bundle(
         raise ValueError("recordings contain duplicate recording_id")
     review_path = paths.manifests / "review.jsonl"
     existing = _load_existing_review_events(review_path)
-    correction_result = _import_pairing_corrections(paths, config, selection, recordings, existing)
-    if correction_result is not None:
-        return correction_result
+    if not _validate_only:
+        correction_result = _import_pairing_corrections(
+            paths, config, selection, recordings, existing
+        )
+        if correction_result is not None:
+            return correction_result
     legal_pairing_event_ids = _validate_existing_pairing_corrections(
         paths, config, selection, recordings, existing
     )
@@ -2079,8 +2083,11 @@ def import_review_bundle(
         if item is None or item[1].sha256 != expected_hash:
             raise ValueError("selection does not match recordings")
         recording = item[1]
-        if recording.state not in {CorpusState.ALIGNED, CorpusState.REVIEWED}:
-            raise ValueError("review import requires ALIGNED or REVIEWED recording state")
+        allowed_states = {CorpusState.ALIGNED, CorpusState.REVIEWED}
+        if _validate_only:
+            allowed_states.update({CorpusState.APPROVED, CorpusState.REJECTED})
+        if recording.state not in allowed_states:
+            raise ValueError("review import requires a reviewable or terminal recording state")
         source = paths.resolve_local(recording.relative_path)
         if not source.is_file() or _digest(source) != recording.sha256:
             raise ValueError("source audio reference or hash is invalid")
@@ -2284,6 +2291,8 @@ def import_review_bundle(
             _set_review_field(effective, field, after)
         effective_by_entity[entity_id] = effective
     if new_events:
+        if _validate_only:
+            raise ValueError("review bundle differs from durable review event replay")
         combined = (*existing, *new_events)
         ids = tuple(event.review_event_id for event in combined)
         if len(ids) != len(set(ids)):
@@ -2305,6 +2314,8 @@ def import_review_bundle(
                 break
         complete_by_recording[recording_id] = complete
     current = recordings
+    if _validate_only:
+        return all(complete_by_recording.values())
     for recording_id in selection.recording_ids:
         index, _ = by_id[recording_id]
         record = current[index]
