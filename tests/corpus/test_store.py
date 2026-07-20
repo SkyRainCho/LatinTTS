@@ -230,6 +230,58 @@ def test_persist_transitions_recovers_mixed_states_and_durable_events_without_du
 
 
 @pytest.mark.parametrize(
+    ("case", "message"),
+    (
+        ("alias", "distinct resolved"),
+        ("empty", "non-empty"),
+        ("duplicate-events", "identities.*unique"),
+        ("coverage", "cover every"),
+        ("target-state", "target manifest state"),
+        ("id-set", "recording_id set"),
+        ("existing-state", "recoverable transition"),
+        ("field-change", "change only recording state"),
+        ("state-ahead", "lacks its durable"),
+    ),
+)
+def test_persist_transitions_rejects_invalid_batch_contracts(
+    tmp_path: Path, case: str, message: str
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    existing = (original,)
+    targets = (updated,)
+    events = (event,)
+    if case == "alias":
+        events_path = recordings_path
+    elif case == "empty":
+        events = ()
+    elif case == "duplicate-events":
+        events = (event, event)
+    elif case == "coverage":
+        targets = (updated, replace(updated, recording_id="rec-other"))
+    elif case == "target-state":
+        targets = (original,)
+    elif case == "id-set":
+        existing = (replace(original, recording_id="rec-other"),)
+    elif case == "existing-state":
+        existing = (replace(original, state=CorpusState.TEXT_CANDIDATES_READY),)
+    elif case == "field-change":
+        existing = (replace(original, notes="changed"),)
+    else:
+        existing = (updated,)
+    write_jsonl_atomic(recordings_path, (record.to_dict() for record in existing))
+
+    with pytest.raises(ValueError, match=message):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=targets,
+            events=events,
+        )
+
+
+@pytest.mark.parametrize(
     ("case", "match"),
     (
         ("missing-field", "exact fields"),
@@ -267,6 +319,16 @@ def test_processing_event_recovery_rejects_same_semantics_with_different_id() ->
 
     with pytest.raises(ValueError, match=r"semantic transition.*different event_id"):
         store.processing_event_exists((row,), event)
+
+
+@pytest.mark.parametrize("duplicate", ("id", "semantics"))
+def test_processing_event_recovery_rejects_duplicate_history_identity(duplicate: str) -> None:
+    _, _, event = _transition()
+    second = event.to_dict()
+    if duplicate == "semantics":
+        second["event_id"] = "state-other-deterministic-id"
+    with pytest.raises(ValueError, match=r"duplicate (event_id|semantic transition)"):
+        store.processing_event_exists((event.to_dict(), second), event)
 
 
 def test_processing_event_recovery_rejects_same_id_with_conflicting_semantics() -> None:
