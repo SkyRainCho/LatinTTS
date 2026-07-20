@@ -1,7 +1,50 @@
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+
+def require_canonical_descendant(
+    root: Path,
+    target: Path,
+    *,
+    kind: str,
+    require_file: bool = False,
+) -> Path:
+    """Reject lexical escapes and every existing alias/reparse path component."""
+    root_absolute = Path(os.path.abspath(root))
+    target_absolute = Path(os.path.abspath(target))
+    try:
+        relative = target_absolute.relative_to(root_absolute)
+    except ValueError as error:
+        raise ValueError(f"{kind} is outside its canonical root") from error
+    current = root_absolute
+    candidates = [current]
+    for component in relative.parts:
+        current /= component
+        candidates.append(current)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for candidate in candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        metadata = os.lstat(candidate)
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or attributes & reparse_flag:
+            raise ValueError(f"{kind} path contains an alias or reparse point")
+        if candidate.resolve() != candidate:
+            raise ValueError(f"{kind} path is not canonical")
+    if root_absolute.resolve(strict=False) != root_absolute:
+        raise ValueError(f"{kind} root is not canonical")
+    resolved_target = target_absolute.resolve(strict=False)
+    try:
+        resolved_target.relative_to(root_absolute)
+    except ValueError as error:
+        raise ValueError(f"{kind} resolves outside its canonical root") from error
+    if require_file and not target_absolute.is_file():
+        raise ValueError(f"{kind} must be a regular file")
+    return target_absolute
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,7 +25,7 @@ from latintts.corpus.audio import (
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.pairing import PairingRecording
-from latintts.corpus.paths import CorpusPaths
+from latintts.corpus.paths import CorpusPaths, require_canonical_descendant
 from latintts.corpus.records import (
     ProcessingEvent,
     RecordingRecord,
@@ -50,11 +50,13 @@ from latintts.corpus.review import (
     _validate_existing_pairing_corrections,
     import_review_bundle,
     replay_review_events,
+    validate_review_bundle,
 )
 from latintts.corpus.store import (
     persist_recording_transitions,
     processing_event_exists,
     read_jsonl,
+    validate_processing_events,
     write_jsonl_atomic,
 )
 from latintts.corpus.transcripts import SpokenUnit
@@ -614,16 +616,70 @@ def build_approved_segments(
 def _publish_staged_audio(
     paths: CorpusPaths, staging_root: Path, artifacts: tuple[DerivedAudio, ...]
 ) -> None:
+    local_root = Path(os.path.abspath(paths.local_data))
+    segments_root = require_canonical_descendant(
+        local_root,
+        Path(os.path.abspath(paths.segments)),
+        kind="fixed segments root",
+    )
+    staging_root = require_canonical_descendant(
+        segments_root,
+        Path(os.path.abspath(staging_root)),
+        kind="audio staging root",
+    )
     for artifact in artifacts:
-        staged = staging_root / Path(*artifact.relative_path.split("/"))
-        final = paths.resolve_local(artifact.relative_path)
-        if not staged.is_file() or staged.is_symlink() or _digest(staged) != artifact.sha256:
+        if artifact.mode not in {"candidate", "lossless"}:
+            raise ValueError("manifest staging contains an unsupported audio mode")
+        mode_root = require_canonical_descendant(
+            local_root,
+            Path(
+                os.path.abspath(
+                    paths.segments
+                    / {"candidate": "candidates", "lossless": "lossless"}[artifact.mode]
+                )
+            ),
+            kind=f"{artifact.mode} mode root",
+        )
+        staged = require_canonical_descendant(
+            staging_root,
+            staging_root / Path(*artifact.relative_path.split("/")),
+            kind="staged audio artifact",
+            require_file=True,
+        )
+        final = require_canonical_descendant(
+            mode_root,
+            local_root / Path(*artifact.relative_path.split("/")),
+            kind="final audio artifact",
+        )
+        if _digest(staged) != artifact.sha256:
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
         final.parent.mkdir(parents=True, exist_ok=True)
+        final = require_canonical_descendant(
+            mode_root,
+            final,
+            kind="final audio artifact",
+        )
         if final.exists():
-            if final.is_symlink() or _digest(final) != artifact.sha256:
+            require_canonical_descendant(
+                mode_root,
+                final,
+                kind="final audio artifact",
+                require_file=True,
+            )
+            if _digest(final) != artifact.sha256:
                 raise CorpusFailure("CACHE_ARTIFACT_INVALID", "final audio artifact conflicts")
             continue
+        require_canonical_descendant(
+            staging_root,
+            staged,
+            kind="staged audio artifact",
+            require_file=True,
+        )
+        require_canonical_descendant(
+            mode_root,
+            final,
+            kind="final audio artifact",
+        )
         os.link(staged, final)
 
 
@@ -682,38 +738,22 @@ def _validate_transcript_sources(transcript: dict[str, Any], recording_id: str) 
 def _validate_processing_history(
     rows: tuple[dict[str, Any], ...],
     context: _ManifestContext,
-    review_sha256: str,
+    review_path: Path,
+    review_events: tuple[ReviewEvent, ...],
     config: CorpusConfig,
     paths: CorpusPaths,
-) -> None:
+) -> tuple[ReviewEvent, ...]:
     from latintts.corpus.cli import (
         _expected_cached_transition,
         _human_pairing_transition_exists,
         _pairing_tool_versions,
     )
 
-    events = tuple(ProcessingEvent.from_dict(row) for row in rows)
-    ids = tuple(event.event_id for event in events)
-    semantics = tuple(
-        (
-            event.recording_id,
-            event.previous_state,
-            event.target_state,
-            event.input_sha256s,
-            event.config_sha256,
-            event.tool_versions,
-            event.result,
-        )
-        for event in events
-    )
-    if len(ids) != len(set(ids)) or len(semantics) != len(set(semantics)):
-        raise ValueError("processing history contains duplicate identities")
+    events = validate_processing_events(rows)
     recording_events = tuple(
         event for event in events if event.recording_id == context.recording.recording_id
     )
-    if not recording_events or any(
-        left.target_state is not right.previous_state for left, right in pairwise(recording_events)
-    ):
+    if not recording_events:
         raise ValueError("processing history contains a stale state chain")
     final_state = recording_events[-1]
     recoverable_audit_ahead = (
@@ -762,6 +802,21 @@ def _validate_processing_history(
         config_sha256=config.digest,
         tool_versions=_pairing_tool_versions(context.pairing, "cached-word-alignment-v1"),
     )
+    reviewed_candidates = tuple(
+        event
+        for event in recording_events
+        if event.previous_state is CorpusState.ALIGNED
+        and event.target_state is CorpusState.REVIEWED
+        and len(event.input_sha256s) == 3
+        and event.input_sha256s[:2] == (context.recording.sha256, context.alignment_sha256)
+        and event.config_sha256 == config.digest
+        and event.tool_versions == ("human-review-v1",)
+        and event.result == "success"
+    )
+    if len(reviewed_candidates) != 1:
+        raise ValueError("processing history lacks one bound human review transition")
+    review_prefix_sha256 = reviewed_candidates[0].input_sha256s[2]
+    prefix_events = _review_event_prefix(review_path, review_events, review_prefix_sha256)
     reviewed = _expected_cached_transition(
         context.recording,
         CorpusState.ALIGNED,
@@ -769,13 +824,30 @@ def _validate_processing_history(
         input_sha256s=(
             context.recording.sha256,
             context.alignment_sha256,
-            review_sha256,
+            review_prefix_sha256,
         ),
         config_sha256=config.digest,
         tool_versions=("human-review-v1",),
     )
     if not processing_event_exists(rows, aligned) or not processing_event_exists(rows, reviewed):
         raise ValueError("alignment or review artifact is not bound to processing history")
+    return prefix_events
+
+
+def _review_event_prefix(
+    path: Path,
+    events: tuple[ReviewEvent, ...],
+    expected_sha256: str,
+) -> tuple[ReviewEvent, ...]:
+    data = path.read_bytes()
+    consumed = bytearray()
+    for count, line in enumerate(data.splitlines(keepends=True), 1):
+        if not line.endswith(b"\n"):
+            raise ValueError("review history is not strict newline-terminated JSONL")
+        consumed.extend(line)
+        if hashlib.sha256(consumed).hexdigest() == expected_sha256:
+            return events[:count]
+    raise ValueError("review transition digest is not an exact current JSONL prefix")
 
 
 def _validate_existing_manifest(paths: CorpusPaths) -> tuple[SegmentRecord, ...]:
@@ -838,7 +910,26 @@ def build_manifest_corpus(
     if any(record.state not in {CorpusState.REVIEWED, *terminal} for _, record in by_id.values()):
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
     all_reviewed = all(record.state is CorpusState.REVIEWED for record in recordings)
-    if all_reviewed:
+    processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    processing_rows = read_jsonl(processing_path)
+    decoded_processing = validate_processing_events(processing_rows)
+    selection_ids = set(selection.recording_ids)
+    audit_ahead = any(
+        event.recording_id in selection_ids
+        and event.previous_state is CorpusState.REVIEWED
+        and event.target_state in terminal
+        for event in decoded_processing
+    )
+    recovery_only = audit_ahead or not all_reviewed
+    if audit_ahead:
+        if not validate_review_bundle(
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        ):
+            raise CorpusFailure("REVIEW_REQUIRED", "durable review replay is incomplete")
+    elif all_reviewed:
         if not import_review_bundle(
             paths,
             config,
@@ -846,12 +937,11 @@ def build_manifest_corpus(
             run_command=run_command,
         ):
             raise CorpusFailure("REVIEW_REQUIRED", "review import is incomplete")
-    elif not import_review_bundle(
+    elif not validate_review_bundle(
         paths,
         config,
         ffmpeg_version=ffmpeg_version,
         run_command=run_command,
-        _validate_only=True,
     ):
         raise CorpusFailure("REVIEW_REQUIRED", "terminal review replay is incomplete")
     review_path = paths.manifests / "review.jsonl"
@@ -861,8 +951,7 @@ def build_manifest_corpus(
         paths, config, selection, recordings, review_events
     )
     contexts: list[_ManifestContext] = []
-    processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
-    processing_rows = read_jsonl(processing_path)
+    review_prefixes: dict[str, tuple[ReviewEvent, ...]] = {}
     expected_review_entities: set[str] = set()
     for recording_id in selection.recording_ids:
         index, recording = by_id[recording_id]
@@ -896,7 +985,14 @@ def build_manifest_corpus(
             _digest(run_directory / "alignment.json"),
             run_directory,
         )
-        _validate_processing_history(processing_rows, context, review_sha256, config, paths)
+        review_prefixes[recording_id] = _validate_processing_history(
+            processing_rows,
+            context,
+            review_path,
+            review_events,
+            config,
+            paths,
+        )
         contexts.append(context)
         expected_review_entities.update(
             _review_entity_id(recording_id, outcome.group.repetition_group_id, take.take_index)
@@ -928,6 +1024,22 @@ def build_manifest_corpus(
             alignments={
                 key: value["alignment_result"] for key, value in context.alignments.items()
             },
+            review_events=review_prefixes[context.recording.recording_id],
+            analysis_audio=context.analysis,
+            paths=paths,
+            config=config,
+            ffmpeg_version=ffmpeg_version,
+            _validate_only=True,
+        )
+        build_approved_segments(
+            recording=context.recording,
+            transcript=context.transcript,
+            units=context.units,
+            rights=rights,
+            pairing=context.pairing,
+            alignments={
+                key: value["alignment_result"] for key, value in context.alignments.items()
+            },
             review_events=review_events,
             analysis_audio=context.analysis,
             paths=paths,
@@ -937,7 +1049,7 @@ def build_manifest_corpus(
         )
     existing_segments: tuple[SegmentRecord, ...] | None = None
     existing_by_recording: dict[str, dict[tuple[str, int], SegmentRecord]] = {}
-    if not all_reviewed:
+    if recovery_only:
         existing_segments = _validate_existing_manifest(paths)
         for segment in existing_segments:
             existing_by_recording.setdefault(segment.recording_id, {})[
@@ -982,11 +1094,11 @@ def build_manifest_corpus(
             run_command=run_command,
             probe_command=probe_command,
             decode_command=decode_command,
-            _staging_root=staging_root if all_reviewed else None,
+            _staging_root=staging_root if not recovery_only else None,
             _artifacts=artifacts,
             _existing_segments=(
                 existing_by_recording.get(context.recording.recording_id, {})
-                if not all_reviewed
+                if recovery_only
                 else None
             ),
         )
@@ -1006,10 +1118,10 @@ def build_manifest_corpus(
         raise ValueError("approved segments contain duplicate segment_id")
     if existing_segments is not None and sorted_rows != existing_segments:
         raise ValueError("existing manifest row order differs from deterministic expected order")
-    if all_reviewed:
+    if not recovery_only:
         _publish_staged_audio(paths, staging_root, tuple(artifacts))
     manifest_path = paths.manifests / "segments.jsonl"
-    if all_reviewed:
+    if not recovery_only:
         write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
     manifest_sha256 = _digest(manifest_path)
     rights_sha256 = _digest(paths.manifests / "rights.jsonl")
@@ -1058,17 +1170,19 @@ def build_manifest_corpus(
             result="success",
         )
         del legacy_advanced
-        decoded_processing = {
+        processing_by_id = {
             item.event_id: item
             for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
         }
-        if event.event_id in decoded_processing:
-            if decoded_processing[event.event_id] != event:
+        if event.event_id in processing_by_id:
+            if processing_by_id[event.event_id] != event:
                 raise ValueError("existing terminal event conflicts with deterministic event")
-        elif legacy_event.event_id in decoded_processing:
-            if decoded_processing[legacy_event.event_id] != legacy_event:
+        elif legacy_event.event_id in processing_by_id:
+            if processing_by_id[legacy_event.event_id] != legacy_event:
                 raise ValueError("legacy terminal event conflicts with deterministic evidence")
             event = legacy_event
+        if audit_ahead and not processing_event_exists(processing_rows, event):
+            raise ValueError("durable terminal event batch is incomplete or conflicts")
         current = (
             *current[: context.recording_index],
             advanced,

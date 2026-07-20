@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -18,7 +21,7 @@ from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.manifest import build_approved_segments, build_manifest_corpus
 from latintts.corpus.pairing import pairing_from_dict
-from latintts.corpus.records import ReviewEvent, RightsRecord, advance_recording
+from latintts.corpus.records import ProcessingEvent, ReviewEvent, RightsRecord, advance_recording
 from latintts.corpus.store import read_jsonl, write_jsonl_atomic
 from tests.corpus.test_pairing import _audio_command
 from tests.corpus.test_review_cli import (
@@ -120,6 +123,273 @@ def _reviewed_project(tmp_path: Path, *, decision: str = "approved") -> tuple[ob
         _set_decisions(group, decision=decision)
     assert import_review_bundle(paths, config)
     return paths, config
+
+
+def _build_with_fake_audio(
+    paths: object,
+    config: CorpusConfig,
+    *,
+    after_transcode: Callable[[], None] | None = None,
+) -> bool:
+    sample_counts: dict[Path, int] = {}
+
+    def transcode(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        output = Path(command[-1])
+        if output.suffix == ".flac":
+            start = float(command[command.index("-ss") + 1])
+            end = float(command[command.index("-to") + 1])
+            sample_counts[output] = round((end - start) * 48_000)
+            output.write_bytes(b"fLaCsynthetic" + str(sample_counts[output]).encode("ascii"))
+            if after_transcode is not None:
+                after_transcode()
+            return CompletedProcess(command, 0, "", "")
+        return _audio_command(command, **kwargs)
+
+    def probe(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        target = Path(command[-1])
+        samples = sample_counts.get(target)
+        if samples is None:
+            samples = int(target.read_bytes().removeprefix(b"fLaCsynthetic"))
+        return CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "format": {"duration": str(samples / 48_000)},
+                    "streams": [
+                        {
+                            "codec_type": "audio",
+                            "codec_name": "flac",
+                            "sample_rate": "48000",
+                            "channels": 1,
+                            "duration_ts": str(samples),
+                            "time_base": "1/48000",
+                        }
+                    ],
+                }
+            ),
+            "",
+        )
+
+    return build_manifest_corpus(
+        paths,  # type: ignore[arg-type]
+        config,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=transcode,
+        probe_command=probe,
+        decode_command=lambda command, **_kwargs: CompletedProcess(command, 0, "", ""),
+    )
+
+
+def _make_directory_alias(alias: Path, target: Path) -> None:
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if os.name != "nt":
+            pytest.skip(f"directory symlinks unavailable: {error}")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            text=True,
+        )
+        if completed.returncode:
+            pytest.skip(f"directory aliases unavailable: {error}; {completed.stderr}")
+
+
+def test_build_manifest_accepts_strict_review_prefix_with_post_review_corrections(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    review_root = paths.alignments / "runs" / config.digest / "rec-1" / "review"  # type: ignore[attr-defined]
+    group = sorted(path for path in review_root.iterdir() if path.is_dir())[0]
+    grid_path = group / "take-1.TextGrid"
+    boundaries = review_module.read_textgrid(grid_path)
+    changed_words = (
+        review_module.ReviewedWordSpan(
+            boundaries.words[0].text,
+            boundaries.words[0].start_seconds + 0.01,
+            boundaries.words[0].end_seconds,
+        ),
+        *boundaries.words[1:],
+    )
+    review_module.write_textgrid(
+        grid_path,
+        duration_seconds=boundaries.duration_seconds,
+        take_start=boundaries.take_start,
+        take_end=boundaries.take_end,
+        words=changed_words,
+    )
+    _set_decisions(group, reviewed_at="2026-07-19T13:00:00+08:00", take_indexes=(1,))
+    _set_decisions(
+        group,
+        decision="rejected",
+        reason="corrected rejection",
+        reviewed_at="2026-07-19T13:01:00+08:00",
+        take_indexes=(2,),
+    )
+    assert import_review_bundle(paths, config)
+
+    assert _build_with_fake_audio(paths, config)
+    rows = read_jsonl(paths.manifests / "segments.jsonl")  # type: ignore[attr-defined]
+    assert len(rows) == 5
+    first = next(row for row in rows if row["text_unit_id"].endswith("0001"))
+    assert first["take_index"] == 1
+    assert first["word_spans"][0]["start_seconds"] == pytest.approx(0.01)
+    journal = read_jsonl(paths.manifests / "review.jsonl")  # type: ignore[attr-defined]
+    entity = next(
+        event["entity_id"]
+        for event in journal
+        if event["review_event_id"] == first["review_event_ids"][0]
+    )
+    assert first["review_event_ids"] == [
+        event["review_event_id"] for event in journal if event["entity_id"] == entity
+    ]
+
+
+@pytest.mark.parametrize("corruption", ("non-prefix-digest", "illegal-suffix"))
+def test_build_manifest_rejects_invalid_review_prefix_or_suffix_without_writes(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    review_path = paths.manifests / "review.jsonl"  # type: ignore[attr-defined]
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    if corruption == "non-prefix-digest":
+        rows = list(read_jsonl(processing_path))
+        index = next(
+            index
+            for index, row in enumerate(rows)
+            if row["previous_state"] == "ALIGNED" and row["target_state"] == "REVIEWED"
+        )
+        old = ProcessingEvent.from_dict(rows[index])
+        recording = review_module._decode_recording(
+            read_jsonl(paths.manifests / "recordings.jsonl")[0]  # type: ignore[attr-defined]
+        )
+        _, replacement = advance_recording(
+            replace(recording, state=CorpusState.ALIGNED),
+            CorpusState.REVIEWED,
+            input_sha256s=(*old.input_sha256s[:2], "f" * 64),
+            config_sha256=old.config_sha256,
+            tool_versions=old.tool_versions,
+            started_at=old.started_at,
+            finished_at=old.finished_at,
+            result=old.result,
+        )
+        rows[index] = replacement.to_dict()
+        write_jsonl_atomic(processing_path, rows)
+    else:
+        illegal = review_module._new_review_event(
+            "review:unknown",
+            "review_decision",
+            "unreviewed",
+            "approved",
+            {
+                "reason": "orphan suffix",
+                "reviewer": "owner",
+                "reviewed_at": "2026-07-20T00:00:00+08:00",
+            },
+        )
+        write_jsonl_atomic(review_path, (*read_jsonl(review_path), illegal.to_dict()))
+    protected = (
+        review_path,
+        processing_path,
+        paths.manifests / "recordings.jsonl",  # type: ignore[attr-defined]
+    )
+    before = {path: path.read_bytes() for path in protected}
+
+    with pytest.raises(ValueError, match=r"prefix|review|entity|processing"):
+        build_manifest_corpus(
+            paths,  # type: ignore[arg-type]
+            config,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("invalid review history must fail before extraction")
+            ),
+        )
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("alias_component", ("staging-parent", "mode-root"))
+def test_build_manifest_rejects_output_component_alias_before_runner_or_publish(
+    tmp_path: Path,
+    alias_component: str,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    outside = tmp_path / f"outside-{alias_component}"
+    outside.mkdir()
+    alias = (
+        paths.segments / ".manifest-staging"  # type: ignore[attr-defined]
+        if alias_component == "staging-parent"
+        else paths.segments / "lossless"  # type: ignore[attr-defined]
+    )
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    _make_directory_alias(alias, outside)
+    protected = (
+        paths.manifests / "review.jsonl",  # type: ignore[attr-defined]
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl",  # type: ignore[attr-defined]
+        paths.manifests / "recordings.jsonl",  # type: ignore[attr-defined]
+    )
+    before = {path: path.read_bytes() for path in protected}
+
+    with pytest.raises(ValueError, match=r"alias|reparse|canonical"):
+        build_manifest_corpus(
+            paths,  # type: ignore[arg-type]
+            config,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("output alias must be rejected before the runner")
+            ),
+        )
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert not tuple(outside.rglob("*"))
+
+
+def test_build_manifest_rechecks_final_mode_root_alias_before_link_or_state_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    outside = tmp_path / "outside-race"
+    outside.mkdir()
+    lossless_root = paths.segments / "lossless"  # type: ignore[attr-defined]
+    injected = False
+
+    def inject_alias() -> None:
+        nonlocal injected
+        if injected:
+            return
+        injected = True
+        _make_directory_alias(lossless_root, outside)
+
+    real_link = os.link
+
+    def guarded_link(source: Path, destination: Path) -> None:
+        if ".manifest-staging" not in Path(destination).parts:
+            raise AssertionError("reparse mode root must be rejected before hard-link publication")
+        real_link(source, destination)
+
+    monkeypatch.setattr(manifest_module.os, "link", guarded_link)
+    protected = (
+        paths.manifests / "review.jsonl",  # type: ignore[attr-defined]
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl",  # type: ignore[attr-defined]
+        paths.manifests / "recordings.jsonl",  # type: ignore[attr-defined]
+    )
+    before = {path: path.read_bytes() for path in protected}
+
+    with pytest.raises(ValueError, match=r"alias|reparse|canonical"):
+        _build_with_fake_audio(paths, config, after_transcode=inject_alias)
+
+    assert injected
+    assert {path: path.read_bytes() for path in protected} == before
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+    assert not tuple(outside.rglob("*"))
 
 
 def test_build_manifest_extracts_approved_source_clips_and_advances_state(
@@ -488,6 +758,79 @@ def test_build_manifest_recovers_batch_commit_checkpoints_without_duplicate_even
     assert len(event_ids) == len(set(event_ids))
     assert all(row["state"] == "REJECTED" for row in read_jsonl(recordings_path))
 
+
+def test_build_manifest_classifies_audit_ahead_before_any_writable_review_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _two_recording_aligned_project(tmp_path)
+    _write_rights(paths)
+    groups = export_review_bundle(paths, config)
+    for group in groups:
+        _set_decisions(group, decision="rejected", reason="fixture rejection")
+    assert import_review_bundle(paths, config)
+    recordings_path = paths.manifests / "recordings.jsonl"
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    real_replace = store_module.os.replace
+
+    def fail_recordings(source: Path, destination: Path) -> None:
+        if Path(destination) == recordings_path:
+            raise OSError("injected recordings replace failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(store_module.os, "replace", fail_recordings)
+    with pytest.raises(RuntimeError, match="recovery required"):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    monkeypatch.setattr(store_module.os, "replace", real_replace)
+    assert all(row["state"] == "REVIEWED" for row in read_jsonl(recordings_path))
+
+    decision_path = groups[0] / "decision.json"
+    original_decision = decision_path.read_bytes()
+    changed = json.loads(original_decision)
+    changed["decisions"][0].update(
+        decision="approved",
+        reason="stale changed decision",
+        reviewer="owner",
+        reviewed_at="2026-07-20T00:00:00+08:00",
+    )
+    decision_path.write_text(json.dumps(changed), encoding="utf-8")
+    protected = (
+        paths.manifests / "review.jsonl",
+        paths.manifests / "segments.jsonl",
+        events_path,
+        recordings_path,
+    )
+    before = {path: path.read_bytes() for path in protected}
+    clips_before = {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match=r"review|decision|durable|replay|processing"):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()} == (
+        clips_before
+    )
+    decision_path.write_bytes(original_decision)
+
+    transcripts_path = paths.manifests / "transcripts.jsonl"
+    original_transcripts = transcripts_path.read_bytes()
+    transcripts = list(read_jsonl(transcripts_path))
+    transcripts[0]["pronunciation_plan"]["tokens"][0]["ipa"] += "x"
+    write_jsonl_atomic(transcripts_path, transcripts)
+    before = {path: path.read_bytes() for path in protected}
+    clips_before = {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match=r"transcript|pronunciation|review|processing"):
+        build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert {path: path.read_bytes() for path in paths.segments.rglob("*") if path.is_file()} == (
+        clips_before
+    )
+    transcripts_path.write_bytes(original_transcripts)
+    assert build_manifest_corpus(paths, config, ffmpeg_version="ffmpeg-test-1")
+    terminal_events = read_jsonl(events_path)
+    assert len({row["event_id"] for row in terminal_events}) == len(terminal_events)
+
     mixed = list(read_jsonl(recordings_path))
     mixed[0]["state"] = "REVIEWED"
     write_jsonl_atomic(recordings_path, mixed)
@@ -673,7 +1016,7 @@ def test_build_manifest_rejects_duplicate_rights_and_processing_identities(
     )
     events = read_jsonl(processing_path)
     write_jsonl_atomic(processing_path, (*events, events[-1]))
-    with pytest.raises(ValueError, match="duplicate identities"):
+    with pytest.raises(ValueError, match=r"duplicate (identities|event_id)"):
         build_manifest_corpus(
             paths,  # type: ignore[arg-type]
             config,

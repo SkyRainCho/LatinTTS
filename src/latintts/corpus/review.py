@@ -2344,3 +2344,20 @@ def import_review_bundle(
             event=processing_event,
         )
     return all(complete_by_recording.values())
+
+
+def validate_review_bundle(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand = subprocess.run,
+) -> bool:
+    """Validate an already-durable review bundle without appending or transitioning state."""
+    return import_review_bundle(
+        paths,
+        config,
+        ffmpeg_version=ffmpeg_version,
+        run_command=run_command,
+        _validate_only=True,
+    )

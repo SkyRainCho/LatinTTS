@@ -77,14 +77,42 @@ def append_jsonl_event(path: Path, row: dict[str, Any]) -> None:
     write_jsonl_atomic(path, (*existing, row))
 
 
+def validate_processing_events(
+    rows: Iterable[dict[str, Any]],
+) -> tuple[ProcessingEvent, ...]:
+    """Decode and validate a complete processing journal without writing it."""
+    decoded_events = tuple(ProcessingEvent.from_dict(row) for row in rows)
+    event_ids = [event.event_id for event in decoded_events]
+    if len(event_ids) != len(set(event_ids)):
+        raise ValueError("processing events contain duplicate event_id")
+    semantic_keys = [
+        (
+            event.recording_id,
+            event.previous_state,
+            event.target_state,
+            event.input_sha256s,
+            event.config_sha256,
+            event.tool_versions,
+            event.result,
+        )
+        for event in decoded_events
+    ]
+    if len(semantic_keys) != len(set(semantic_keys)):
+        raise ValueError("processing events contain duplicate semantic transition")
+    last_target_by_recording: dict[str, object] = {}
+    for event in decoded_events:
+        last_target = last_target_by_recording.get(event.recording_id)
+        if last_target is not None and event.previous_state is not last_target:
+            raise ValueError("invalid processing event state chain")
+        last_target_by_recording[event.recording_id] = event.target_state
+    return decoded_events
+
+
 def processing_event_exists(
     existing_events: tuple[dict[str, Any], ...],
     event: ProcessingEvent,
 ) -> bool:
-    decoded_events = tuple(ProcessingEvent.from_dict(row) for row in existing_events)
-    event_ids = [existing_event.event_id for existing_event in decoded_events]
-    if len(event_ids) != len(set(event_ids)):
-        raise ValueError("processing events contain duplicate event_id")
+    decoded_events = validate_processing_events(existing_events)
     semantic_keys = [
         (
             existing_event.recording_id,
@@ -97,14 +125,6 @@ def processing_event_exists(
         )
         for existing_event in decoded_events
     ]
-    if len(semantic_keys) != len(set(semantic_keys)):
-        raise ValueError("processing events contain duplicate semantic transition")
-    last_target_by_recording: dict[str, object] = {}
-    for existing_event in decoded_events:
-        last_target = last_target_by_recording.get(existing_event.recording_id)
-        if last_target is not None and existing_event.previous_state is not last_target:
-            raise ValueError("invalid processing event state chain")
-        last_target_by_recording[existing_event.recording_id] = existing_event.target_state
     event_semantics = (
         event.recording_id,
         event.previous_state,
@@ -251,8 +271,10 @@ def persist_recording_transitions(
             raise ValueError("terminal recording state lacks its durable processing event")
         if not exists:
             missing.append(event)
+    prospective_rows = (*existing_events, *(event.to_dict() for event in missing))
+    validate_processing_events(prospective_rows)
     if missing:
-        write_jsonl_atomic(events_path, (*existing_events, *(event.to_dict() for event in missing)))
+        write_jsonl_atomic(events_path, prospective_rows)
     try:
         write_jsonl_atomic(recordings_path, target_rows)
     except Exception as error:

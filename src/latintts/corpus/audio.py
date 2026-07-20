@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure
-from latintts.corpus.paths import CorpusPaths
+from latintts.corpus.paths import CorpusPaths, require_canonical_descendant
 from latintts.corpus.records import RecordingRecord
 
 RunCommand = Callable[..., CompletedProcess[str]]
@@ -282,11 +282,9 @@ def _prepare_output_root(paths: CorpusPaths, mode: AudioMode) -> Path:
     else:
         folder = {"candidate": "candidates", "review": "review", "lossless": "lossless"}[mode]
         root = _lexical(paths.segments / folder)
-    if root.exists() and root.resolve() != root:
-        raise ValueError(f"derived output root aliases another location: {root}")
+    require_canonical_descendant(_lexical(paths.local_data), root, kind="derived output root")
     root.mkdir(parents=True, exist_ok=True)
-    if root.resolve() != root:
-        raise ValueError(f"derived output root aliases another location: {root}")
+    require_canonical_descendant(_lexical(paths.local_data), root, kind="derived output root")
     return root
 
 
@@ -591,20 +589,40 @@ def _make_plan(
             raise ValueError("derived target escapes its fixed mode root")
     else:
         _validate_fixed_roots(paths)
+        local_root = _lexical(paths.local_data)
+        segments_root = require_canonical_descendant(
+            local_root,
+            _lexical(paths.segments),
+            kind="fixed segments root",
+        )
         stage = _lexical(staging_root)
         try:
-            stage.relative_to(_lexical(paths.segments))
+            stage.relative_to(segments_root)
         except ValueError as error:
             raise ValueError("audio staging root must be inside the fixed segments root") from error
-        if stage.exists() and stage.resolve() != stage:
-            raise ValueError("audio staging root contains an alias")
+        require_canonical_descendant(segments_root, stage, kind="audio staging root")
+        final_root = _lexical(
+            paths.normalized
+            if mode == "analysis"
+            else paths.segments
+            / {"candidate": "candidates", "review": "review", "lossless": "lossless"}[mode]
+        )
+        require_canonical_descendant(local_root, final_root, kind="derived mode root")
+        require_canonical_descendant(
+            final_root,
+            _lexical(paths.local_data / Path(*relative_path.split("/"))),
+            kind="final derived target",
+        )
         stage.mkdir(parents=True, exist_ok=True)
+        require_canonical_descendant(segments_root, stage, kind="audio staging root")
         destination = _lexical(stage / Path(*relative_path.split("/")))
         try:
             destination.relative_to(stage)
         except ValueError as error:
             raise ValueError("staged derived target escapes its transaction root") from error
+        require_canonical_descendant(stage, destination, kind="staged derived target")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        require_canonical_descendant(stage, destination, kind="staged derived target")
     if destination.is_symlink():
         raise ValueError("derived target is an alias")
     return _ArtifactPlan(

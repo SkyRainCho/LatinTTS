@@ -121,5 +121,41 @@
 ### 残余风险
 
 - Windows 当前主机仍无 symlink/reparse 创建权限，9 个既有 alias 专项测试按条件 skip；可运行的 canonical/reparse/alias 链检查均通过。
-- coverage raw value 精确为 `95.00%`，后续增加生产分支必须同步增加行为测试。
+- 本轮整改前该快照的 coverage raw value 为 `95.03%`；后续新增生产分支仍必须同步增加行为测试。
 - final cache 使用 staging 后逐个无覆盖 hard-link 发布；跨文件中断可能留下未被 manifest 引用的完整内容寻址 cache，但不会发布 manifest/events/state。重跑会逐哈希验证并收敛，不覆盖或删除旧/真实数据。
+
+## 2026-07-20 第二轮审查整改
+
+### 修复结果
+
+- 在任何 review import 写入前严格解码完整 processing journal，并先分类 audit-ahead。若 terminal events 已 durable 而 recordings 仍为 `REVIEWED`，只执行 `validate_review_bundle()` 纯读复验；decision 或 transcript IPA 漂移均保持 review、manifest、events、recordings 与 clips 字节不变，恢复原输入后可无重复 event ID 收敛。
+- `ALIGNED -> REVIEWED` 不再错误绑定当前完整 review journal。其第三个 input digest 必须等于当前 `review.jsonl` 的一个完整 LF 行字节前缀；该前缀自身必须包含当时完整、合法、可重放的人审决定。前缀之后的合法边界/decision 修订允许参与最终 manifest，非法或孤儿 suffix 在提取前拒绝且零写入。
+- 新增共享 canonical descendant walker，逐组件 `lstat` 并拒绝 symlink、Windows junction/reparse point、非 canonical resolve 与根外逃逸。staging 父链、staged destination、candidate/lossless mode root、final destination 均在创建前后验证，并在 hard-link 前再次复检。
+- `persist_recording_transitions()` 现在对 `existing + missing` prospective journal 做一次完整严格验证，再进行任何 replace；跨 batch 重复 `event_id`、重复语义与逐 recording state-chain gap 均零写入拒绝。
+
+### 第二轮 RED -> GREEN 证据
+
+1. audit-ahead decision 漂移：旧实现先改写 `review.jsonl`，零写断言 RED；修复后 decision 与 IPA 两类漂移及恢复路径同测 GREEN。
+2. legal correction suffix：旧实现要求 review transition digest 等于当前完整 journal，合法 suffix 构建失败；改为 exact-byte prefix 后 GREEN，并断言最终行消费实体完整事件链及修订边界。
+3. output alias：使用无需管理员权限的 Windows junction 构造 `.manifest-staging` 父组件与 `lossless` mode-root alias；旧实现两例均到达 FFmpeg runner，修复后均在 runner 前拒绝。另有运行中注入 mode-root junction 的发布竞态测试，确认 hard-link、manifest、events、state 均未发布。
+4. prospective batch：重复 event ID 与 state-chain gap 两测在旧实现均 `DID NOT RAISE` 且会写入；共享完整 journal preflight 后均 GREEN。
+5. coverage 新分支首次全量为 `94.97%`，补齐 lexical escape 与 required-file 行为测试后达到 raw `95.01773870121856%`。
+
+### 第二轮最终门禁
+
+- 受影响范围 `tests/corpus/test_manifest.py tests/corpus/test_manifest_cli.py tests/corpus/test_audio.py tests/corpus/test_audio_review.py tests/corpus/test_store.py tests/corpus/test_paths.py`：`203 passed, 2 skipped`。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1412 passed, 9 skipped`
+  - displayed coverage：`95.02%`
+  - raw coverage：`95.01773870121856%`（`6483` statements，`323` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（72 files already formatted）。
+- `python -m mypy src`：PASS（31 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第二轮残余边界
+
+- 全量中的 9 个既有 symlink 用例仍因当前 Windows token 缺少 symlink privilege 而条件 skip；本轮新增的 Windows junction/reparse 攻击测试实际执行且通过，不依赖该 privilege。
+- coverage raw value 为 `95.01773870121856%`，严格高于 `95%` 门禁；新增生产分支仍应同步增加行为覆盖。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

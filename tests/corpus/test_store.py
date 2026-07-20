@@ -229,6 +229,78 @@ def test_persist_transitions_recovers_mixed_states_and_durable_events_without_du
     assert read_jsonl(recordings_path) == (updated.to_dict(), other_updated.to_dict())
 
 
+def test_persist_transitions_rejects_duplicate_event_id_in_prospective_batch_without_writes(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    other = replace(
+        original,
+        recording_id="rec-other",
+        relative_path="raw/spoken/other.wav",
+        sha256="c" * 64,
+    )
+    other_updated, other_event = advance_recording(
+        other,
+        CorpusState.INVENTORIED,
+        input_sha256s=(other.sha256,),
+        config_sha256="b" * 64,
+        tool_versions=("ffprobe=test",),
+        started_at="2026-07-19T10:00:00+08:00",
+        finished_at="2026-07-19T10:00:01+08:00",
+        result="success",
+    )
+    conflicting = replace(other_event, event_id=event.event_id)
+    write_jsonl_atomic(recordings_path, (original.to_dict(), other.to_dict()))
+    before_recordings = recordings_path.read_bytes()
+
+    with pytest.raises(ValueError, match="duplicate event_id"):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(updated, other_updated),
+            events=(event, conflicting),
+        )
+
+    assert recordings_path.read_bytes() == before_recordings
+    assert not events_path.exists()
+
+
+def test_persist_transitions_rejects_prospective_state_chain_gap_without_writes(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    _, inventoried, inventoried_event = _transition()
+    ready = replace(inventoried, state=CorpusState.TEXT_CANDIDATES_READY)
+    confirmed, confirmed_event = advance_recording(
+        ready,
+        CorpusState.TRANSCRIPT_CONFIRMED,
+        input_sha256s=(ready.sha256, "c" * 64),
+        config_sha256="b" * 64,
+        tool_versions=("prepare-text=test",),
+        started_at="2026-07-19T10:00:02+08:00",
+        finished_at="2026-07-19T10:00:03+08:00",
+        result="success",
+    )
+    write_jsonl_atomic(recordings_path, (ready.to_dict(),))
+    write_jsonl_atomic(events_path, (inventoried_event.to_dict(),))
+    before_recordings = recordings_path.read_bytes()
+    before_events = events_path.read_bytes()
+
+    with pytest.raises(ValueError, match="state chain"):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(confirmed,),
+            events=(confirmed_event,),
+        )
+
+    assert recordings_path.read_bytes() == before_recordings
+    assert events_path.read_bytes() == before_events
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     (
