@@ -193,6 +193,64 @@ def test_persist_transitions_publishes_all_events_then_one_recordings_snapshot(
     assert read_jsonl(recordings_path) == (updated.to_dict(), other_updated.to_dict())
 
 
+def test_persist_transitions_rejects_stale_expected_snapshot_before_any_write(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    write_jsonl_atomic(recordings_path, (original.to_dict(),))
+    write_jsonl_atomic(events_path, ())
+    before = {
+        recordings_path: recordings_path.read_bytes(),
+        events_path: events_path.read_bytes(),
+    }
+
+    with pytest.raises(ValueError, match="recordings snapshot changed"):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(updated,),
+            events=(event,),
+            _expected_recordings_sha256="0" * 64,
+            _expected_events_sha256=store.jsonl_sha256(()),
+        )
+
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_persist_transitions_hands_off_old_and_new_file_guards_in_order(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    original_rows = (original.to_dict(),)
+    write_jsonl_atomic(recordings_path, original_rows)
+    write_jsonl_atomic(events_path, ())
+    calls: list[tuple[str, str | None]] = []
+
+    store.persist_recording_transitions(
+        recordings_path=recordings_path,
+        events_path=events_path,
+        recordings=(updated,),
+        events=(event,),
+        _expected_recordings_sha256=store.jsonl_sha256(original_rows),
+        _expected_events_sha256=store.jsonl_sha256(()),
+        _before_events_write=lambda: calls.append(("before-events", None)),
+        _after_events_write=lambda digest: calls.append(("after-events", digest)),
+        _before_recordings_write=lambda: calls.append(("before-recordings", None)),
+        _after_recordings_write=lambda digest: calls.append(("after-recordings", digest)),
+    )
+
+    assert calls == [
+        ("before-events", None),
+        ("after-events", store.jsonl_sha256((event.to_dict(),))),
+        ("before-recordings", None),
+        ("after-recordings", store.jsonl_sha256((updated.to_dict(),))),
+    ]
+
+
 def test_persist_transitions_recovers_mixed_states_and_durable_events_without_duplicates(
     tmp_path: Path,
 ) -> None:

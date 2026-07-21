@@ -2001,3 +2001,373 @@ def test_build_approved_segments_rejects_reviewed_word_text_stale_against_transc
 
     with pytest.raises(ValueError, match=r"stale|text|transcript|pronunciation"):
         build_approved_segments(**values)  # type: ignore[arg-type]
+
+
+def test_build_manifest_takes_transaction_lock_before_loading_rights_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    rights_path = paths.manifests / "rights.jsonl"  # type: ignore[attr-defined]
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    before = {
+        recordings_path: recordings_path.read_bytes(),
+        processing_path: processing_path.read_bytes(),
+    }
+    real_open = manifest_module._open_output_namespace_guard
+
+    def revoke_then_open(*args: object, **kwargs: object) -> object:
+        rows = list(read_jsonl(rights_path))
+        rows[0]["allow_model_training"] = False
+        write_jsonl_atomic(rights_path, rows)
+        return real_open(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(manifest_module, "_open_output_namespace_guard", revoke_then_open)
+
+    with pytest.raises(CorpusFailure) as error:
+        _build_with_fake_audio(paths, config)
+
+    assert error.value.code == "RIGHTS_SCOPE_UNCONFIRMED"
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_build_manifest_fails_on_busy_writer_lock_before_any_input_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    first = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        manifest_module,
+        "_load_selection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("input was loaded before acquiring the writer lock")
+        ),
+    )
+    try:
+        with pytest.raises(OSError):
+            _build_with_fake_audio(paths, config)
+    finally:
+        first.close()
+
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "selection",
+        "recordings",
+        "rights",
+        "transcripts",
+        "review",
+        "processing",
+        "segmentation",
+        "pairing",
+        "alignment",
+    ),
+)
+def test_build_manifest_rejects_authoritative_snapshot_drift_before_segments_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    terminal_before = tuple(
+        row for row in read_jsonl(processing_path) if row["previous_state"] == "REVIEWED"
+    )
+    real_publish = manifest_module._publish_staged_audio
+
+    def publish_then_drift(*args: object, **kwargs: object) -> object:
+        published = real_publish(*args, **kwargs)  # type: ignore[arg-type]
+        try:
+            if drift == "selection":
+                path = paths.manifests / "pilot-selection.json"  # type: ignore[attr-defined]
+                rows = list(read_jsonl(path))
+                rows[0]["strategy"] += "-mutatum"
+                write_jsonl_atomic(path, rows)
+            elif drift == "recordings":
+                rows = list(read_jsonl(recordings_path))
+                rows[0]["notes"] += " mutatum"
+                write_jsonl_atomic(recordings_path, rows)
+            elif drift == "rights":
+                path = paths.manifests / "rights.jsonl"  # type: ignore[attr-defined]
+                rows = list(read_jsonl(path))
+                rows[0]["allow_model_training"] = False
+                write_jsonl_atomic(path, rows)
+            elif drift == "transcripts":
+                path = paths.manifests / "transcripts.jsonl"  # type: ignore[attr-defined]
+                rows = list(read_jsonl(path))
+                rows[0]["normalized_text"] += " mutatum"
+                write_jsonl_atomic(path, rows)
+            elif drift == "review":
+                path = paths.manifests / "review.jsonl"  # type: ignore[attr-defined]
+                rows = read_jsonl(path)
+                write_jsonl_atomic(path, (*rows, rows[-1]))
+            elif drift == "processing":
+                recording = review_module._decode_recording(read_jsonl(recordings_path)[0])
+                discovered = replace(
+                    recording,
+                    recording_id="rec-unrelated",
+                    state=CorpusState.DISCOVERED,
+                )
+                _, unrelated = advance_recording(
+                    discovered,
+                    CorpusState.INVENTORIED,
+                    input_sha256s=(discovered.sha256,),
+                    config_sha256=config.digest,
+                    tool_versions=("fixture=1",),
+                    started_at="2026-07-21T00:00:00+08:00",
+                    finished_at="2026-07-21T00:00:01+08:00",
+                    result="success",
+                )
+                write_jsonl_atomic(
+                    processing_path,
+                    (*read_jsonl(processing_path), unrelated.to_dict()),
+                )
+            else:
+                path = (
+                    paths.alignments  # type: ignore[attr-defined]
+                    / "runs"
+                    / config.digest
+                    / "rec-1"
+                    / f"{drift}.json"
+                )
+                rows = list(read_jsonl(path))
+                rows[0]["schema_version"] = "mutatum"
+                write_jsonl_atomic(path, rows)
+        except Exception:
+            manifest_module._close_artifact_guards(published)  # type: ignore[arg-type]
+            raise
+        return published
+
+    monkeypatch.setattr(manifest_module, "_publish_staged_audio", publish_then_drift)
+
+    with pytest.raises((CorpusFailure, OSError, ValueError)):
+        _build_with_fake_audio(paths, config)
+
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+    assert all(row["state"] == "REVIEWED" for row in read_jsonl(recordings_path))
+    terminal_after = tuple(
+        row for row in read_jsonl(processing_path) if row["previous_state"] == "REVIEWED"
+    )
+    assert terminal_after == terminal_before
+
+
+def test_build_manifest_pins_segments_file_before_terminal_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    manifest_path = paths.manifests / "segments.jsonl"  # type: ignore[attr-defined]
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    real_persist = manifest_module.persist_recording_transitions
+
+    def replace_segments_then_persist(**kwargs: object) -> None:
+        rows = list(read_jsonl(manifest_path))
+        rows[0]["spoken_text"] += " mutatum"
+        write_jsonl_atomic(manifest_path, rows)
+        real_persist(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        replace_segments_then_persist,
+    )
+
+    with pytest.raises((CorpusFailure, OSError, ValueError)):
+        _build_with_fake_audio(paths, config)
+
+    assert all(row["state"] == "REVIEWED" for row in read_jsonl(recordings_path))
+    assert not any(row["previous_state"] == "REVIEWED" for row in read_jsonl(processing_path))
+
+
+@pytest.mark.parametrize("drift", ("events", "recordings"))
+def test_build_manifest_detects_terminal_file_drift_immediately_after_atomic_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    events_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    real_write = store_module.write_jsonl_atomic
+    attacked = False
+
+    def write_then_drift(path: Path, rows: object, **kwargs: object) -> None:
+        nonlocal attacked
+        materialized = tuple(rows)  # type: ignore[arg-type]
+        real_write(path, materialized, **kwargs)  # type: ignore[arg-type]
+        target = events_path if drift == "events" else recordings_path
+        if path != target or attacked:
+            return
+        if drift == "events" and not any(
+            row.get("previous_state") == "REVIEWED" for row in materialized
+        ):
+            return
+        if drift == "recordings" and not any(
+            row.get("state") == "APPROVED" for row in materialized
+        ):
+            return
+        attacked = True
+        changed = [dict(row) for row in materialized]
+        changed[-1]["result" if drift == "events" else "notes"] = "mutatum"
+        real_write(path, changed, **kwargs)
+
+    monkeypatch.setattr(store_module, "write_jsonl_atomic", write_then_drift)
+
+    expected = ValueError if drift == "events" else RuntimeError
+    message = r"durable file bytes|snapshot|transaction" if drift == "events" else "recovery"
+    with pytest.raises(expected, match=message):
+        _build_with_fake_audio(paths, config)
+
+    assert attacked
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-sharing contract")
+def test_build_manifest_holds_new_events_guard_through_recordings_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    events_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    real_write = store_module.write_jsonl_atomic
+    blocked = False
+
+    def attack_events_during_recordings_write(path: Path, rows: object, **kwargs: object) -> None:
+        nonlocal blocked
+        materialized = tuple(rows)  # type: ignore[arg-type]
+        if path == recordings_path and any(row.get("state") == "APPROVED" for row in materialized):
+            try:
+                real_write(events_path, read_jsonl(events_path))
+            except OSError:
+                blocked = True
+            else:
+                raise AssertionError("processing event file was not pinned through state replace")
+        real_write(path, materialized, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        store_module,
+        "write_jsonl_atomic",
+        attack_events_during_recordings_write,
+    )
+
+    assert _build_with_fake_audio(paths, config)
+    assert blocked
+
+
+def test_terminal_event_digests_equal_the_consumed_authoritative_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+
+    assert _build_with_fake_audio(paths, config)
+
+    events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    terminal = next(row for row in read_jsonl(events_path) if row["previous_state"] == "REVIEWED")
+    expected = tuple(
+        hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (
+            paths.manifests / "rights.jsonl",  # type: ignore[attr-defined]
+            paths.manifests / "transcripts.jsonl",  # type: ignore[attr-defined]
+        )
+    )
+    assert tuple(terminal["input_sha256s"][1:3]) == expected
+    assert (
+        terminal["input_sha256s"][5]
+        == hashlib.sha256(
+            (paths.manifests / "review.jsonl").read_bytes()  # type: ignore[attr-defined]
+        ).hexdigest()
+    )
+    assert (
+        terminal["input_sha256s"][6]
+        == hashlib.sha256(
+            (paths.manifests / "segments.jsonl").read_bytes()  # type: ignore[attr-defined]
+        ).hexdigest()
+    )
+
+
+def test_build_manifest_preserves_business_failure_when_namespace_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    real_close = manifest_module._OutputNamespaceGuard.close
+
+    def close_then_fail(guard: object) -> None:
+        real_close(guard)  # type: ignore[arg-type]
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(manifest_module._OutputNamespaceGuard, "close", close_then_fail)
+    monkeypatch.setattr(
+        manifest_module,
+        "_load_selection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("business failure")),
+    )
+
+    with pytest.raises(ValueError, match="business failure"):
+        _build_with_fake_audio(paths, config)
+
+
+def test_file_snapshot_cleanup_closes_every_guard_and_raises_first_failure() -> None:
+    calls: list[str] = []
+
+    class BrokenGuard:
+        def __init__(self, name: str, failure: str | None) -> None:
+            self.name = name
+            self.failure = failure
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if self.failure is not None:
+                raise OSError(self.failure)
+
+    guards = {
+        "first": BrokenGuard("first", "first failure"),
+        "second": BrokenGuard("second", "second failure"),
+        "third": BrokenGuard("third", None),
+    }
+
+    with pytest.raises(OSError, match="second failure"):
+        manifest_module._close_file_snapshots(guards)  # type: ignore[arg-type]
+
+    assert calls == ["third", "second", "first"]
+
+
+def test_file_snapshot_rejects_expected_digest_conflict_and_use_after_close(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "snapshot.jsonl"
+    write_jsonl_atomic(path, ({"value": "stable"},))
+    guards: dict[str, object] = {}
+    snapshot = manifest_module._add_file_snapshot(guards, path)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="expected bytes"):
+        manifest_module._add_file_snapshot(  # type: ignore[arg-type]
+            guards,
+            path,
+            expected_sha256="0" * 64,
+        )
+
+    snapshot.close()
+    with pytest.raises(ValueError, match="already closed"):
+        snapshot.validate()

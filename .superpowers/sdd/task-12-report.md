@@ -248,3 +248,49 @@
 - POSIX fd 可固定 inode、相对 replace 可固定写入目录，但标准 POSIX 不提供 Windows 式强制 deny-delete sharing；因此使用所有 LatinTTS writer 必须遵守的 `flock` 单写协议，并在每个 durable checkpoint 前后检测 public path identity 漂移。非合作进程造成漂移时构建失败，不返回成功。
 - 9 个 skip 仍全部来自当前 Windows token 缺少 symlink privilege；本轮 Windows junction、sharing-violation、identity/hash 与 lock tests 均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-21 第五轮审查整改
+
+### 锁生命周期与权威输入 snapshot
+
+- `.build-manifest.lock` 与 output namespace guard 现在在第一次读取 `pilot-selection.json`、`recordings.jsonl`、`processing-events.jsonl` 以及任何 review import/validation 之前取得，并持有到完整 build 返回；第二 writer 在任何 loader、review import、clip extraction 或 `segments.jsonl` 写入前即失败。
+- review import 作为可写 Phase A 在锁内完成；随后丢弃 Phase A 解码对象，重新加载 selection、recordings、rights、transcripts、review 与 processing 的权威 Phase B snapshot。
+- Windows `_FileSnapshot` 使用 `GENERIC_READ`、仅 `FILE_SHARE_READ` 与 `FILE_FLAG_OPEN_REPARSE_POINT`，从持有 handle 取得 identity 与 SHA-256，拒绝后续 write/delete sharing；POSIX 使用 `O_NOFOLLOW` file descriptor、public inode identity 与 handle digest，并在所有 durable checkpoint 前后复验。
+- raw recording、analysis audio、segmentation、pairing、alignment 与可选 `pairing-automatic.json` 同样被纳入 snapshot。event 的 rights、transcripts、pairing、alignment、review digest 与实际构行消费的同一份锁定 snapshot 完全一致。
+- Windows rights 撤权、selection/recordings/transcripts/review/processing/segmentation/pairing/alignment 漂移都被强制 sharing violation 阻止；POSIX 上相同漂移在首次 `segments.jsonl` durable write 前由 identity/hash 复验拒绝。
+
+### Durable file handoff
+
+- fresh `segments.jsonl` atomic replace 后立即以 canonical expected JSONL digest 打开严格 file snapshot；recovery 先 pin 已有 `segments.jsonl` 再解析。两者均持有到 terminal events 与 recordings 完成且最终复验通过。
+- `persist_recording_transitions()` 新增 exact-existing-digest 与 before/after write handoff：旧 processing snapshot 在最后复验后才关闭，events replace 后立即校验 expected bytes 并 pin；新 events guard 持有穿过 recordings replace。recordings 使用相同交接，写后立即 pin。
+- events/recordings atomic replace 后、after-pin 前注入的字节漂移均被 expected digest 拒绝；recordings 写后失败继续使用既有 audit-first `RecordingTransitionPersistenceError` 恢复契约，不返回成功。
+- cleanup 现在关闭全部 snapshot、artifact、publication、namespace handles，记录第一个 cleanup failure；已有业务异常优先，不再被后续 close failure 覆盖。release 失败的 snapshot 保留在 registry，最终清理会再次尝试。
+
+### 第五轮 RED -> GREEN 证据
+
+1. rights 在旧 `_open_output_namespace_guard` seam 被撤权：旧实现使用旧 rights 构行却把新 rights digest 写入 event，测试 `DID NOT RAISE`；锁前移后以 `RIGHTS_SCOPE_UNCONFIRMED` 拒绝且 segments/events/state 零写入。
+2. 持有第一个 writer lock 后启动第二 build：旧实现先触发 `_load_selection`；修复后第二 build 在首次 loader 前以 sharing/lock failure 退出。
+3. selection、recordings、rights、transcripts、review、processing、segmentation、pairing、alignment 九类 publish 前漂移在旧实现全部可继续；Phase B file snapshots 后九类均在 `segments.jsonl` 前 fail closed。
+4. `segments.jsonl` digest 后、terminal persist 入口替换：旧实现仍返回 APPROVED；严格 segments snapshot 后 write/replace 被阻止或在 terminal state 前拒绝。
+5. events/recordings 写后漂移、events guard 跨 recordings replace、event digest 精确绑定、cleanup 业务异常优先与 store handoff 顺序专项共 `17 passed`。
+6. expanded focused 首跑发现 tampered-raw 错误类型从 `INVENTORY_HASH_MISMATCH` 退化为 review ValueError；恢复锁内 raw preflight 后既有契约与 Phase B snapshot 复验同时保留，复跑全绿。
+
+### 第五轮最终门禁
+
+- expanded focused `tests/corpus/test_manifest.py tests/corpus/test_manifest_cli.py tests/corpus/test_store.py tests/corpus/test_audio.py tests/corpus/test_audio_review.py tests/corpus/test_review.py tests/corpus/test_review_cli.py tests/corpus/test_paths.py`：`390 passed, 5 skipped`。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1457 passed, 9 skipped`
+  - displayed coverage：`95.00%`
+  - raw coverage：`95.00142005112184%`（`7042` statements，`352` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（72 files already formatted）。
+- `python -m mypy src`：PASS（31 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第五轮残余边界
+
+- Windows 依靠 deny-sharing handles 提供强制 content/delete exclusion；snapshot 到 store replace 的有意 handoff 窗口仍受无共享 build lock、expected existing digest、write 后 expected bytes pin 三层约束。
+- POSIX descriptor 能固定 inode，`dir_fd` 能固定 atomic replace parent，`flock` 只约束合作 writer；非合作 writer 无法被标准 POSIX 强制禁止，但每个首次 durable write与 terminal checkpoint 前后的 identity/hash drift 都会令 build 失败，且报告不宣称 Windows 式强制排他。
+- 全量 9 个 skip 仍全部来自当前 Windows token 缺少 symlink privilege；Windows sharing、snapshot identity/hash、post-write pin 与 lock tests 均实际执行。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

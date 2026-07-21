@@ -4,6 +4,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -55,6 +56,7 @@ from latintts.corpus.review import (
     validate_review_bundle,
 )
 from latintts.corpus.store import (
+    jsonl_sha256,
     persist_recording_transitions,
     processing_event_exists,
     read_jsonl,
@@ -837,6 +839,165 @@ class _ArtifactGuard:
             os.close(cast(int, self.handle))
 
 
+@dataclass(slots=True)
+class _FileSnapshot:
+    path: Path
+    handle: object
+    identity: tuple[int, ...]
+    sha256: str
+    windows: bool
+    directory: _PublicationGuard | None = None
+    closed: bool = False
+
+    def validate(self) -> None:
+        if self.closed:
+            raise ValueError("file snapshot is already closed")
+        if self.directory is not None:
+            self.directory.validate()
+        require_canonical_descendant(
+            self.path.parent,
+            self.path,
+            kind="transaction snapshot file",
+            require_file=True,
+        )
+        identity: tuple[int, ...]
+        if self.windows:
+            current = _windows_open_handle(
+                self.path,
+                desired_access=0x80000000,
+                share_mode=0x1,
+                flags=0x00200000,
+            )
+            try:
+                identity = _windows_handle_identity(current, kind="transaction snapshot file")
+            finally:
+                _windows_close_handle(current)
+            digest = _windows_digest_handle(self.handle)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            descriptor = cast(int, self.handle)
+            pinned = os.fstat(descriptor)
+            current_metadata = os.stat(self.path, follow_symlinks=False)
+            if not stat.S_ISREG(pinned.st_mode) or not stat.S_ISREG(current_metadata.st_mode):
+                raise ValueError("transaction snapshot must identify a regular file")
+            identity = (current_metadata.st_dev, current_metadata.st_ino)
+            digest = _posix_digest_handle(descriptor)
+        if identity != self.identity or digest != self.sha256:
+            raise ValueError(f"transaction input snapshot changed: {self.path}")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        if self.windows:
+            _windows_close_handle(self.handle)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            os.close(cast(int, self.handle))
+        self.closed = True
+
+
+def _open_file_snapshot(
+    path: Path,
+    *,
+    directory: _PublicationGuard | None = None,
+    expected_sha256: str | None = None,
+) -> _FileSnapshot:
+    path = Path(os.path.abspath(path))
+    require_canonical_descendant(
+        path.parent,
+        path,
+        kind="transaction snapshot file",
+        require_file=True,
+    )
+    if directory is not None:
+        directory.validate()
+    if os.name == "nt":
+        handle = _windows_open_handle(
+            path,
+            desired_access=0x80000000,
+            share_mode=0x1,
+            flags=0x00200000,
+        )
+        try:
+            identity = _windows_handle_identity(handle, kind="transaction snapshot file")
+            digest = _windows_digest_handle(handle)
+            if expected_sha256 is not None and digest != expected_sha256:
+                raise ValueError("durable file bytes differ from expected transaction output")
+        except Exception:
+            _windows_close_handle(handle)
+            raise
+        return _FileSnapshot(path, handle, identity, digest, True, directory)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)  # pragma: no cover
+    if directory is not None and path.parent == directory.root:  # pragma: no cover
+        descriptor = os.open(path.name, flags, dir_fd=cast(int, directory.handle))
+    else:  # pragma: no cover - exercised on POSIX hosts
+        descriptor = os.open(path, flags)
+    try:  # pragma: no cover - exercised on POSIX hosts
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("transaction snapshot handle is not a regular file")
+        digest = _posix_digest_handle(descriptor)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ValueError("durable file bytes differ from expected transaction output")
+    except Exception:  # pragma: no cover - exercised on POSIX hosts
+        os.close(descriptor)
+        raise
+    return _FileSnapshot(  # pragma: no cover - exercised on POSIX hosts
+        path,
+        descriptor,
+        (metadata.st_dev, metadata.st_ino),
+        digest,
+        False,
+        directory,
+    )
+
+
+def _close_file_snapshots(guards: Mapping[str, _FileSnapshot]) -> None:
+    failure: OSError | None = None
+    for guard in reversed(tuple(guards.values())):
+        try:
+            guard.close()
+        except OSError as error:
+            if failure is None:
+                failure = error
+    if failure is not None:
+        raise failure
+
+
+def _validate_file_snapshots(guards: Mapping[str, _FileSnapshot]) -> None:
+    for guard in guards.values():
+        guard.validate()
+
+
+def _add_file_snapshot(
+    guards: dict[str, _FileSnapshot],
+    path: Path,
+    *,
+    directory: _PublicationGuard | None = None,
+    expected_sha256: str | None = None,
+) -> _FileSnapshot:
+    key = str(Path(os.path.abspath(path)))
+    existing = guards.get(key)
+    if existing is not None:
+        existing.validate()
+        if expected_sha256 is not None and existing.sha256 != expected_sha256:
+            raise ValueError("transaction snapshot differs from expected bytes")
+        return existing
+    guard = _open_file_snapshot(
+        path,
+        directory=directory,
+        expected_sha256=expected_sha256,
+    )
+    guards[key] = guard
+    return guard
+
+
+def _release_file_snapshot(guards: dict[str, _FileSnapshot], path: Path) -> None:
+    key = str(Path(os.path.abspath(path)))
+    guard = guards[key]
+    guard.validate()
+    guard.close()
+    del guards[key]
+
+
 def _open_artifact_guard(
     path: Path,
     sha256: str,
@@ -943,7 +1104,8 @@ class _OutputNamespaceGuard:
             try:
                 guard.close()
             except OSError as error:
-                failure = error
+                if failure is None:
+                    failure = error
         if failure is not None:
             raise failure
 
@@ -968,7 +1130,8 @@ def _open_output_namespace_guard(
     project_root = Path(os.path.abspath(paths.project_root))
     manifests = Path(os.path.abspath(paths.manifests))
     processing = Path(os.path.abspath(processing_path.parent))
-    targets = [manifests, processing]
+    segments = Path(os.path.abspath(paths.segments))
+    targets = [manifests, processing, segments]
     targets.extend(guard.root.parent for guard in publication_guards.values())
     ordered_paths = sorted(
         {directory for target in targets for directory in _directory_chain(project_root, target)},
@@ -1020,12 +1183,14 @@ def _open_output_namespace_guard(
         return guard
     except Exception:
         if lock_handle is not None:
-            if os.name == "nt":
-                _windows_close_handle(lock_handle)
-            else:  # pragma: no cover - exercised on POSIX hosts
-                os.close(cast(int, lock_handle))
+            with suppress(OSError):
+                if os.name == "nt":
+                    _windows_close_handle(lock_handle)
+                else:  # pragma: no cover - exercised on POSIX hosts
+                    os.close(cast(int, lock_handle))
         for directory_guard in reversed(tuple(directories.values())):
-            directory_guard.close()
+            with suppress(OSError):
+                directory_guard.close()
         raise
 
 
@@ -1192,8 +1357,8 @@ def _publication_guards(
             guards[mode] = _open_publication_guard(mode_root)
         return guards
     except Exception:
-        for guard in reversed(tuple(guards.values())):
-            guard.close()
+        with suppress(OSError):
+            _close_publication_guards(guards)
         raise
 
 
@@ -1203,7 +1368,8 @@ def _close_publication_guards(guards: dict[str, _PublicationGuard]) -> None:
         try:
             guard.close()
         except OSError as error:
-            failure = error
+            if failure is None:
+                failure = error
     if failure is not None:
         raise failure
 
@@ -1219,7 +1385,8 @@ def _close_artifact_guards(guards: dict[str, _ArtifactGuard]) -> None:
         try:
             guard.close()
         except OSError as error:
-            failure = error
+            if failure is None:
+                failure = error
     if failure is not None:
         raise failure
 
@@ -1256,7 +1423,8 @@ def _pin_existing_artifacts(
             guards[key] = _open_artifact_guard(final, artifact.sha256, directory)
         return guards
     except Exception:
-        _close_artifact_guards(guards)
+        with suppress(OSError):
+            _close_artifact_guards(guards)
         raise
 
 
@@ -1339,7 +1507,8 @@ def _publish_staged_audio(
             artifact_guards[key].validate()
         return artifact_guards
     except Exception:
-        _close_artifact_guards(artifact_guards)
+        with suppress(OSError):
+            _close_artifact_guards(artifact_guards)
         raise
 
 
@@ -1546,10 +1715,57 @@ def build_manifest_corpus(
         raise CorpusFailure("MANIFEST_SCHEMA_MISMATCH", "corpus configuration version is invalid")
     if not isinstance(ffmpeg_version, str) or not ffmpeg_version.strip():
         raise ValueError("build_manifest_corpus requires ffmpeg_version")
+    processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    namespace_guard = _open_output_namespace_guard(paths, processing_path, {})
+    input_snapshots: dict[str, _FileSnapshot] = {}
+    durable_snapshots: dict[str, _FileSnapshot] = {}
+    try:
+        return _build_manifest_corpus_locked(
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+            probe_command=probe_command,
+            decode_command=decode_command,
+            _before_publish_link=_before_publish_link,
+            _namespace_guard=namespace_guard,
+            _input_snapshots=input_snapshots,
+            _durable_snapshots=durable_snapshots,
+        )
+    finally:
+        active_failure = sys.exc_info()[0] is not None
+        cleanup_failure: OSError | None = None
+        cleanup_functions: tuple[Callable[[], None], ...] = (
+            lambda: _close_file_snapshots(durable_snapshots),
+            lambda: _close_file_snapshots(input_snapshots),
+            namespace_guard.close,
+        )
+        for cleanup in cleanup_functions:
+            try:
+                cleanup()
+            except OSError as error:
+                if cleanup_failure is None:
+                    cleanup_failure = error
+        if cleanup_failure is not None and not active_failure:
+            raise cleanup_failure
+
+
+def _build_manifest_corpus_locked(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str,
+    run_command: RunCommand,
+    probe_command: RunCommand,
+    decode_command: RunCommand,
+    _before_publish_link: BeforePublishLink | None,
+    _namespace_guard: _OutputNamespaceGuard,
+    _input_snapshots: dict[str, _FileSnapshot],
+    _durable_snapshots: dict[str, _FileSnapshot],
+) -> bool:
     from latintts.corpus.cli import _decode_spoken_units, _load_pairing_segmentation
 
     selection = _load_selection(paths)
-    transcript_by_id = _load_transcript_layers(paths, selection)
     recording_rows = read_jsonl(paths.manifests / "recordings.jsonl")
     recordings = tuple(_decode_recording(row) for row in recording_rows)
     by_id = {
@@ -1557,16 +1773,17 @@ def build_manifest_corpus(
     }
     if len(by_id) != len(recordings) or set(by_id) != set(selection.recording_ids):
         raise ValueError("recordings must uniquely and exactly match pilot selection")
-    rights = _load_rights(paths)
     for recording_id, expected_hash in zip(
         selection.recording_ids, selection.inventory_hashes, strict=True
     ):
-        item = by_id.get(recording_id)
-        if item is None or item[1].sha256 != expected_hash:
+        preflight_recording = by_id[recording_id][1]
+        if preflight_recording.sha256 != expected_hash:
             raise ValueError("pilot selection does not match recording inventory")
-        _validate_source_hash(_raw_source(item[1], paths), item[1].sha256, derived=False)
-        if item[1].rights_id not in rights:
-            raise ValueError("recording rights_id does not exist")
+        _validate_source_hash(
+            _raw_source(preflight_recording, paths),
+            preflight_recording.sha256,
+            derived=False,
+        )
     terminal = {CorpusState.APPROVED, CorpusState.REJECTED}
     if any(record.state not in {CorpusState.REVIEWED, *terminal} for _, record in by_id.values()):
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
@@ -1605,12 +1822,93 @@ def build_manifest_corpus(
         run_command=run_command,
     ):
         raise CorpusFailure("REVIEW_REQUIRED", "terminal review replay is incomplete")
+
+    # Phase A above may write review/state artifacts. Discard every Phase A decode and
+    # establish one authoritative, handle-pinned snapshot before consuming any evidence.
+    selection_path = paths.manifests / "pilot-selection.json"
+    recordings_path = paths.manifests / "recordings.jsonl"
+    rights_path = paths.manifests / "rights.jsonl"
+    transcripts_path = paths.manifests / "transcripts.jsonl"
     review_path = paths.manifests / "review.jsonl"
+    _add_file_snapshot(
+        _input_snapshots,
+        selection_path,
+        directory=_namespace_guard.manifests,
+    )
+    recordings_snapshot = _add_file_snapshot(
+        _input_snapshots,
+        recordings_path,
+        directory=_namespace_guard.manifests,
+    )
+    rights_snapshot = _add_file_snapshot(
+        _input_snapshots,
+        rights_path,
+        directory=_namespace_guard.manifests,
+    )
+    transcripts_snapshot = _add_file_snapshot(
+        _input_snapshots,
+        transcripts_path,
+        directory=_namespace_guard.manifests,
+    )
+    review_snapshot = _add_file_snapshot(
+        _input_snapshots,
+        review_path,
+        directory=_namespace_guard.manifests,
+    )
+    processing_snapshot = _add_file_snapshot(
+        _input_snapshots,
+        processing_path,
+        directory=_namespace_guard.processing,
+    )
+
+    selection = _load_selection(paths)
+    transcript_by_id = _load_transcript_layers(paths, selection)
+    recording_rows = read_jsonl(recordings_path)
+    recordings = tuple(_decode_recording(row) for row in recording_rows)
+    by_id = {
+        recording.recording_id: (index, recording) for index, recording in enumerate(recordings)
+    }
+    if len(by_id) != len(recordings) or set(by_id) != set(selection.recording_ids):
+        raise ValueError("recordings must uniquely and exactly match pilot selection")
+    rights = _load_rights(paths)
+    processing_rows = read_jsonl(processing_path)
+    decoded_processing = validate_processing_events(processing_rows)
+    selection_ids = set(selection.recording_ids)
+    audit_ahead = any(
+        event.recording_id in selection_ids
+        and event.previous_state is CorpusState.REVIEWED
+        and event.target_state in terminal
+        for event in decoded_processing
+    )
+    all_reviewed = all(record.state is CorpusState.REVIEWED for record in recordings)
+    recovery_only = audit_ahead or not all_reviewed
+    if any(record.state not in {CorpusState.REVIEWED, *terminal} for record in recordings):
+        raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
+    for recording_id, expected_hash in zip(
+        selection.recording_ids, selection.inventory_hashes, strict=True
+    ):
+        item = by_id.get(recording_id)
+        if item is None or item[1].sha256 != expected_hash:
+            raise ValueError("pilot selection does not match recording inventory")
+        raw_path = _raw_source(item[1], paths)
+        _add_file_snapshot(_input_snapshots, raw_path)
+        _validate_source_hash(raw_path, item[1].sha256, derived=False)
+        if item[1].rights_id not in rights:
+            raise ValueError("recording rights_id does not exist")
+        run_directory = paths.alignments / "runs" / config.digest / recording_id
+        for name in ("segmentation.json", "pairing.json", "alignment.json"):
+            _add_file_snapshot(_input_snapshots, run_directory / name)
+        automatic_pairing = run_directory / "pairing-automatic.json"
+        if automatic_pairing.exists() or automatic_pairing.is_symlink():
+            _add_file_snapshot(_input_snapshots, automatic_pairing)
+    _validate_file_snapshots(_input_snapshots)
+
     review_events = _load_existing_review_events(review_path)
-    review_sha256 = _digest(review_path)
+    review_sha256 = review_snapshot.sha256
     legal_pairing_event_ids = _validate_existing_pairing_corrections(
         paths, config, selection, recordings, review_events
     )
+    _validate_file_snapshots(_input_snapshots)
     contexts: list[_ManifestContext] = []
     review_prefixes: dict[str, tuple[ReviewEvent, ...]] = {}
     expected_review_entities: set[str] = set()
@@ -1631,6 +1929,24 @@ def build_manifest_corpus(
         run_directory, pairing, alignment_artifact = _load_pairing_and_alignment(
             paths, config, recording
         )
+        segmentation_snapshot = _add_file_snapshot(
+            _input_snapshots,
+            run_directory / "segmentation.json",
+        )
+        pairing_snapshot = _add_file_snapshot(
+            _input_snapshots,
+            run_directory / "pairing.json",
+        )
+        alignment_snapshot = _add_file_snapshot(
+            _input_snapshots,
+            run_directory / "alignment.json",
+        )
+        analysis_path = paths.resolve_local(analysis.relative_path)
+        analysis_snapshot = _add_file_snapshot(_input_snapshots, analysis_path)
+        if analysis_snapshot.sha256 != analysis.sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "analysis audio snapshot is invalid")
+        if segmentation_snapshot.sha256 != segmentation_sha256:
+            raise ValueError("segmentation artifact changed while loading")
         if segmentation_sha256 != pairing.segmentation_artifact_sha256:
             raise ValueError("pairing references a stale segmentation artifact")
         decoded = _alignment_by_take(pairing, alignment_artifact, paths)
@@ -1642,8 +1958,8 @@ def build_manifest_corpus(
             pairing,
             decoded,
             analysis,
-            _digest(run_directory / "pairing.json"),
-            _digest(run_directory / "alignment.json"),
+            pairing_snapshot.sha256,
+            alignment_snapshot.sha256,
             run_directory,
         )
         review_prefixes[recording_id] = _validate_processing_history(
@@ -1655,6 +1971,7 @@ def build_manifest_corpus(
             paths,
         )
         contexts.append(context)
+        _validate_file_snapshots(_input_snapshots)
         expected_review_entities.update(
             _review_entity_id(recording_id, outcome.group.repetition_group_id, take.take_index)
             for outcome in pairing.groups
@@ -1710,7 +2027,13 @@ def build_manifest_corpus(
         )
     existing_segments: tuple[SegmentRecord, ...] | None = None
     existing_by_recording: dict[str, dict[tuple[str, int], SegmentRecord]] = {}
+    manifest_path = paths.manifests / "segments.jsonl"
     if recovery_only:
+        _add_file_snapshot(
+            _durable_snapshots,
+            manifest_path,
+            directory=_namespace_guard.manifests,
+        )
         existing_segments = _validate_existing_manifest(paths)
         for segment in existing_segments:
             existing_by_recording.setdefault(segment.recording_id, {})[
@@ -1723,8 +2046,8 @@ def build_manifest_corpus(
             (
                 config.digest,
                 review_sha256,
-                _digest(paths.manifests / "rights.jsonl"),
-                _digest(paths.manifests / "transcripts.jsonl"),
+                rights_snapshot.sha256,
+                transcripts_snapshot.sha256,
                 *(
                     value
                     for context in contexts
@@ -1781,8 +2104,9 @@ def build_manifest_corpus(
         raise ValueError("existing manifest row order differs from deterministic expected order")
     publication_guards: dict[str, _PublicationGuard] = {}
     artifact_guards: dict[str, _ArtifactGuard] = {}
-    namespace_guard: _OutputNamespaceGuard | None = None
+    namespace_guard = _namespace_guard
     try:
+        _validate_file_snapshots(_input_snapshots)
         publication_guards = _publication_guards(paths, tuple(artifacts))
         if not recovery_only:
             artifact_guards = _publish_staged_audio(
@@ -1798,15 +2122,10 @@ def build_manifest_corpus(
                 tuple(artifacts),
                 publication_guards,
             )
+        _validate_file_snapshots(_input_snapshots)
         _validate_publication_guards(publication_guards)
         _validate_artifact_guards(artifact_guards)
-        namespace_guard = _open_output_namespace_guard(
-            paths,
-            processing_path,
-            publication_guards,
-        )
         namespace_guard.validate()
-        manifest_path = paths.manifests / "segments.jsonl"
         if not recovery_only:
             manifest_directory_fd = namespace_guard.directory_fd(namespace_guard.manifests)
             if manifest_directory_fd is None:
@@ -1817,22 +2136,18 @@ def build_manifest_corpus(
                     (row.to_dict() for row in sorted_rows),
                     directory_fd=manifest_directory_fd,
                 )
+            _add_file_snapshot(
+                _durable_snapshots,
+                manifest_path,
+                directory=namespace_guard.manifests,
+                expected_sha256=jsonl_sha256(row.to_dict() for row in sorted_rows),
+            )
             namespace_guard.validate()
-        manifest_sha256 = _digest_in_guarded_directory(
-            manifest_path,
-            namespace_guard,
-            namespace_guard.manifests,
-        )
-        rights_sha256 = _digest_in_guarded_directory(
-            paths.manifests / "rights.jsonl",
-            namespace_guard,
-            namespace_guard.manifests,
-        )
-        transcripts_sha256 = _digest_in_guarded_directory(
-            paths.manifests / "transcripts.jsonl",
-            namespace_guard,
-            namespace_guard.manifests,
-        )
+        _validate_file_snapshots(_input_snapshots)
+        _validate_file_snapshots(_durable_snapshots)
+        manifest_sha256 = _durable_snapshots[str(Path(os.path.abspath(manifest_path)))].sha256
+        rights_sha256 = rights_snapshot.sha256
+        transcripts_sha256 = transcripts_snapshot.sha256
         current = recordings
         terminal_events: list[ProcessingEvent] = []
         for context in contexts:
@@ -1897,6 +2212,39 @@ def build_manifest_corpus(
         _validate_publication_guards(publication_guards)
         _validate_artifact_guards(artifact_guards)
         namespace_guard.validate()
+
+        def validate_transaction() -> None:
+            namespace_guard.validate()
+            _validate_file_snapshots(_input_snapshots)
+            _validate_file_snapshots(_durable_snapshots)
+            _validate_publication_guards(publication_guards)
+            _validate_artifact_guards(artifact_guards)
+
+        def before_events_write() -> None:
+            validate_transaction()
+            _release_file_snapshot(_input_snapshots, processing_path)
+
+        def after_events_write(expected_sha256: str) -> None:
+            _add_file_snapshot(
+                _durable_snapshots,
+                processing_path,
+                directory=namespace_guard.processing,
+                expected_sha256=expected_sha256,
+            )
+
+        def before_recordings_write() -> None:
+            validate_transaction()
+            _release_file_snapshot(_input_snapshots, recordings_path)
+
+        def after_recordings_write(expected_sha256: str) -> None:
+            _add_file_snapshot(
+                _durable_snapshots,
+                recordings_path,
+                directory=namespace_guard.manifests,
+                expected_sha256=expected_sha256,
+            )
+
+        validate_transaction()
         persist_recording_transitions(
             recordings_path=paths.manifests / "recordings.jsonl",
             events_path=processing_path,
@@ -1904,18 +2252,28 @@ def build_manifest_corpus(
             events=terminal_events,
             _recordings_directory_fd=namespace_guard.directory_fd(namespace_guard.manifests),
             _events_directory_fd=namespace_guard.directory_fd(namespace_guard.processing),
-            _validate_durable_namespace=namespace_guard.validate,
+            _validate_durable_namespace=validate_transaction,
+            _expected_recordings_sha256=recordings_snapshot.sha256,
+            _expected_events_sha256=processing_snapshot.sha256,
+            _before_events_write=before_events_write,
+            _after_events_write=after_events_write,
+            _before_recordings_write=before_recordings_write,
+            _after_recordings_write=after_recordings_write,
         )
-        _validate_publication_guards(publication_guards)
-        _validate_artifact_guards(artifact_guards)
-        namespace_guard.validate()
+        validate_transaction()
         return True
     finally:
-        try:
-            _close_artifact_guards(artifact_guards)
-        finally:
+        active_failure = sys.exc_info()[0] is not None
+        cleanup_failure: OSError | None = None
+        cleanup_functions: tuple[Callable[[], None], ...] = (
+            lambda: _close_artifact_guards(artifact_guards),
+            lambda: _close_publication_guards(publication_guards),
+        )
+        for cleanup in cleanup_functions:
             try:
-                _close_publication_guards(publication_guards)
-            finally:
-                if namespace_guard is not None:
-                    namespace_guard.close()
+                cleanup()
+            except OSError as error:
+                if cleanup_failure is None:
+                    cleanup_failure = error
+        if cleanup_failure is not None and not active_failure:
+            raise cleanup_failure

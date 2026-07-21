@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -71,6 +72,34 @@ def _encode(row: dict[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def jsonl_sha256(rows: Iterable[dict[str, Any]]) -> str:
+    """Return the digest of the exact canonical bytes written by write_jsonl_atomic."""
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update((_encode(row) + "\n").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path, directory_fd: int | None) -> str:
+    digest = hashlib.sha256()
+    if directory_fd is None:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    descriptor = os.open(  # pragma: no cover - exercised on POSIX hosts
+        path.name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:  # pragma: no cover - exercised on POSIX hosts
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:  # pragma: no cover - exercised on POSIX hosts
+        os.close(descriptor)
 
 
 def write_jsonl_atomic(
@@ -295,6 +324,12 @@ def persist_recording_transitions(
     _recordings_directory_fd: int | None = None,
     _events_directory_fd: int | None = None,
     _validate_durable_namespace: Callable[[], None] | None = None,
+    _expected_recordings_sha256: str | None = None,
+    _expected_events_sha256: str | None = None,
+    _before_events_write: Callable[[], None] | None = None,
+    _after_events_write: Callable[[str], None] | None = None,
+    _before_recordings_write: Callable[[], None] | None = None,
+    _after_recordings_write: Callable[[str], None] | None = None,
 ) -> None:
     """Publish a complete transition set audit-first, with one replace per durable file."""
     if recordings_path.resolve() == events_path.resolve():
@@ -317,6 +352,11 @@ def persist_recording_transitions(
 
     if _validate_durable_namespace is not None:
         _validate_durable_namespace()
+    if (
+        _expected_recordings_sha256 is not None
+        and _file_sha256(recordings_path, _recordings_directory_fd) != _expected_recordings_sha256
+    ):
+        raise ValueError("recordings snapshot changed before terminal persistence")
     existing_rows = _read_jsonl_in_directory(recordings_path, _recordings_directory_fd)
     existing_by_id = {row.get("recording_id"): row for row in existing_rows}
     if len(existing_by_id) != len(existing_rows) or set(existing_by_id) != set(target_by_id):
@@ -345,6 +385,11 @@ def persist_recording_transitions(
     existing_events = (
         _read_jsonl_in_directory(events_path, _events_directory_fd) if events_exist else ()
     )
+    if _expected_events_sha256 is not None and (
+        not events_exist
+        or _file_sha256(events_path, _events_directory_fd) != _expected_events_sha256
+    ):
+        raise ValueError("processing snapshot changed before terminal persistence")
     missing: list[ProcessingEvent] = []
     for event in expected_events:
         exists = processing_event_exists(existing_events, event)
@@ -358,13 +403,23 @@ def persist_recording_transitions(
     if missing:
         if _validate_durable_namespace is not None:
             _validate_durable_namespace()
+        if _before_events_write is not None:
+            _before_events_write()
         _write_jsonl_in_directory(events_path, prospective_rows, _events_directory_fd)
+        prospective_sha256 = jsonl_sha256(prospective_rows)
+        if _after_events_write is not None:
+            _after_events_write(prospective_sha256)
         if _validate_durable_namespace is not None:
             _validate_durable_namespace()
     try:
         if _validate_durable_namespace is not None:
             _validate_durable_namespace()
-        _write_jsonl_in_directory(recordings_path, target_rows, _recordings_directory_fd)
+        if tuple(existing_rows) != target_rows:
+            if _before_recordings_write is not None:
+                _before_recordings_write()
+            _write_jsonl_in_directory(recordings_path, target_rows, _recordings_directory_fd)
+            if _after_recordings_write is not None:
+                _after_recordings_write(jsonl_sha256(target_rows))
         if _validate_durable_namespace is not None:
             _validate_durable_namespace()
     except Exception as error:
