@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import replace
@@ -455,6 +457,427 @@ def test_build_manifest_holds_publication_guard_through_terminal_state_commit(
     assert _build_with_fake_audio(paths, config)
     assert blocked
     assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "APPROVED"  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-sharing contract")
+@pytest.mark.parametrize("reuse_existing", (False, True))
+def test_build_manifest_pins_new_and_existing_final_artifacts_through_terminal_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_existing: bool,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    if reuse_existing:
+        assert _build_with_fake_audio(paths, config)
+        recordings = []
+        for row in read_jsonl(recordings_path):
+            reviewed = dict(row)
+            reviewed["state"] = "REVIEWED"
+            recordings.append(reviewed)
+        write_jsonl_atomic(recordings_path, recordings)
+        write_jsonl_atomic(
+            processing_path,
+            (
+                row
+                for row in read_jsonl(processing_path)
+                if not (
+                    row["previous_state"] == "REVIEWED"
+                    and row["target_state"] in {"APPROVED", "REJECTED"}
+                )
+            ),
+        )
+
+    real_persist = manifest_module.persist_recording_transitions
+    blocked_write = False
+    blocked_rename = False
+
+    def persist_with_artifact_attacks(**kwargs: object) -> None:
+        nonlocal blocked_write, blocked_rename
+        segment = read_jsonl(paths.manifests / "segments.jsonl")[0]  # type: ignore[attr-defined]
+        final = paths.local_data / Path(*segment["derived_audio_relative_path"].split("/"))  # type: ignore[attr-defined]
+        try:
+            final.write_bytes(b"tampered during terminal commit")
+        except OSError:
+            blocked_write = True
+        try:
+            final.rename(final.with_suffix(".moved"))
+        except OSError:
+            blocked_rename = True
+        if not blocked_write or not blocked_rename:
+            raise AssertionError(
+                "final artifact was not pinned through terminal commit: "
+                f"write={blocked_write}, rename={blocked_rename}"
+            )
+        real_persist(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        persist_with_artifact_attacks,
+    )
+
+    assert _build_with_fake_audio(paths, config)
+    assert blocked_write and blocked_rename
+    segment = read_jsonl(paths.manifests / "segments.jsonl")[0]  # type: ignore[attr-defined]
+    final = paths.local_data / Path(*segment["derived_audio_relative_path"].split("/"))  # type: ignore[attr-defined]
+    assert hashlib.sha256(final.read_bytes()).hexdigest() == segment["derived_audio_sha256"]
+    assert read_jsonl(recordings_path)[0]["state"] == "APPROVED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-sharing contract")
+def test_build_manifest_pins_manifest_namespace_before_terminal_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    real_persist = manifest_module.persist_recording_transitions
+    moved = tmp_path / "moved-manifests"
+    blocked = False
+
+    def persist_with_namespace_attack(**kwargs: object) -> None:
+        nonlocal blocked
+        recordings = (paths.manifests / "recordings.jsonl").read_bytes()  # type: ignore[attr-defined]
+        try:
+            paths.manifests.rename(moved)  # type: ignore[attr-defined]
+        except OSError:
+            blocked = True
+        else:
+            paths.manifests.mkdir()  # type: ignore[attr-defined]
+            (paths.manifests / "recordings.jsonl").write_bytes(recordings)  # type: ignore[attr-defined]
+        real_persist(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        persist_with_namespace_attack,
+    )
+
+    assert _build_with_fake_audio(paths, config)
+    assert blocked
+    assert not moved.exists()
+    assert (paths.manifests / "segments.jsonl").is_file()  # type: ignore[attr-defined]
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "APPROVED"  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-sharing contract")
+def test_build_manifest_pins_processing_namespace_during_event_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    processing_parent = processing_path.parent
+    moved = tmp_path / "moved-processing-run"
+    real_write = store_module.write_jsonl_atomic
+    blocked = False
+    attempted = False
+
+    def write_with_namespace_attack(
+        path: Path,
+        rows: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal blocked, attempted
+        real_write(path, rows, **kwargs)  # type: ignore[arg-type]
+        if path != processing_path or attempted:
+            return
+        attempted = True
+        try:
+            processing_parent.rename(moved)
+        except OSError:
+            blocked = True
+
+    monkeypatch.setattr(store_module, "write_jsonl_atomic", write_with_namespace_attack)
+
+    assert _build_with_fake_audio(paths, config)
+    assert attempted and blocked
+    assert not moved.exists()
+    assert any(
+        row["previous_state"] == "REVIEWED" and row["target_state"] == "APPROVED"
+        for row in read_jsonl(processing_path)
+    )
+    assert read_jsonl(paths.manifests / "recordings.jsonl")[0]["state"] == "APPROVED"  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-sharing contract")
+def test_build_manifest_pins_output_ancestor_chain_through_terminal_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    real_persist = manifest_module.persist_recording_transitions
+    ancestor = paths.local_data / "derived" / "corpus-v1"  # type: ignore[attr-defined]
+    moved = tmp_path / "moved-corpus-version"
+    blocked = False
+
+    def persist_with_ancestor_attack(**kwargs: object) -> None:
+        nonlocal blocked
+        try:
+            ancestor.rename(moved)
+        except OSError:
+            blocked = True
+        real_persist(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        persist_with_ancestor_attack,
+    )
+
+    assert _build_with_fake_audio(paths, config)
+    assert blocked
+    assert not moved.exists()
+
+
+def test_output_namespace_guard_enforces_single_writer_and_releases_lock(tmp_path: Path) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    first = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    try:
+        with pytest.raises((BlockingIOError, OSError)):
+            manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    finally:
+        first.close()
+
+    reopened = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    reopened.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace-handle cleanup contract")
+def test_output_namespace_guard_releases_lock_when_post_acquisition_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    real_validate = manifest_module._OutputNamespaceGuard.validate
+
+    def fail_validation(_guard: object) -> None:
+        raise ValueError("injected namespace validation failure")
+
+    monkeypatch.setattr(manifest_module._OutputNamespaceGuard, "validate", fail_validation)
+    with pytest.raises(ValueError, match="namespace validation"):
+        manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    monkeypatch.setattr(manifest_module._OutputNamespaceGuard, "validate", real_validate)
+
+    reopened = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    reopened.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-sharing contract")
+def test_build_manifest_fails_before_durable_writes_when_existing_final_has_writer(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    assert _build_with_fake_audio(paths, config)
+    recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
+    processing_path = (
+        paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
+    )
+    recordings = []
+    for row in read_jsonl(recordings_path):
+        reviewed = dict(row)
+        reviewed["state"] = "REVIEWED"
+        recordings.append(reviewed)
+    write_jsonl_atomic(recordings_path, recordings)
+    write_jsonl_atomic(
+        processing_path,
+        (
+            row
+            for row in read_jsonl(processing_path)
+            if not (
+                row["previous_state"] == "REVIEWED"
+                and row["target_state"] in {"APPROVED", "REJECTED"}
+            )
+        ),
+    )
+    segment = read_jsonl(paths.manifests / "segments.jsonl")[0]  # type: ignore[attr-defined]
+    final = paths.local_data / Path(*segment["derived_audio_relative_path"].split("/"))  # type: ignore[attr-defined]
+    protected = (
+        paths.manifests / "segments.jsonl",  # type: ignore[attr-defined]
+        processing_path,
+        recordings_path,
+    )
+    before = {path: path.read_bytes() for path in protected}
+    shutil.rmtree(paths.segments / ".manifest-staging")  # type: ignore[attr-defined]
+    writer = manifest_module._windows_open_handle(
+        final,
+        desired_access=0x40000000,
+        share_mode=0x2,
+        flags=0x00200000,
+    )
+    try:
+        with pytest.raises(OSError):
+            _build_with_fake_audio(paths, config)
+    finally:
+        manifest_module._windows_close_handle(writer)
+
+    assert {path: path.read_bytes() for path in protected} == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-release contract")
+def test_build_manifest_releases_file_and_namespace_guards_after_terminal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+
+    def fail_terminal_commit(**_kwargs: object) -> None:
+        raise RuntimeError("injected terminal failure")
+
+    monkeypatch.setattr(
+        manifest_module,
+        "persist_recording_transitions",
+        fail_terminal_commit,
+    )
+    with pytest.raises(RuntimeError, match="terminal failure"):
+        _build_with_fake_audio(paths, config)
+
+    segment = read_jsonl(paths.manifests / "segments.jsonl")[0]  # type: ignore[attr-defined]
+    final = paths.local_data / Path(*segment["derived_audio_relative_path"].split("/"))  # type: ignore[attr-defined]
+    moved_final = final.with_suffix(".released")
+    final.rename(moved_final)
+    moved_final.rename(final)
+
+    for directory, moved in (
+        (paths.manifests, tmp_path / "released-manifests"),  # type: ignore[attr-defined]
+        (
+            paths.alignments / "runs" / config.digest,  # type: ignore[attr-defined]
+            tmp_path / "released-processing",
+        ),
+    ):
+        directory.rename(moved)
+        moved.rename(directory)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows artifact-handle contract")
+def test_windows_artifact_guard_rejects_handle_drift_and_releases_invalid_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "mode-root"
+    root.mkdir()
+    artifact = root / "artifact.flac"
+    artifact.write_bytes(b"guarded audio")
+    sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    directory = manifest_module._open_publication_guard(root)
+    try:
+        with pytest.raises(CorpusFailure, match="published audio artifact"):
+            manifest_module._open_artifact_guard(artifact, "0" * 64, directory)
+        moved = root / "invalid-open-released.flac"
+        artifact.rename(moved)
+        moved.rename(artifact)
+
+        guard = manifest_module._open_artifact_guard(artifact, sha256, directory)
+        try:
+            monkeypatch.setattr(
+                manifest_module._PublicationGuard,
+                "validate",
+                lambda _guard: None,
+            )
+            monkeypatch.setattr(
+                manifest_module,
+                "_windows_handle_identity",
+                lambda *_args, **_kwargs: (0, 0, 0),
+            )
+            with pytest.raises(ValueError, match="identity changed"):
+                guard.validate()
+            monkeypatch.setattr(
+                manifest_module,
+                "_windows_handle_identity",
+                lambda *_args, **_kwargs: guard.identity,
+            )
+            monkeypatch.setattr(
+                manifest_module,
+                "_windows_digest_handle",
+                lambda _handle: "f" * 64,
+            )
+            with pytest.raises(CorpusFailure, match="published audio artifact"):
+                guard.validate()
+        finally:
+            guard.close()
+    finally:
+        directory.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows artifact-handle cleanup contract")
+def test_windows_link_hash_failure_and_artifact_guard_close_failure_fail_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "mode-root"
+    root.mkdir()
+    staged = tmp_path / "staged.flac"
+    staged.write_bytes(b"staged audio")
+    final = root / "final.flac"
+    directory = manifest_module._open_publication_guard(root)
+    try:
+        with pytest.raises(CorpusFailure, match="staged audio artifact"):
+            manifest_module._windows_link_from_pinned_directory(
+                staged,
+                final,
+                directory,
+                "0" * 64,
+            )
+        moved = tmp_path / "released-staged.flac"
+        staged.rename(moved)
+        moved.rename(staged)
+    finally:
+        directory.close()
+
+    class BrokenArtifactGuard:
+        def close(self) -> None:
+            raise OSError("injected artifact close failure")
+
+    with pytest.raises(OSError, match="artifact close"):
+        manifest_module._close_artifact_guards({"artifact": BrokenArtifactGuard()})  # type: ignore[dict-item]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows artifact-handle cleanup contract")
+def test_pin_existing_artifacts_deduplicates_and_closes_on_conflict(tmp_path: Path) -> None:
+    paths = cli.CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    final = paths.segments / "lossless" / "fixture.flac"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"existing audio")
+    sha256 = hashlib.sha256(final.read_bytes()).hexdigest()
+
+    class Artifact:
+        mode = "lossless"
+        relative_path = "derived/corpus-v1/segments/lossless/fixture.flac"
+
+        def __init__(self, digest: str) -> None:
+            self.sha256 = digest
+
+    artifact = Artifact(sha256)
+    publication = manifest_module._publication_guards(paths, (artifact,))  # type: ignore[arg-type]
+    try:
+        pinned = manifest_module._pin_existing_artifacts(
+            paths,
+            (artifact, artifact),  # type: ignore[arg-type]
+            publication,
+        )
+        manifest_module._close_artifact_guards(pinned)
+        with pytest.raises(CorpusFailure, match="duplicate final audio artifact conflicts"):
+            manifest_module._pin_existing_artifacts(
+                paths,
+                (artifact, Artifact("f" * 64)),  # type: ignore[arg-type]
+                publication,
+            )
+        moved = final.with_suffix(".released")
+        final.rename(moved)
+        moved.rename(final)
+    finally:
+        manifest_module._close_publication_guards(publication)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows publication-handle contract")

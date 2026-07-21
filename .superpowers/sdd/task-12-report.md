@@ -204,3 +204,47 @@
 - Windows native implementation 依赖 NTFS-compatible `FileLinkInformation`；不支持该能力的卷或运行时会明确 fail closed，不按可替换完整路径回退。
 - 全量 9 个既有 skip 仍来自当前 Windows token 缺少 symlink privilege；本轮 junction/reparse、handle identity 与 sharing-violation 用例均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-21 第四轮审查整改
+
+### Final audio 生命周期
+
+- 新建 hard-link 与复用 final artifact 都会取得独立 `_ArtifactGuard`，并持有到 `segments.jsonl`、terminal events 与 `recordings.jsonl` 全部提交完成且最终复验通过。
+- Windows final handle 使用 `GENERIC_READ` 与仅 `FILE_SHARE_READ`，明确拒绝 write/delete sharing；文件 identity 与 SHA-256 均从持有 handle 复验。新 hard-link 仍使用既有 `NtSetInformationFile(FileLinkInformation=11)`、显式 64-bit ABI 与 pinned `RootDirectory`，没有回退到裸 `os.link(full_path)`。
+- POSIX final artifact 使用 mode-root `dir_fd` 相对 `O_NOFOLLOW` 打开，保留 fd，并在每个提交点比较 pinned/public `(st_dev, st_ino)` 及 fd SHA-256。
+- new 与 existing final 在 terminal seam 的 write/rename 均由 Windows sharing violation 阻止；预先持有 writer 时在任何 durable manifest/state 写入前 fail closed；terminal exception 后 final、manifests 与 processing directories 均可正常 rename，证明 handle 无泄漏。
+
+### Durable output namespace
+
+- 在首次写 `segments.jsonl` 前，从 resolved project root 到 manifests、processing-events parent、segments/mode-root parent 的每个现存目录组件都取得 identity-bound guard，并贯穿 segments → events → recordings 全部 durable writes。
+- Windows directory handles 允许 read/write sharing、拒绝 delete sharing；实测 manifests leaf、processing run parent 与 `derived/corpus-v1` ancestor 在 persist 入口或 events replace 后均无法 rename，当前 namespace 保持 segments/event/state 完整一致。
+- 增加 `.build-manifest.lock` 单写协议：Windows 使用无共享 `CreateFileW(OPEN_ALWAYS)` handle；POSIX 使用 manifests `dir_fd` 相对 `O_NOFOLLOW` 打开并 `flock(LOCK_EX|LOCK_NB)`。异常后锁可立即重新取得。
+- POSIX `read_jsonl()` / `write_jsonl_atomic()` 新增内部 `directory_fd` 路径：temp create、fsync、`os.replace(src_dir_fd=..., dst_dir_fd=...)` 与 parent fsync 全部绑定同一 pinned directory inode；processing batch 在每次 read/replace 前后调用 namespace identity validator。manifest、rights 与 transcripts digest 也从 pinned manifests directory 读取。
+
+### 第四轮 RED -> GREEN 证据
+
+1. new/existing final terminal attack 两参数在旧实现均失败：write 或 rename 成功，断言 `final artifact was not pinned`；严格 file guard 后 `2 passed`。
+2. manifests 在 persist 入口整体 rename/recreate、processing parent 在 terminal event replace 后 rename，两例在旧实现均 `build=True` 且产生 split namespace；完整目录链 guard 后两例均以 sharing violation 阻止漂移并正常完成。
+3. ancestor-chain、single-writer、pre-existing writer fail-closed 与异常无 handle leak 四项专项均通过。
+4. 首次全量功能为 `1432 passed, 9 skipped`，但新增安全分支使 coverage 降至 `94.78%`；补齐 handle identity/hash 漂移、invalid-open cleanup、post-lock acquisition cleanup、duplicate artifact cleanup 后，最终为 `1436 passed, 9 skipped`、raw `95.0577569820149%`。
+
+### 第四轮最终门禁
+
+- expanded focused `tests/corpus/test_manifest.py tests/corpus/test_manifest_cli.py tests/corpus/test_audio.py tests/corpus/test_audio_review.py tests/corpus/test_store.py tests/corpus/test_paths.py`：`229 passed, 2 skipped`。
+- mixed legacy/checkpoint + new/existing final + manifests/processing namespace 定向组合：`11 passed`。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1436 passed, 9 skipped`
+  - displayed coverage：`95.06%`
+  - raw coverage：`95.0577569820149%`（`6839` statements，`338` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（72 files already formatted）。
+- `python -m mypy src`：PASS（31 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第四轮残余边界
+
+- Windows 强制依赖 deny-sharing handle；不支持 `NtSetInformationFile(FileLinkInformation)` 的文件系统继续 fail closed。
+- POSIX fd 可固定 inode、相对 replace 可固定写入目录，但标准 POSIX 不提供 Windows 式强制 deny-delete sharing；因此使用所有 LatinTTS writer 必须遵守的 `flock` 单写协议，并在每个 durable checkpoint 前后检测 public path identity 漂移。非合作进程造成漂移时构建失败，不返回成功。
+- 9 个 skip 仍全部来自当前 Windows token 缺少 symlink privilege；本轮 Windows junction、sharing-violation、identity/hash 与 lock tests 均实际执行。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

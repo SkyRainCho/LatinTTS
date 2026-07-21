@@ -9,7 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from latintts.corpus.alignment import AlignmentResult, WordSpan
 from latintts.corpus.audio import (
@@ -659,6 +659,7 @@ def _windows_open_handle(
     desired_access: int,
     share_mode: int,
     flags: int,
+    creation_disposition: int = 3,
 ) -> object:
     import ctypes
     from ctypes import wintypes
@@ -679,7 +680,7 @@ def _windows_open_handle(
         desired_access,
         share_mode,
         None,
-        3,  # OPEN_EXISTING
+        creation_disposition,
         flags,
         None,
     )
@@ -733,11 +734,159 @@ class _PublicationGuard:
             os.close(self.handle)  # type: ignore[arg-type]
 
 
-def _open_publication_guard(root: Path) -> _PublicationGuard:
+def _windows_digest_handle(handle: object) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    if not kernel32.SetFilePointerEx(handle, 0, None, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    digest = hashlib.sha256()
+    buffer = ctypes.create_string_buffer(1024 * 1024)
+    read = wintypes.DWORD()
+    try:
+        while True:
+            if not kernel32.ReadFile(handle, buffer, len(buffer), ctypes.byref(read), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if read.value == 0:
+                return digest.hexdigest()
+            digest.update(buffer.raw[: read.value])
+    finally:
+        if not kernel32.SetFilePointerEx(handle, 0, None, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _posix_digest_handle(descriptor: int) -> str:  # pragma: no cover - exercised on POSIX hosts
+    position = os.lseek(descriptor, 0, os.SEEK_CUR)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    try:
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.lseek(descriptor, position, os.SEEK_SET)
+
+
+@dataclass(slots=True)
+class _ArtifactGuard:
+    path: Path
+    handle: object
+    identity: tuple[int, ...]
+    sha256: str
+    directory: _PublicationGuard
+    windows: bool
+
+    def validate(self) -> None:
+        self.directory.validate()
+        require_canonical_descendant(
+            self.directory.root,
+            self.path,
+            kind="published audio artifact",
+            require_file=True,
+        )
+        identity: tuple[int, ...]
+        if self.windows:
+            current = _windows_open_handle(
+                self.path,
+                desired_access=0x80,
+                share_mode=0x1,
+                flags=0x00200000,
+            )
+            try:
+                identity = _windows_handle_identity(current, kind="published artifact")
+            finally:
+                _windows_close_handle(current)
+            actual_sha256 = _windows_digest_handle(self.handle)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            descriptor = cast(int, self.handle)
+            pinned = os.fstat(descriptor)
+            current = os.stat(
+                self.path.name,
+                dir_fd=cast(int, self.directory.handle),
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(pinned.st_mode) or not stat.S_ISREG(current.st_mode):
+                raise ValueError("published artifact handle must identify a regular file")
+            identity = (current.st_dev, current.st_ino)
+            actual_sha256 = _posix_digest_handle(descriptor)
+        if identity != self.identity:
+            raise ValueError("published artifact identity changed")
+        if actual_sha256 != self.sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "published audio artifact is invalid")
+
+    def close(self) -> None:
+        if self.windows:
+            _windows_close_handle(self.handle)
+        else:  # pragma: no cover - exercised on POSIX hosts
+            os.close(cast(int, self.handle))
+
+
+def _open_artifact_guard(
+    path: Path,
+    sha256: str,
+    directory: _PublicationGuard,
+) -> _ArtifactGuard:
+    if os.name == "nt":
+        handle = _windows_open_handle(
+            path,
+            desired_access=0x80000000,  # GENERIC_READ
+            share_mode=0x1,  # deliberately deny write and delete sharing
+            flags=0x00200000,
+        )
+        try:
+            identity = _windows_handle_identity(handle, kind="published artifact")
+            if _windows_digest_handle(handle) != sha256:
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "published audio artifact is invalid")
+        except Exception:
+            _windows_close_handle(handle)
+            raise
+        return _ArtifactGuard(path, handle, identity, sha256, directory, True)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)  # pragma: no cover
+    descriptor = os.open(  # pragma: no cover - exercised on POSIX hosts
+        path.name,
+        flags,
+        dir_fd=cast(int, directory.handle),
+    )
+    try:  # pragma: no cover - exercised on POSIX hosts
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("published artifact handle is not a regular file")
+        if _posix_digest_handle(descriptor) != sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "published audio artifact is invalid")
+    except Exception:  # pragma: no cover - exercised on POSIX hosts
+        os.close(descriptor)
+        raise
+    return _ArtifactGuard(  # pragma: no cover - exercised on POSIX hosts
+        path,
+        descriptor,
+        (metadata.st_dev, metadata.st_ino),
+        sha256,
+        directory,
+        False,
+    )
+
+
+def _open_directory_guard(root: Path, *, writable: bool) -> _PublicationGuard:
     if os.name == "nt":
         handle = _windows_open_handle(
             root,
-            desired_access=0x2 | 0x80,  # FILE_ADD_FILE | FILE_READ_ATTRIBUTES
+            desired_access=0x80 | (0x2 if writable else 0),
             share_mode=0x1 | 0x2,  # deliberately deny FILE_SHARE_DELETE
             flags=0x02000000 | 0x00200000,
         )
@@ -757,22 +906,171 @@ def _open_publication_guard(root: Path) -> _PublicationGuard:
         return _PublicationGuard(root, descriptor, (metadata.st_dev, metadata.st_ino), False)
 
 
+def _open_publication_guard(root: Path) -> _PublicationGuard:
+    return _open_directory_guard(root, writable=True)
+
+
+@dataclass(slots=True)
+class _OutputNamespaceGuard:
+    directories: dict[Path, _PublicationGuard]
+    manifests: _PublicationGuard
+    processing: _PublicationGuard
+    lock_handle: object
+    windows: bool
+
+    def validate(self) -> None:
+        for guard in self.directories.values():
+            guard.validate()
+
+    def directory_fd(self, guard: _PublicationGuard) -> int | None:
+        return None if self.windows else cast(int, guard.handle)
+
+    def close(self) -> None:
+        failure: OSError | None = None
+        try:
+            if self.windows:
+                _windows_close_handle(self.lock_handle)
+            else:  # pragma: no cover - exercised on POSIX hosts
+                fcntl: Any = __import__("fcntl")
+                lock_descriptor = cast(int, self.lock_handle)
+                try:
+                    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_descriptor)
+        except OSError as error:
+            failure = error
+        for guard in reversed(tuple(self.directories.values())):
+            try:
+                guard.close()
+            except OSError as error:
+                failure = error
+        if failure is not None:
+            raise failure
+
+
+def _directory_chain(anchor: Path, target: Path) -> tuple[Path, ...]:
+    anchor = Path(os.path.abspath(anchor))
+    target = require_canonical_descendant(anchor, target, kind="durable output directory")
+    relative = target.relative_to(anchor)
+    chain = [anchor]
+    current = anchor
+    for part in relative.parts:
+        current /= part
+        chain.append(current)
+    return tuple(chain)
+
+
+def _open_output_namespace_guard(
+    paths: CorpusPaths,
+    processing_path: Path,
+    publication_guards: dict[str, _PublicationGuard],
+) -> _OutputNamespaceGuard:
+    project_root = Path(os.path.abspath(paths.project_root))
+    manifests = Path(os.path.abspath(paths.manifests))
+    processing = Path(os.path.abspath(processing_path.parent))
+    targets = [manifests, processing]
+    targets.extend(guard.root.parent for guard in publication_guards.values())
+    ordered_paths = sorted(
+        {directory for target in targets for directory in _directory_chain(project_root, target)},
+        key=lambda path: (len(path.parts), str(path).casefold()),
+    )
+    directories: dict[Path, _PublicationGuard] = {}
+    lock_handle: object | None = None
+    try:
+        for directory in ordered_paths:
+            directories[directory] = _open_directory_guard(
+                directory,
+                writable=directory in {manifests, processing},
+            )
+        manifest_guard = directories[manifests]
+        processing_guard = directories[processing]
+        lock_path = manifests / ".build-manifest.lock"
+        if os.name == "nt":
+            lock_handle = _windows_open_handle(
+                lock_path,
+                desired_access=0x80000000 | 0x40000000,
+                share_mode=0,
+                flags=0x00200000,
+                creation_disposition=4,  # OPEN_ALWAYS
+            )
+            _windows_handle_identity(lock_handle, kind="manifest transaction lock")
+        else:  # pragma: no cover - exercised on POSIX hosts
+            fcntl: Any = __import__("fcntl")
+            lock_descriptor = os.open(
+                lock_path.name,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=cast(int, manifest_guard.handle),
+            )
+            lock_handle = lock_descriptor
+            try:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except Exception:
+                os.close(lock_descriptor)
+                lock_handle = None
+                raise
+        guard = _OutputNamespaceGuard(
+            directories,
+            manifest_guard,
+            processing_guard,
+            lock_handle,
+            os.name == "nt",
+        )
+        guard.validate()
+        return guard
+    except Exception:
+        if lock_handle is not None:
+            if os.name == "nt":
+                _windows_close_handle(lock_handle)
+            else:  # pragma: no cover - exercised on POSIX hosts
+                os.close(cast(int, lock_handle))
+        for directory_guard in reversed(tuple(directories.values())):
+            directory_guard.close()
+        raise
+
+
+def _digest_in_guarded_directory(
+    path: Path,
+    namespace: _OutputNamespaceGuard,
+    directory: _PublicationGuard,
+) -> str:
+    directory_fd = namespace.directory_fd(directory)
+    if directory_fd is None:
+        return _digest(path)
+    descriptor = os.open(  # pragma: no cover - exercised on POSIX hosts
+        path.name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:  # pragma: no cover - exercised on POSIX hosts
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("durable manifest input must be a regular file")
+        return _posix_digest_handle(descriptor)
+    finally:  # pragma: no cover - exercised on POSIX hosts
+        os.close(descriptor)
+
+
 def _windows_link_from_pinned_directory(
     staged: Path,
     final: Path,
     guard: _PublicationGuard,
-) -> None:
+    expected_sha256: str | None = None,
+) -> _ArtifactGuard:
     import ctypes
     from ctypes import wintypes
 
     source_handle = _windows_open_handle(
         staged,
-        desired_access=0x00010000 | 0x80,
-        share_mode=0x1 | 0x2 | 0x4,
+        desired_access=0x00010000 | 0x80000000,  # DELETE | GENERIC_READ
+        share_mode=0x1 | 0x4,  # allow link creation while denying writers
         flags=0x00200000,
     )
     try:
         source_identity = _windows_handle_identity(source_handle, kind="staged artifact")
+        source_sha256 = _windows_digest_handle(source_handle)
+        if expected_sha256 is not None and source_sha256 != expected_sha256:
+            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
 
         class FileLinkInformation(ctypes.Structure):
             _fields_ = [
@@ -819,7 +1117,7 @@ def _windows_link_from_pinned_directory(
         target_handle = _windows_open_handle(
             final,
             desired_access=0x80,
-            share_mode=0x1 | 0x2 | 0x4,
+            share_mode=0x1 | 0x4,
             flags=0x00200000,
         )
         try:
@@ -830,6 +1128,7 @@ def _windows_link_from_pinned_directory(
             raise ValueError("published artifact identity differs from staged source")
     finally:
         _windows_close_handle(source_handle)
+    return _open_artifact_guard(final, source_sha256, guard)
 
 
 def _link_from_pinned_directory(
@@ -837,7 +1136,8 @@ def _link_from_pinned_directory(
     final: Path,
     guard: _PublicationGuard,
     before_link: BeforePublishLink | None,
-) -> None:
+    expected_sha256: str,
+) -> _ArtifactGuard:
     if before_link is not None:
         try:
             before_link(guard.root)
@@ -845,7 +1145,12 @@ def _link_from_pinned_directory(
             raise ValueError("publication directory changed during hard-link creation") from error
     guard.validate()
     if os.name == "nt":
-        _windows_link_from_pinned_directory(staged, final, guard)
+        artifact_guard = _windows_link_from_pinned_directory(
+            staged,
+            final,
+            guard,
+            expected_sha256,
+        )
     else:  # pragma: no cover - exercised on POSIX hosts
         with suppress(FileExistsError):
             os.link(
@@ -858,7 +1163,9 @@ def _link_from_pinned_directory(
         target = os.stat(final, follow_symlinks=False)
         if (source.st_dev, source.st_ino) != (target.st_dev, target.st_ino):
             raise ValueError("published artifact identity differs from staged source")
+        artifact_guard = _open_artifact_guard(final, expected_sha256, guard)
     guard.validate()
+    return artifact_guard
 
 
 def _publication_guards(
@@ -906,6 +1213,53 @@ def _validate_publication_guards(guards: dict[str, _PublicationGuard]) -> None:
         guard.validate()
 
 
+def _close_artifact_guards(guards: dict[str, _ArtifactGuard]) -> None:
+    failure: OSError | None = None
+    for guard in reversed(tuple(guards.values())):
+        try:
+            guard.close()
+        except OSError as error:
+            failure = error
+    if failure is not None:
+        raise failure
+
+
+def _validate_artifact_guards(guards: dict[str, _ArtifactGuard]) -> None:
+    for guard in guards.values():
+        guard.validate()
+
+
+def _pin_existing_artifacts(
+    paths: CorpusPaths,
+    artifacts: tuple[DerivedAudio, ...],
+    publication_guards: dict[str, _PublicationGuard],
+) -> dict[str, _ArtifactGuard]:
+    local_root = Path(os.path.abspath(paths.local_data))
+    guards: dict[str, _ArtifactGuard] = {}
+    try:
+        for artifact in artifacts:
+            directory = publication_guards[artifact.mode]
+            final = require_canonical_descendant(
+                directory.root,
+                local_root / Path(*artifact.relative_path.split("/")),
+                kind="final audio artifact",
+                require_file=True,
+            )
+            key = str(final)
+            if key in guards:
+                if guards[key].sha256 != artifact.sha256:
+                    raise CorpusFailure(
+                        "CACHE_ARTIFACT_INVALID", "duplicate final audio artifact conflicts"
+                    )
+                guards[key].validate()
+                continue
+            guards[key] = _open_artifact_guard(final, artifact.sha256, directory)
+        return guards
+    except Exception:
+        _close_artifact_guards(guards)
+        raise
+
+
 def _publish_staged_audio(
     paths: CorpusPaths,
     staging_root: Path,
@@ -913,7 +1267,7 @@ def _publish_staged_audio(
     guards: dict[str, _PublicationGuard],
     *,
     before_link: BeforePublishLink | None = None,
-) -> None:
+) -> dict[str, _ArtifactGuard]:
     local_root = Path(os.path.abspath(paths.local_data))
     segments_root = require_canonical_descendant(
         local_root,
@@ -926,60 +1280,67 @@ def _publish_staged_audio(
         kind="audio staging root",
     )
     pending_hook = before_link
-    for artifact in artifacts:
-        if artifact.mode not in {"candidate", "lossless"}:
-            raise ValueError("manifest staging contains an unsupported audio mode")
-        guard = guards[artifact.mode]
-        mode_root = guard.root
-        staged = require_canonical_descendant(
-            staging_root,
-            staging_root / Path(*artifact.relative_path.split("/")),
-            kind="staged audio artifact",
-            require_file=True,
-        )
-        final = require_canonical_descendant(
-            mode_root,
-            local_root / Path(*artifact.relative_path.split("/")),
-            kind="final audio artifact",
-        )
-        if _digest(staged) != artifact.sha256:
-            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
-        final = require_canonical_descendant(
-            mode_root,
-            final,
-            kind="final audio artifact",
-        )
-        if final.exists():
+    artifact_guards: dict[str, _ArtifactGuard] = {}
+    try:
+        for artifact in artifacts:
+            if artifact.mode not in {"candidate", "lossless"}:
+                raise ValueError("manifest staging contains an unsupported audio mode")
+            guard = guards[artifact.mode]
+            mode_root = guard.root
+            staged = require_canonical_descendant(
+                staging_root,
+                staging_root / Path(*artifact.relative_path.split("/")),
+                kind="staged audio artifact",
+                require_file=True,
+            )
+            final = require_canonical_descendant(
+                mode_root,
+                local_root / Path(*artifact.relative_path.split("/")),
+                kind="final audio artifact",
+            )
+            if _digest(staged) != artifact.sha256:
+                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "staged audio artifact is invalid")
+            key = str(final)
+            if key in artifact_guards:
+                if artifact_guards[key].sha256 != artifact.sha256:
+                    raise CorpusFailure(
+                        "CACHE_ARTIFACT_INVALID", "duplicate final audio artifact conflicts"
+                    )
+                artifact_guards[key].validate()
+                continue
+            if final.exists():
+                require_canonical_descendant(
+                    mode_root,
+                    final,
+                    kind="final audio artifact",
+                    require_file=True,
+                )
+                artifact_guards[key] = _open_artifact_guard(final, artifact.sha256, guard)
+                continue
+            require_canonical_descendant(
+                staging_root,
+                staged,
+                kind="staged audio artifact",
+                require_file=True,
+            )
             require_canonical_descendant(
                 mode_root,
                 final,
                 kind="final audio artifact",
-                require_file=True,
             )
-            if _digest(final) != artifact.sha256:
-                raise CorpusFailure("CACHE_ARTIFACT_INVALID", "final audio artifact conflicts")
-            continue
-        require_canonical_descendant(
-            staging_root,
-            staged,
-            kind="staged audio artifact",
-            require_file=True,
-        )
-        require_canonical_descendant(
-            mode_root,
-            final,
-            kind="final audio artifact",
-        )
-        _link_from_pinned_directory(staged, final, guard, pending_hook)
-        pending_hook = None
-        require_canonical_descendant(
-            mode_root,
-            final,
-            kind="published audio artifact",
-            require_file=True,
-        )
-        if _digest(final) != artifact.sha256:
-            raise CorpusFailure("CACHE_ARTIFACT_INVALID", "published audio artifact is invalid")
+            artifact_guards[key] = _link_from_pinned_directory(
+                staged,
+                final,
+                guard,
+                pending_hook,
+                artifact.sha256,
+            )
+            pending_hook = None
+            artifact_guards[key].validate()
+        return artifact_guards
+    except Exception:
+        _close_artifact_guards(artifact_guards)
+        raise
 
 
 def _load_rights(paths: CorpusPaths) -> dict[str, RightsRecord]:
@@ -1419,23 +1780,59 @@ def build_manifest_corpus(
     if existing_segments is not None and sorted_rows != existing_segments:
         raise ValueError("existing manifest row order differs from deterministic expected order")
     publication_guards: dict[str, _PublicationGuard] = {}
+    artifact_guards: dict[str, _ArtifactGuard] = {}
+    namespace_guard: _OutputNamespaceGuard | None = None
     try:
+        publication_guards = _publication_guards(paths, tuple(artifacts))
         if not recovery_only:
-            publication_guards = _publication_guards(paths, tuple(artifacts))
-            _publish_staged_audio(
+            artifact_guards = _publish_staged_audio(
                 paths,
                 staging_root,
                 tuple(artifacts),
                 publication_guards,
                 before_link=_before_publish_link,
             )
-            _validate_publication_guards(publication_guards)
+        else:
+            artifact_guards = _pin_existing_artifacts(
+                paths,
+                tuple(artifacts),
+                publication_guards,
+            )
+        _validate_publication_guards(publication_guards)
+        _validate_artifact_guards(artifact_guards)
+        namespace_guard = _open_output_namespace_guard(
+            paths,
+            processing_path,
+            publication_guards,
+        )
+        namespace_guard.validate()
         manifest_path = paths.manifests / "segments.jsonl"
         if not recovery_only:
-            write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
-        manifest_sha256 = _digest(manifest_path)
-        rights_sha256 = _digest(paths.manifests / "rights.jsonl")
-        transcripts_sha256 = _digest(paths.manifests / "transcripts.jsonl")
+            manifest_directory_fd = namespace_guard.directory_fd(namespace_guard.manifests)
+            if manifest_directory_fd is None:
+                write_jsonl_atomic(manifest_path, (row.to_dict() for row in sorted_rows))
+            else:  # pragma: no cover - exercised on POSIX hosts
+                write_jsonl_atomic(
+                    manifest_path,
+                    (row.to_dict() for row in sorted_rows),
+                    directory_fd=manifest_directory_fd,
+                )
+            namespace_guard.validate()
+        manifest_sha256 = _digest_in_guarded_directory(
+            manifest_path,
+            namespace_guard,
+            namespace_guard.manifests,
+        )
+        rights_sha256 = _digest_in_guarded_directory(
+            paths.manifests / "rights.jsonl",
+            namespace_guard,
+            namespace_guard.manifests,
+        )
+        transcripts_sha256 = _digest_in_guarded_directory(
+            paths.manifests / "transcripts.jsonl",
+            namespace_guard,
+            namespace_guard.manifests,
+        )
         current = recordings
         terminal_events: list[ProcessingEvent] = []
         for context in contexts:
@@ -1498,13 +1895,27 @@ def build_manifest_corpus(
             )
             terminal_events.append(event)
         _validate_publication_guards(publication_guards)
+        _validate_artifact_guards(artifact_guards)
+        namespace_guard.validate()
         persist_recording_transitions(
             recordings_path=paths.manifests / "recordings.jsonl",
             events_path=processing_path,
             recordings=current,
             events=terminal_events,
+            _recordings_directory_fd=namespace_guard.directory_fd(namespace_guard.manifests),
+            _events_directory_fd=namespace_guard.directory_fd(namespace_guard.processing),
+            _validate_durable_namespace=namespace_guard.validate,
         )
         _validate_publication_guards(publication_guards)
+        _validate_artifact_guards(artifact_guards)
+        namespace_guard.validate()
         return True
     finally:
-        _close_publication_guards(publication_guards)
+        try:
+            _close_artifact_guards(artifact_guards)
+        finally:
+            try:
+                _close_publication_guards(publication_guards)
+            finally:
+                if namespace_guard is not None:
+                    namespace_guard.close()

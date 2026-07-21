@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,23 @@ def _reject_nonstandard_constant(value: str) -> Any:
     raise ValueError(f"non-standard JSON constant: {value}")
 
 
-def read_jsonl(path: Path) -> tuple[dict[str, Any], ...]:
+def read_jsonl(
+    path: Path,
+    *,
+    directory_fd: int | None = None,
+) -> tuple[dict[str, Any], ...]:
+    if directory_fd is None:
+        text = path.read_text(encoding="utf-8")
+    else:  # pragma: no cover - exercised on POSIX hosts
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            text = handle.read()
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             raise ValueError(f"blank line {line_number} in {path}")
         try:
@@ -57,7 +73,37 @@ def _encode(row: dict[str, Any]) -> str:
     )
 
 
-def write_jsonl_atomic(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+def write_jsonl_atomic(
+    path: Path,
+    rows: Iterable[dict[str, Any]],
+    *,
+    directory_fd: int | None = None,
+) -> None:
+    if directory_fd is not None:  # pragma: no cover - exercised on POSIX hosts
+        temporary_name = f".{path.name}.{secrets.token_hex(12)}"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                for row in rows:
+                    handle.write(_encode(row) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=directory_fd)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     temporary = Path(temporary_name)
@@ -75,6 +121,26 @@ def write_jsonl_atomic(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 def append_jsonl_event(path: Path, row: dict[str, Any]) -> None:
     existing = read_jsonl(path) if path.exists() else ()
     write_jsonl_atomic(path, (*existing, row))
+
+
+def _read_jsonl_in_directory(
+    path: Path,
+    directory_fd: int | None,
+) -> tuple[dict[str, Any], ...]:
+    if directory_fd is None:
+        return read_jsonl(path)
+    return read_jsonl(path, directory_fd=directory_fd)  # pragma: no cover
+
+
+def _write_jsonl_in_directory(
+    path: Path,
+    rows: Iterable[dict[str, Any]],
+    directory_fd: int | None,
+) -> None:
+    if directory_fd is None:
+        write_jsonl_atomic(path, rows)
+    else:  # pragma: no cover - exercised on POSIX hosts
+        write_jsonl_atomic(path, rows, directory_fd=directory_fd)
 
 
 def validate_processing_events(
@@ -226,6 +292,9 @@ def persist_recording_transitions(
     events_path: Path,
     recordings: Iterable[RecordingRecord],
     events: Iterable[ProcessingEvent],
+    _recordings_directory_fd: int | None = None,
+    _events_directory_fd: int | None = None,
+    _validate_durable_namespace: Callable[[], None] | None = None,
 ) -> None:
     """Publish a complete transition set audit-first, with one replace per durable file."""
     if recordings_path.resolve() == events_path.resolve():
@@ -246,7 +315,9 @@ def persist_recording_transitions(
         if target_by_id[recording_id].state is not event.target_state:
             raise ValueError("target manifest state must equal event target_state")
 
-    existing_rows = read_jsonl(recordings_path)
+    if _validate_durable_namespace is not None:
+        _validate_durable_namespace()
+    existing_rows = _read_jsonl_in_directory(recordings_path, _recordings_directory_fd)
     existing_by_id = {row.get("recording_id"): row for row in existing_rows}
     if len(existing_by_id) != len(existing_rows) or set(existing_by_id) != set(target_by_id):
         raise ValueError("target manifest recording_id set and count must remain unchanged")
@@ -262,7 +333,18 @@ def persist_recording_transitions(
         }:
             raise ValueError("batch transition may change only recording state")
 
-    existing_events = read_jsonl(events_path) if events_path.exists() else ()
+    if _events_directory_fd is None:
+        events_exist = events_path.exists()
+    else:  # pragma: no cover - exercised on POSIX hosts
+        try:
+            os.stat(events_path.name, dir_fd=_events_directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            events_exist = False
+        else:
+            events_exist = True
+    existing_events = (
+        _read_jsonl_in_directory(events_path, _events_directory_fd) if events_exist else ()
+    )
     missing: list[ProcessingEvent] = []
     for event in expected_events:
         exists = processing_event_exists(existing_events, event)
@@ -274,9 +356,17 @@ def persist_recording_transitions(
     prospective_rows = (*existing_events, *(event.to_dict() for event in missing))
     validate_processing_events(prospective_rows)
     if missing:
-        write_jsonl_atomic(events_path, prospective_rows)
+        if _validate_durable_namespace is not None:
+            _validate_durable_namespace()
+        _write_jsonl_in_directory(events_path, prospective_rows, _events_directory_fd)
+        if _validate_durable_namespace is not None:
+            _validate_durable_namespace()
     try:
-        write_jsonl_atomic(recordings_path, target_rows)
+        if _validate_durable_namespace is not None:
+            _validate_durable_namespace()
+        _write_jsonl_in_directory(recordings_path, target_rows, _recordings_directory_fd)
+        if _validate_durable_namespace is not None:
+            _validate_durable_namespace()
     except Exception as error:
         event_ids = ", ".join(event.event_id for event in expected_events)
         raise RecordingTransitionPersistenceError(
