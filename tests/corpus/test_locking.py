@@ -60,6 +60,7 @@ def test_corpus_mutation_lease_is_reentrant_for_nested_store_writes(tmp_path: Pa
         "manifests/transcripts.jsonl",
         "manifests/review.jsonl",
         "manifests/recordings.jsonl",
+        "raw/spoken/writer-evidence.jsonl",
         "derived/corpus-v1/alignments/runs/test/rec-1/pairing.json",
     ),
 )
@@ -81,6 +82,78 @@ def test_second_thread_cannot_bypass_process_local_reentrancy(
     assert target.read_bytes() == before
     store.write_jsonl_atomic(target, ({"value": "released"},))
     assert store.read_jsonl(target) == ({"value": "released"},)
+
+
+def test_recording_id_named_local_data_cannot_create_a_nested_writer_lock(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    target = paths.alignments / "runs" / "test-config" / "local-data" / "pairing.json"
+    store.write_jsonl_atomic(target, ({"value": "stable"},))
+    before = target.read_bytes()
+
+    with corpus_mutation_lease(paths.manifests / "segments.jsonl"):
+        failures = _run_in_thread(lambda: store.write_jsonl_atomic(target, ({"value": "raced"},)))
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], CorpusMutationLockBusy)
+    assert target.read_bytes() == before
+    assert not (target.parent / "manifests" / ".corpus-mutation.lock").exists()
+
+
+def test_project_ancestor_named_local_data_still_uses_the_inner_corpus_root(
+    tmp_path: Path,
+) -> None:
+    outer = tmp_path / "local-data"
+    paths = _paths(outer / "project")
+    target = paths.manifests / "rights.jsonl"
+    store.write_jsonl_atomic(target, ({"value": "stable"},))
+    before = target.read_bytes()
+
+    with corpus_mutation_lease(target):
+        failures = _run_in_thread(lambda: store.write_jsonl_atomic(target, ({"value": "raced"},)))
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], CorpusMutationLockBusy)
+    assert target.read_bytes() == before
+    assert (paths.manifests / ".corpus-mutation.lock").is_file()
+    assert not (outer / "manifests" / ".corpus-mutation.lock").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows paths are case-insensitive")
+def test_windows_case_alias_cannot_bypass_the_corpus_writer_lock(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    target = paths.manifests / "rights.jsonl"
+    alias = paths.local_data.with_name("LOCAL-DATA") / "manifests" / target.name
+    store.write_jsonl_atomic(target, ({"value": "stable"},))
+    before = target.read_bytes()
+
+    with corpus_mutation_lease(target):
+        failures = _run_in_thread(lambda: store.write_jsonl_atomic(alias, ({"value": "raced"},)))
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], CorpusMutationLockBusy)
+    assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "relative_target",
+    (
+        "unexpected/rows.jsonl",
+        "derived/corpus-v1/alignments/local-data/manifests/rows.jsonl",
+    ),
+)
+def test_unrecognized_or_ambiguous_corpus_root_fails_closed(
+    tmp_path: Path,
+    relative_target: str,
+) -> None:
+    paths = _paths(tmp_path)
+    target = paths.local_data / Path(relative_target)
+
+    with pytest.raises(ValueError, match=r"corpus root|layout|ambiguous"):
+        store.write_jsonl_atomic(target, ({"value": "blocked"},))
+
+    assert not target.exists()
 
 
 def test_second_process_gets_busy_without_changing_corpus_bytes(tmp_path: Path) -> None:

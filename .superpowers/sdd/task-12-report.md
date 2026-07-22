@@ -300,7 +300,7 @@
 ### 根因与共享锁协议
 
 - 第五轮 build 私有 `.build-manifest.lock` 只约束 `build-manifest`，`write_jsonl_atomic()`、review helper、inventory intake 与其他真实写路径并不取得同一把锁；POSIX 上 pinned fd/namespace 复验不能替代合作 writer 的跨事务互斥。
-- 新增 `latintts.corpus.locking`，锁文件固定为 `local-data/manifests/.corpus-mutation.lock`，永久保留而不 unlink，避免合作进程锁住不同 inode。目标路径从最近的精确 `local-data` 祖先定位同一 corpus；混合 non-local/local 或不同 local-data root 的多路径事务 fail closed。
+- 新增 `latintts.corpus.locking`，锁文件固定为 `local-data/manifests/.corpus-mutation.lock`，永久保留而不 unlink，避免合作进程锁住不同 inode。该轮最初按最近的精确 `local-data` 祖先定位；第七轮发现嵌套同名目录与 Windows 大小写别名可绕过后，已升级为固定 corpus 布局的唯一候选识别。
 - Windows 同时持有 manifests directory deny-delete handle 与 lock file `CreateFileW(OPEN_ALWAYS, share_mode=0)` handle，拒绝 reparse/directory lock object；POSIX 从 `O_DIRECTORY | O_NOFOLLOW` pinned manifests dirfd 相对打开 regular lock file，比较 fd/public `(st_dev, st_ino)` 后执行 `flock(LOCK_EX | LOCK_NB)`。
 - 进程内每 corpus 使用 nonblocking `RLock`、depth 与显式 `(owner_pid, owner_thread)`：同 PID 同线程嵌套可重入，其他线程立即返回 `CorpusMutationLockBusy`，其他进程由 Windows sharing 或 POSIX flock 拒绝。最后一层 close 才释放 OS lease；acquire/close 异常不会遗留 registry depth。
 - fork child 在触碰可能由消失线程持有的旧 registry mutex 之前重置 registry；继承 backend 只 close child fd，绝不 `LOCK_UN` 父进程 flock。继承的 stale `CorpusMutationLease.close()` 在 PID 不同场景只标记自身 closed，不修改旧 Entry/RLock/backend；同 PID 跨线程 close 仍在任何状态变化前拒绝。
@@ -341,4 +341,46 @@
 - Windows sharing handles 为合作与非合作 writer 提供更强的 open/write/delete exclusion；不支持所需 handle/API 的文件系统继续 fail closed。
 - POSIX 保证所有会改变 build 所消费可变 durable evidence 的 LatinTTS 内置写路径合作互斥；`flock` 无法强制手工或恶意外部进程合作。外部 rename/replace namespace ABA 明确不在保证范围，不承诺每次都能检测、回滚或阻止。
 - 10 个 skip 中 9 个仍来自当前 Windows token 缺少 symlink privilege；新增 1 个是只在 POSIX 执行的真实 fork/flock 回归。Windows 上跨线程、跨进程、junction、sharing 与模拟 PID fallback 均实际执行。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-22 第七轮审查整改：唯一 corpus root 与完整 SEGMENTED 历史
+
+### 固定布局 corpus root 识别
+
+- 旧 `local_data_root_for()` 取最近的字面 `local-data` 祖先。合法 `recording_id="local-data"` 会使 pairing writer 在 recording 目录下创建第二把 `.corpus-mutation.lock`，从而绕过 build 持有的真实 corpus lease；Windows 上 `LOCAL-DATA` 大小写别名还会被误判为 non-local no-op。
+- 新识别枚举全部平台规范化同名候选，仅接受目标相对候选以 `manifests/`、`derived/corpus-v1/` 或 `raw/spoken|sung/` 开头的固定布局。恰好一个候选才返回；存在同名祖先但 0 个或多个布局候选时 fail closed。完全不含 `local-data` 候选的普通外部路径仍保留 no-op 契约。
+- Windows 候选组件和 registry key 均通过平台 `normcase` 归一化，因此同一真实路径的大小写拼写共享同一进程内 entry 与 OS lock。项目祖先本身也名为 `local-data` 时，只有内层真实 corpus root 匹配布局，不会改成“最远祖先”策略。
+
+### 完整 SEGMENTED processing provenance
+
+- `validate_processing_events()` 只验证现有 journal 内部连续性，不要求首条事件必须从确定的初始状态开始；删除首个 `TRANSCRIPT_CONFIRMED → SEGMENTED` 后，剩余 `SEGMENTED → PAIRED → ALIGNED → REVIEWED` 链仍可被 manifest build 接受。
+- `_validate_processing_history()` 现在在 pairing/alignment/review 校验前构造并要求确定性 SEGMENTED event。输入精确绑定 raw recording SHA-256、已验证 analysis audio SHA-256、`spoken_text` SHA-256 与已验证 segmentation row 的 VAD model SHA-256；同时绑定当前 config digest 及 `("silero-vad==6.2.1", "pause-profile-v1")`。
+- segmentation row 在 context 创建时已被 `_load_pairing_segmentation()` 要求恰好一行，并按 pinned snapshot 严格验证 input/config/model/VAD/pause provenance；校验处的读取显式依赖该前置不变量。缺失 event 返回未绑定错误，存在自洽但篡改的 deterministic event ID/语义则返回冲突错误。
+
+### 第七轮 RED → GREEN 证据
+
+1. corpus root 定向 RED：嵌套 recording ID、Windows case alias、0 候选与多候选旧实现分别表现为 writer 成功覆盖或未抛错，结果 `4 failed, 1 passed`；固定布局唯一候选实现后同组 `5 passed`，目标字节保持不变。
+2. locking 全组新增 raw 合法布局、项目祖先同名与 Windows 大小写真实路径回归后为 `26 passed, 1 skipped`；未在嵌套 recording 目录创建第二个 lock file。
+3. SEGMENTED RED 将 missing、raw、analysis、transcript、model、config、tools 七类 corruption 的 event ID 均按篡改语义重新计算；旧 build 七项全部 `DID NOT RAISE`，结果 `7 failed`。
+4. 确定性 SEGMENTED 校验后七项 `7 passed`；processing、recordings、review、segmentation、pairing、alignment 字节逐一不变，`segments.jsonl` 与 candidate/lossless clips 均未产生。
+
+### 第七轮最终门禁
+
+- locking 精确覆盖：`26 passed, 1 skipped`；`locking.py` 为 `194 statements / 8 missing = 95.88%`。
+- expanded focused（locking、manifest、store、review、inventory、transcript、pairing、pair CLI 与 alignment smoke 共 13 个文件）：`569 passed, 7 skipped`（190.28 秒）。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1490 passed, 10 skipped`（244.92 秒）
+  - displayed coverage：`95.02%`
+  - raw coverage：`95.02268664925066%`（`7273` statements，`362` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（74 files already formatted）。
+- `python -m mypy src`：PASS（32 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第七轮边界
+
+- 固定布局识别只定义共享 corpus mutation writer 的目标命名空间；内容寻址 audio/cache 仍使用独立 key lock，不借此扩大共享 lease 的承诺。
+- POSIX 对忽略 `flock` 的非合作外部 writer 仍不提供 Windows 式强制排他；外部 namespace ABA 继续位于保证范围之外。
+- 10 个 skip 中 9 个来自当前 Windows token 缺少 symlink privilege，1 个为 POSIX-only 真实 fork/flock 回归；本轮 Windows 大小写 alias、nested recording ID 与 fail-fast writer 测试均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

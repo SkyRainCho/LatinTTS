@@ -1561,6 +1561,33 @@ def _validate_processing_history(
     )
     if final_state.target_state is not context.recording.state and not recoverable_audit_ahead:
         raise ValueError("recording state is not bound to processing history")
+    # Context creation has already required exactly one segmentation row and
+    # validated its input/config/model provenance against the pinned artifact.
+    segmentation_row = read_jsonl(context.run_directory / "segmentation.json")[0]
+    segmentation_vad = cast(dict[str, Any], segmentation_row["vad"])
+    segmentation_model_sha256 = cast(str, segmentation_vad["model_sha256"])
+    transcript_sha256 = hashlib.sha256(
+        context.transcript["spoken_text"].encode("utf-8")
+    ).hexdigest()
+    segmented = _expected_cached_transition(
+        context.recording,
+        CorpusState.TRANSCRIPT_CONFIRMED,
+        CorpusState.SEGMENTED,
+        input_sha256s=(
+            context.recording.sha256,
+            context.analysis.sha256,
+            transcript_sha256,
+            segmentation_model_sha256,
+        ),
+        config_sha256=config.digest,
+        tool_versions=("silero-vad==6.2.1", "pause-profile-v1"),
+    )
+    try:
+        segmented_exists = processing_event_exists(rows, segmented)
+    except ValueError as error:
+        raise ValueError("SEGMENTED artifact conflicts with processing history") from error
+    if not segmented_exists:
+        raise ValueError("SEGMENTED artifact is not bound to processing history")
     paired = _expected_cached_transition(
         context.recording,
         CorpusState.SEGMENTED,

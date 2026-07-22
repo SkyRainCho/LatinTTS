@@ -118,19 +118,41 @@ if hasattr(os, "register_at_fork"):  # pragma: no branch - platform capability
     )
 
 
-def local_data_root_for(path: Path) -> Path | None:
-    """Locate and validate the nearest lexical ``local-data`` ancestor."""
-    absolute = Path(os.path.abspath(path))
-    local_data = next(
-        (
-            candidate
-            for candidate in (absolute, *absolute.parents)
-            if candidate.name == "local-data"
-        ),
-        None,
+def _matches_corpus_layout(root: Path, target: Path) -> bool:
+    relative = target.relative_to(root)
+    parts = tuple(os.path.normcase(part) for part in relative.parts)
+    return (
+        (len(parts) >= 2 and parts[0] == os.path.normcase("manifests"))
+        or (
+            len(parts) >= 4
+            and parts[:2] == (os.path.normcase("derived"), os.path.normcase("corpus-v1"))
+        )
+        or (
+            len(parts) >= 3
+            and parts[0] == os.path.normcase("raw")
+            and parts[1] in {os.path.normcase("spoken"), os.path.normcase("sung")}
+        )
     )
-    if local_data is None:
+
+
+def local_data_root_for(path: Path) -> Path | None:
+    """Locate the unique ``local-data`` ancestor matching the fixed corpus layout."""
+    absolute = Path(os.path.abspath(path))
+    named_candidates = tuple(
+        candidate
+        for candidate in (absolute, *absolute.parents)
+        if os.path.normcase(candidate.name) == os.path.normcase("local-data")
+    )
+    if not named_candidates:
         return None
+    layout_candidates = tuple(
+        candidate for candidate in named_candidates if _matches_corpus_layout(candidate, absolute)
+    )
+    if len(layout_candidates) != 1:
+        raise ValueError(
+            "corpus mutation target has an unrecognized or ambiguous corpus root layout"
+        )
+    local_data = layout_candidates[0]
     require_canonical_descendant(
         local_data,
         absolute,

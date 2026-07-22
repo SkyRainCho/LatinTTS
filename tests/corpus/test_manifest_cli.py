@@ -320,6 +320,76 @@ def test_build_manifest_rejects_invalid_review_prefix_or_suffix_without_writes(
     assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    ("missing", "raw", "analysis", "transcript", "model", "config", "tools"),
+)
+def test_build_manifest_rejects_missing_or_tampered_segmented_event_without_durable_writes(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    run_directory = paths.alignments / "runs" / config.digest  # type: ignore[attr-defined]
+    processing_path = run_directory / "processing-events.jsonl"
+    rows = list(read_jsonl(processing_path))
+    segmented_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row["recording_id"] == "rec-1"
+        and row["previous_state"] == "TRANSCRIPT_CONFIRMED"
+        and row["target_state"] == "SEGMENTED"
+    )
+    segmented = ProcessingEvent.from_dict(rows[segmented_index])
+    if corruption == "missing":
+        del rows[segmented_index]
+    else:
+        inputs = list(segmented.input_sha256s)
+        input_index = {"raw": 0, "analysis": 1, "transcript": 2, "model": 3}
+        if corruption in input_index:
+            index = input_index[corruption]
+            inputs[index] = "f" * 64 if inputs[index] != "f" * 64 else "e" * 64
+        event_config = segmented.config_sha256
+        if corruption == "config":
+            event_config = "f" * 64 if event_config != "f" * 64 else "e" * 64
+        tools = segmented.tool_versions
+        if corruption == "tools":
+            tools = ("tampered-segmentation=1",)
+        recording = review_module._decode_recording(
+            read_jsonl(paths.manifests / "recordings.jsonl")[0]  # type: ignore[attr-defined]
+        )
+        _, replacement = advance_recording(
+            replace(recording, state=CorpusState.TRANSCRIPT_CONFIRMED),
+            CorpusState.SEGMENTED,
+            input_sha256s=tuple(inputs),
+            config_sha256=event_config,
+            tool_versions=tools,
+            started_at=segmented.started_at,
+            finished_at=segmented.finished_at,
+            result=segmented.result,
+        )
+        rows[segmented_index] = replacement.to_dict()
+    write_jsonl_atomic(processing_path, rows)
+    protected = (
+        processing_path,
+        paths.manifests / "recordings.jsonl",  # type: ignore[attr-defined]
+        paths.manifests / "review.jsonl",  # type: ignore[attr-defined]
+        run_directory / "rec-1" / "segmentation.json",
+        run_directory / "rec-1" / "pairing.json",
+        run_directory / "rec-1" / "alignment.json",
+    )
+    before = {path: path.read_bytes() for path in protected}
+    lossless_before = tuple((paths.segments / "lossless").glob("*"))  # type: ignore[attr-defined]
+    candidates_before = tuple((paths.segments / "candidates").glob("*"))  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match=r"SEGMENTED|segmentation|processing history"):
+        _build_with_fake_audio(paths, config)  # type: ignore[arg-type]
+
+    assert {path: path.read_bytes() for path in protected} == before
+    assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
+    assert tuple((paths.segments / "lossless").glob("*")) == lossless_before  # type: ignore[attr-defined]
+    assert tuple((paths.segments / "candidates").glob("*")) == candidates_before  # type: ignore[attr-defined]
+
+
 @pytest.mark.parametrize("alias_component", ("staging-parent", "mode-root"))
 def test_build_manifest_rejects_output_component_alias_before_runner_or_publish(
     tmp_path: Path,
