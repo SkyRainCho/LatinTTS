@@ -10,6 +10,7 @@ defense in depth.
 from __future__ import annotations
 
 import errno
+import ntpath
 import os
 import stat
 import threading
@@ -23,6 +24,7 @@ from latintts.corpus.paths import require_canonical_descendant
 
 _LOCK_NAME = ".corpus-mutation.lock"
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_COMPONENT_CASEFOLD = os.name == "nt"
 
 
 class CorpusMutationLockBusy(BlockingIOError):
@@ -118,32 +120,100 @@ if hasattr(os, "register_at_fork"):  # pragma: no branch - platform capability
     )
 
 
+def _component_key(component: str) -> str:
+    if _WINDOWS_COMPONENT_CASEFOLD:
+        return ntpath.normcase(component)
+    return component
+
+
 def _matches_corpus_layout(root: Path, target: Path) -> bool:
     relative = target.relative_to(root)
-    parts = tuple(os.path.normcase(part) for part in relative.parts)
+    parts = tuple(_component_key(part) for part in relative.parts)
     return (
-        (len(parts) >= 2 and parts[0] == os.path.normcase("manifests"))
+        (len(parts) >= 2 and parts[0] == _component_key("manifests"))
         or (
             len(parts) >= 4
-            and parts[:2] == (os.path.normcase("derived"), os.path.normcase("corpus-v1"))
+            and parts[:2] == (_component_key("derived"), _component_key("corpus-v1"))
         )
         or (
             len(parts) >= 3
-            and parts[0] == os.path.normcase("raw")
-            and parts[1] in {os.path.normcase("spoken"), os.path.normcase("sung")}
+            and parts[0] == _component_key("raw")
+            and parts[1] in {_component_key("spoken"), _component_key("sung")}
         )
+    )
+
+
+def _named_corpus_candidates(target: Path) -> tuple[Path, ...]:
+    return tuple(
+        candidate
+        for candidate in (target, *target.parents)
+        if _component_key(candidate.name) == _component_key("local-data")
+    )
+
+
+def _layout_candidates(target: Path) -> tuple[Path, ...]:
+    return tuple(
+        candidate
+        for candidate in _named_corpus_candidates(target)
+        if _matches_corpus_layout(candidate, target)
+    )
+
+
+def _same_existing_path(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _matches_physical_corpus_layout(root: Path, target: Path) -> bool:
+    parts = target.relative_to(root).parts
+    return (
+        (len(parts) >= 2 and _same_existing_path(root / parts[0], root / "manifests"))
+        or (
+            len(parts) >= 4
+            and _same_existing_path(
+                root.joinpath(*parts[:2]),
+                root / "derived" / "corpus-v1",
+            )
+        )
+        or (
+            len(parts) >= 3
+            and (
+                _same_existing_path(
+                    root.joinpath(*parts[:2]),
+                    root / "raw" / "spoken",
+                )
+                or _same_existing_path(
+                    root.joinpath(*parts[:2]),
+                    root / "raw" / "sung",
+                )
+            )
+        )
+    )
+
+
+def _physical_layout_candidates(target: Path) -> tuple[Path, ...]:
+    return tuple(
+        candidate
+        for candidate in (target, *target.parents)
+        if candidate.name
+        and _same_existing_path(
+            candidate,
+            candidate.with_name("local-data"),
+        )
+        and _matches_physical_corpus_layout(candidate, target)
     )
 
 
 def local_data_root_for(path: Path) -> Path | None:
     """Locate the unique ``local-data`` ancestor matching the fixed corpus layout."""
     absolute = Path(os.path.abspath(path))
-    named_candidates = tuple(
-        candidate
-        for candidate in (absolute, *absolute.parents)
-        if os.path.normcase(candidate.name) == os.path.normcase("local-data")
-    )
+    named_candidates = _named_corpus_candidates(absolute)
     if not named_candidates:
+        canonical = absolute.resolve(strict=False)
+        if _layout_candidates(canonical) or _physical_layout_candidates(canonical):
+            raise ValueError("corpus mutation target uses an alias to a corpus root")
         return None
     layout_candidates = tuple(
         candidate for candidate in named_candidates if _matches_corpus_layout(candidate, absolute)

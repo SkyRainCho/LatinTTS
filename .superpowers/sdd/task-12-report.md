@@ -384,3 +384,38 @@
 - POSIX 对忽略 `flock` 的非合作外部 writer 仍不提供 Windows 式强制排他；外部 namespace ABA 继续位于保证范围之外。
 - 10 个 skip 中 9 个来自当前 Windows token 缺少 symlink privilege，1 个为 POSIX-only 真实 fork/flock 回归；本轮 Windows 大小写 alias、nested recording ID 与 fail-fast writer 测试均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-22 第八轮审查整改：整个 corpus root 别名 fail closed
+
+### 根因与修复
+
+- 第七轮 `local_data_root_for()` 在字面路径中找不到名为 `local-data` 的组件时会立即返回 `None`。因此，指向整棵真实 `local-data` 的 junction/symlink（如 `corpus-alias`）以及 Windows 8.3 短路径（如 `LOCAL-~1/MANIFE~1`）可被错认为普通外部路径，从而跳过共享 lease。
+- 现在仅在“无字面候选”的分支中解析 canonical target；若解析后命中固定 `manifests/`、`derived/corpus-v1/` 或 `raw/spoken|sung/` 布局，则确认原路径是 corpus root 别名并以 `ValueError` fail closed，不会为别名建立第二套 lock namespace。
+- 另以 `os.path.samefile()` 做物理身份后备，覆盖大小写不敏感 POSIX 文件系统上 `resolve()` 可能保留输入大小写的情形。词法组件折叠只在 Windows 启用；不依赖 POSIX `normcase` 做非便携的全局大小写假设。物理身份查询只将“不存在/非目录”视为不匹配，其他 I/O 错误继续 fail closed。
+- 完全不指向固定 corpus 布局的普通外部路径仍返回 `None`；其 writer 在真实 corpus lease 存续期间仍可正常工作，没有扩大共享锁的命名空间。
+
+### 第八轮 RED → GREEN 证据
+
+1. 整棵 corpus junction/symlink、普通外部路径与 Windows 8.3 短路径首轮 RED 为 `2 failed, 1 passed`；两个别名 writer 都在真实 lease 下成功覆写目标，外部路径 no-op 契约则保持通过。
+2. Windows-only component folding 契约的干净 RED 为缺失 `_WINDOWS_COMPONENT_CASEFOLD`、`1 failed`；实现平台显式分支后转绿，测试不再 monkeypatch 全局 `os.name`。
+3. 模拟大小写不敏感 POSIX 物理身份的 RED 为 `DID NOT RAISE`、`1 failed`；增加 `samefile` 后备后，整棵别名、8.3、外部 no-op、Windows-only folding 与 POSIX 物理身份组合用例为 `5 passed, 27 deselected`。
+4. canonical 首版的 expanded focused 回归为 `573 passed, 7 skipped`（在 POSIX 物理身份后备加入前，仅作中间 TDD 证据）；最终代码的 locking 精确覆盖与 full coverage 见下。
+
+### 第八轮最终门禁
+
+- 最终 locking 精确覆盖：`31 passed, 1 skipped`；`locking.py` 为 `217 statements / 8 missing = 96.31%`。唯一 skip 是 POSIX-only 真实 fork/flock 契约；Windows 8.3 短路径回归在当前主机实际执行并通过。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1495 passed, 10 skipped`（247.53 秒）
+  - displayed coverage：`95.04%`
+  - raw coverage：`95.03837719298247%`（`7296` statements，`362` missing）
+- `python -m ruff check --no-cache src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（74 files already formatted）。
+- `python -m mypy --strict src`：PASS（32 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：`gold-audit: PASS total=351 errors=0`。
+- `git diff --check`：PASS；当前 Windows Git 仅提示工作树 LF 将在 Git 触碰时转换为 CRLF，无 whitespace error。
+
+### 第八轮边界
+
+- canonical/物理身份检查只用于防止固定 corpus 布局经路径别名逃逸共享 lease；不把任意名为 `manifests`、`raw` 或 `derived` 的外部树当成 corpus。
+- POSIX 上的非合作外部 writer 仍不受 `flock` 强制；本轮修复的是 LatinTTS 内置 writer 通过 root alias 误跳过 lease 的问题，不扩大已记录的非合作 namespace ABA 保证。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

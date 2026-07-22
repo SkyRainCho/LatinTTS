@@ -40,6 +40,76 @@ def _run_in_thread(operation: object) -> list[BaseException]:
     return failures
 
 
+def _make_directory_alias(alias: Path, target: Path) -> None:
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if sys.platform != "win32":
+            pytest.skip(f"directory aliases unavailable: {error}")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            text=True,
+        )
+        if completed.returncode:
+            pytest.skip(f"directory aliases unavailable: {error}; {completed.stderr}")
+
+
+def _windows_short_path(path: Path) -> Path | None:
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetShortPathNameW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    kernel32.GetShortPathNameW.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
+    if length == 0 or length >= len(buffer):
+        return None
+    return Path(buffer.value)
+
+
+def test_corpus_layout_component_case_folding_is_windows_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(locking, "_WINDOWS_COMPONENT_CASEFOLD", False)
+    assert locking._component_key("LOCAL-DATA") != locking._component_key("local-data")
+    monkeypatch.setattr(locking, "_WINDOWS_COMPONENT_CASEFOLD", True)
+    assert locking._component_key("LOCAL-DATA") == locking._component_key("local-data")
+
+
+def test_case_insensitive_posix_alias_uses_physical_identity_instead_of_casefold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "LOCAL-DATA" / "MANIFESTS" / "rights.jsonl"
+    target.parent.mkdir(parents=True)
+    monkeypatch.setattr(locking, "_WINDOWS_COMPONENT_CASEFOLD", False)
+
+    def same_ignoring_case(left: Path, right: Path) -> bool:
+        return tuple(part.casefold() for part in left.parts) == tuple(
+            part.casefold() for part in right.parts
+        )
+
+    monkeypatch.setattr(
+        locking,
+        "_same_existing_path",
+        same_ignoring_case,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="alias"):
+        locking.local_data_root_for(target)
+
+
 def test_corpus_mutation_lease_is_reentrant_for_nested_store_writes(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     target = paths.manifests / "rights.jsonl"
@@ -133,6 +203,71 @@ def test_windows_case_alias_cannot_bypass_the_corpus_writer_lock(tmp_path: Path)
 
     assert len(failures) == 1
     assert isinstance(failures[0], CorpusMutationLockBusy)
+    assert target.read_bytes() == before
+
+
+def test_whole_corpus_directory_alias_fails_closed_under_the_real_lease(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path / "project")
+    target = paths.manifests / "rights.jsonl"
+    store.write_jsonl_atomic(target, ({"value": "stable"},))
+    before = target.read_bytes()
+    alias_root = tmp_path / "corpus-alias"
+    _make_directory_alias(alias_root, paths.local_data)
+    alias_target = alias_root / "manifests" / target.name
+
+    with corpus_mutation_lease(target):
+        failures = _run_in_thread(
+            lambda: store.write_jsonl_atomic(alias_target, ({"value": "raced"},))
+        )
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
+    assert "alias" in str(failures[0]).lower()
+    assert target.read_bytes() == before
+
+
+def test_ordinary_external_path_remains_a_noop_for_the_corpus_lease(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path / "project")
+    corpus_target = paths.manifests / "rights.jsonl"
+    external = tmp_path / "ordinary" / "rows.jsonl"
+
+    with corpus_mutation_lease(corpus_target):
+        failures = _run_in_thread(
+            lambda: store.write_jsonl_atomic(external, ({"value": "external"},))
+        )
+
+    assert not failures
+    assert store.read_jsonl(external) == ({"value": "external"},)
+    assert not (external.parent / "manifests").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 8.3 path contract")
+def test_windows_short_path_alias_cannot_bypass_the_real_corpus_lease(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    target = paths.manifests / "rights-long-name.jsonl"
+    store.write_jsonl_atomic(target, ({"value": "stable"},))
+    before = target.read_bytes()
+    short_target = _windows_short_path(target)
+    if short_target is None or short_target == target:
+        pytest.skip("Windows 8.3 short paths are unavailable on this volume")
+    if any(os.path.normcase(part) == os.path.normcase("local-data") for part in short_target.parts):
+        pytest.skip("Windows did not shorten the local-data component")
+    assert short_target.resolve() == target.resolve()
+
+    with corpus_mutation_lease(target):
+        failures = _run_in_thread(
+            lambda: store.write_jsonl_atomic(short_target, ({"value": "raced"},))
+        )
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], ValueError)
+    assert "alias" in str(failures[0]).lower()
     assert target.read_bytes() == before
 
 
