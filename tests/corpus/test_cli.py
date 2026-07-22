@@ -1,6 +1,11 @@
+import re
 from pathlib import Path
 
+import pytest
+
+from latintts.corpus import cli
 from latintts.corpus.cli import main
+from latintts.corpus.cli_safety import safe_error_message
 
 
 def test_doctor_returns_failure_when_ffmpeg_is_missing(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -8,3 +13,493 @@ def test_doctor_returns_failure_when_ffmpeg_is_missing(tmp_path: Path, monkeypat
     exit_code = main(["--project-root", str(tmp_path), "doctor"])
     assert exit_code == 1
     assert "ALIGNER_UNAVAILABLE: ffmpeg not found in PATH" in capsys.readouterr().out
+
+
+_CONFIG_COMMANDS = (
+    "segment",
+    "pair",
+    "align",
+    "export-review",
+    "import-review",
+    "build-manifest",
+    "report",
+)
+
+
+@pytest.mark.parametrize("command", _CONFIG_COMMANDS)
+def test_missing_config_errors_keep_relative_clue_without_project_root(
+    command: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    relative_config = "config/corpus/__missing__.json"
+
+    assert (
+        main(
+            [
+                "--project-root",
+                str(tmp_path),
+                command,
+                "--config",
+                relative_config,
+            ]
+        )
+        == 2
+    )
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr.startswith("MANIFEST_SCHEMA_MISMATCH:")
+    assert relative_config in stderr
+    assert str(tmp_path.resolve()).replace("\\", "/").casefold() not in stderr.casefold()
+
+
+@pytest.mark.parametrize("operation", ("snapshotting", "final report validation"))
+def test_report_os_error_uses_safe_project_relative_path(
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    absolute = tmp_path / "local-data" / "manifests" / "report.json"
+    differently_cased = str(absolute.resolve()).replace("\\", "/").swapcase()
+
+    monkeypatch.setattr(cli.CorpusConfig, "load", lambda _path: object())
+    monkeypatch.setattr(cli.CorpusPaths, "ensure_layout", lambda _paths: None)
+
+    def fail_report(*_args: object) -> object:
+        raise OSError(f"report output changed while {operation}: {differently_cased}")
+
+    monkeypatch.setattr(cli, "build_report", fail_report)
+
+    assert main(["--project-root", str(tmp_path), "report"]) == 2
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr.startswith("MANIFEST_SCHEMA_MISMATCH:")
+    assert "<project-root>/local-data/manifests/report.json" in stderr.casefold()
+    assert str(tmp_path.resolve()).replace("\\", "/").casefold() not in stderr.casefold()
+
+
+def test_report_os_error_redacts_absolute_path_outside_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    external = (tmp_path.parent / "private-user-home" / "evidence.json").resolve()
+    monkeypatch.setattr(cli.CorpusConfig, "load", lambda _path: object())
+    monkeypatch.setattr(cli.CorpusPaths, "ensure_layout", lambda _paths: None)
+
+    def fail_report(*_args: object) -> object:
+        raise OSError(f"unable to read external evidence: {external}")
+
+    monkeypatch.setattr(cli, "build_report", fail_report)
+
+    assert main(["--project-root", str(tmp_path), "report"]) == 2
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert "<outside-project-root>" in stderr
+    assert str(external).replace("\\", "/").casefold() not in stderr.casefold()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "target"),
+    (
+        (("doctor",), "_doctor"),
+        (("inventory", "--init-intake"), "write_intake_skeleton"),
+        (("inventory",), "inventory_from_manifests"),
+        (("select-pilot",), "_select_pilot"),
+        (("prepare-text",), "_prepare_text"),
+    ),
+)
+def test_non_config_command_os_errors_are_safe_and_have_stable_code(
+    arguments: tuple[str, ...],
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    absolute = tmp_path / "local-data" / "manifests" / "evidence.json"
+    monkeypatch.setattr(cli.CorpusPaths, "ensure_layout", lambda _paths: None)
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise OSError(f"injected failure at {absolute}")
+
+    monkeypatch.setattr(cli, target, fail)
+
+    assert main(["--project-root", str(tmp_path), *arguments]) == 2
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr.startswith("MANIFEST_SCHEMA_MISMATCH:")
+    assert "<project-root>/local-data/manifests/evidence.json" in stderr
+    assert str(tmp_path.resolve()).replace("\\", "/").casefold() not in stderr.casefold()
+
+
+def test_argument_parser_error_redacts_absolute_argument(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    external = (tmp_path.parent / "private-user-home" / "argument.json").resolve()
+
+    assert (
+        main(
+            [
+                "--project-root",
+                str(tmp_path),
+                "report",
+                "--unsupported-path",
+                str(external),
+            ]
+        )
+        == 2
+    )
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr == "MANIFEST_SCHEMA_MISMATCH: invalid command-line arguments\n"
+    assert str(external).replace("\\", "/").casefold() not in stderr.casefold()
+
+
+@pytest.mark.parametrize(
+    ("argument", "secret"),
+    (
+        (r"C:\Users\Doe, John\secret.txt", "John"),
+        (r"\\?\UNC\server\share,private\Users\alice\secret.txt", "alice"),
+        ("file://server/share/Users/alice/secret.txt", "Users/alice"),
+        ("/home/alice, private/secret.txt", "private"),
+    ),
+)
+def test_argument_parser_error_redacts_absolute_path_variants(
+    argument: str,
+    secret: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--project-root", str(tmp_path), "report", "--unsupported", argument]) == 2
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr == "MANIFEST_SCHEMA_MISMATCH: invalid command-line arguments\n"
+    assert secret.casefold() not in stderr.casefold()
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    (
+        (r"failed at C:\Users\Doe, John\secret.txt", "John"),
+        (r"failed at \\?\UNC\server\share,private\Users\alice\secret.txt", "alice"),
+        ("failed at file://server/share/Users/alice/secret.txt", "Users/alice"),
+        ("failed at /home/alice, private/secret.txt", "private"),
+    ),
+)
+def test_safe_error_message_redacts_absolute_path_variants(
+    message: str,
+    secret: str,
+    tmp_path: Path,
+) -> None:
+    rendered = safe_error_message(OSError(message), tmp_path)
+    assert "<outside-project-root>" in rendered
+    assert secret.casefold() not in rendered.casefold()
+
+
+@pytest.mark.parametrize(
+    "argument",
+    (
+        r"--unsupportedC:\Users\alice\secret.txt",
+        "--unsupported/home/alice/secret.txt",
+    ),
+)
+def test_argument_parser_error_redacts_absolute_path_embedded_in_option(
+    argument: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--project-root", str(tmp_path), "report", argument]) == 2
+
+    stderr = capsys.readouterr().err.replace("\\", "/")
+    assert stderr == "MANIFEST_SCHEMA_MISMATCH: invalid command-line arguments\n"
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        r"prefixC:\Users\alice\secret.txt",
+        "prefix/home/alice/secret.txt",
+        "prefixfile://server/share/Users/alice/secret.txt",
+    ),
+)
+def test_invalid_subcommand_never_echoes_user_token(
+    command: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--project-root", str(tmp_path), command]) == 2
+    assert capsys.readouterr().err == ("MANIFEST_SCHEMA_MISMATCH: invalid command-line arguments\n")
+
+
+def test_dry_run_does_not_resolve_or_inspect_project_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def forbidden_resolve(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("dry-run must not resolve filesystem paths")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "resolve", forbidden_resolve)
+        assert main(["--project-root", str(tmp_path / "project"), "doctor", "--dry-run"]) == 0
+
+    assert capsys.readouterr().err == ""
+
+
+def test_failed_dry_run_does_not_resolve_project_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    resolve_calls = 0
+
+    def observed_resolve(*_args: object, **_kwargs: object) -> object:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        raise OSError("unexpected resolution")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "resolve", observed_resolve)
+        assert (
+            main(
+                [
+                    "--project-root",
+                    str(tmp_path / "project"),
+                    "report",
+                    "--dry-run",
+                    "--config",
+                    str(tmp_path / "outside.json"),
+                ]
+            )
+            == 2
+        )
+
+    assert resolve_calls == 0
+    assert capsys.readouterr().err == (
+        "MANIFEST_SCHEMA_MISMATCH: --dry-run config must be within the project root\n"
+    )
+
+
+def test_safe_error_formatter_survives_project_root_resolution_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def unavailable_resolve(*_args: object, **_kwargs: object) -> object:
+        raise OSError("root resolution unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "resolve", unavailable_resolve)
+        assert main(["--project-root", str(tmp_path), "report", "--unsupported"]) == 2
+
+    stderr = capsys.readouterr().err
+    assert stderr == "MANIFEST_SCHEMA_MISMATCH: invalid command-line arguments\n"
+
+
+_DRY_RUN_CASES = (
+    (
+        ("doctor", "--dry-run"),
+        (
+            "WRITE local-data/raw/spoken/",
+            "WRITE local-data/manifests/",
+        ),
+    ),
+    (
+        ("inventory", "--dry-run", "--init-intake"),
+        (
+            "READ local-data/raw/spoken/**/*",
+            "READ local-data/raw/sung/**/*",
+            "WRITE local-data/manifests/intake.csv",
+        ),
+    ),
+    (
+        ("inventory", "--dry-run"),
+        (
+            "READ local-data/manifests/intake.csv",
+            "READ local-data/manifests/rights.jsonl",
+            "WRITE local-data/manifests/recordings.jsonl",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/inventory/processing-events.jsonl",
+        ),
+    ),
+    (
+        (
+            "select-pilot",
+            "--dry-run",
+            "--recording-id",
+            "rec-one",
+            "--recording-id",
+            "rec-two",
+        ),
+        (
+            "READ local-data/manifests/recordings.jsonl",
+            "WRITE local-data/manifests/pilot-selection.json",
+        ),
+    ),
+    (
+        ("prepare-text", "--dry-run", "--init", "--replace"),
+        (
+            "READ local-data/manifests/pilot-selection.json",
+            "WRITE local-data/manifests/transcript-intake.jsonl",
+        ),
+    ),
+    (
+        ("prepare-text", "--dry-run"),
+        (
+            "READ local-data/manifests/transcript-intake.jsonl",
+            "READ local-data/**/*",
+            "WRITE local-data/manifests/transcripts.jsonl",
+            "WRITE local-data/manifests/pronunciation-review-*.json",
+            (
+                "WRITE local-data/derived/corpus-v1/alignments/runs/prepare-text/"
+                "processing-events.jsonl"
+            ),
+        ),
+    ),
+    (
+        ("segment", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/manifests/transcripts.jsonl",
+            "WRITE local-data/derived/corpus-v1/normalized/analysis-*.wav",
+            "WRITE local-data/derived/corpus-v1/normalized/analysis-*.wav.lock",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/segmentation.json",
+        ),
+    ),
+    (
+        ("pair", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/derived/corpus-v1/alignments/runs/*/*/segmentation.json",
+            "WRITE local-data/derived/corpus-v1/segments/candidates/candidate-*.wav",
+            "WRITE local-data/derived/corpus-v1/segments/candidates/candidate-*.wav.lock",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/.pairing.lock",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/pairing.json",
+        ),
+    ),
+    (
+        ("align", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/derived/corpus-v1/alignments/runs/*/*/pairing.json",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/alignment.json",
+        ),
+    ),
+    (
+        ("align", "--dry-run", "--smoke-test", "--allow-download"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ .git",
+            "READ .git/**/*",
+            "WRITE local-data/derived/corpus-v1/alignments/runtime/environment.txt",
+            "WRITE local-data/derived/corpus-v1/alignments/runtime/smoke.json",
+        ),
+    ),
+    (
+        ("export-review", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/derived/corpus-v1/alignments/runs/*/*/alignment.json",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/review/*/decision.json",
+            "WRITE local-data/derived/corpus-v1/segments/review/review-*.wav",
+            "WRITE local-data/derived/corpus-v1/segments/review/review-*.wav.lock",
+        ),
+    ),
+    (
+        ("import-review", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/derived/corpus-v1/alignments/runs/*/*/review/**/*",
+            "WRITE local-data/manifests/review.jsonl",
+            "WRITE local-data/manifests/recordings.jsonl",
+        ),
+    ),
+    (
+        ("build-manifest", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/manifests/review.jsonl",
+            "READ local-data/derived/corpus-v1/segments/review/review-*.wav",
+            "READ local-data/derived/corpus-v1/segments/.manifest-staging/**/*",
+            "WRITE local-data/manifests/segments.jsonl",
+            "WRITE local-data/derived/corpus-v1/segments/lossless/lossless-*.flac",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/pairing.json",
+            "WRITE local-data/derived/corpus-v1/alignments/runs/*/*/pairing-automatic.json",
+            "RECOVER local-data/derived/corpus-v1/segments/.manifest-staging/**/*",
+            "RECOVER local-data/derived/corpus-v1/alignments/runs/*/*/pairing.json",
+            "RECOVER local-data/derived/corpus-v1/alignments/runs/*/*/pairing-automatic.json",
+        ),
+    ),
+    (
+        ("report", "--dry-run"),
+        (
+            "READ config/corpus/pilot-v1.json",
+            "READ local-data/manifests/pilot-telemetry.json",
+            "READ local-data/manifests/recordings.jsonl",
+            "READ local-data/manifests/pilot-selection.json",
+            "READ local-data/manifests/rights.jsonl",
+            "READ local-data/manifests/transcripts.jsonl",
+            "READ local-data/manifests/review.jsonl",
+            "READ local-data/manifests/segments.jsonl",
+            "READ local-data/manifests/.report-output-transaction.json",
+            "READ local-data/manifests/.report-output-transaction.*/**/*",
+            "READ local-data/manifests/.report.json.*",
+            "READ local-data/manifests/.report.md.*",
+            "WRITE local-data/manifests/report.json",
+            "WRITE local-data/manifests/report.md",
+            "WRITE local-data/manifests/.report-output-transaction.json",
+            "WRITE local-data/manifests/.report-output-transaction.*/**/*",
+            "WRITE local-data/manifests/..report-output-transaction.json.*",
+            "WRITE local-data/manifests/.report.json.*",
+            "WRITE local-data/manifests/.report.md.*",
+            "RECOVER local-data/manifests/.report-output-transaction.json",
+            "RECOVER local-data/manifests/.report-output-transaction.rolled-back.json",
+            "RECOVER local-data/manifests/.report-output-transaction.completed.json",
+            "RECOVER local-data/manifests/.report-output-transaction.*/**/*",
+            "RECOVER local-data/manifests/.recovery.report.*",
+            "RECOVER local-data/manifests/.restore.report.*",
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(("arguments", "expected_lines"), _DRY_RUN_CASES)
+def test_dry_run_is_declarative_relative_and_has_no_side_effects(
+    arguments: tuple[str, ...],
+    expected_lines: tuple[str, ...],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project_root = tmp_path / "uncreated-project"
+
+    assert main(["--project-root", str(project_root), *arguments]) == 0
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert captured.err == ""
+    assert lines
+    assert not project_root.exists()
+    assert lines == sorted(
+        lines, key=lambda line: (("READ", "WRITE", "RECOVER").index(line.split()[0]), line)
+    )
+    assert set(expected_lines) <= set(lines)
+    for line in lines:
+        action, relative_path = line.split(" ", 1)
+        assert action in {"READ", "WRITE", "RECOVER"}
+        assert relative_path
+        assert "\\" not in relative_path
+        assert not relative_path.startswith("/")
+        assert re.match(r"^[A-Za-z]:", relative_path) is None
+        assert str(project_root.resolve()).replace("\\", "/").casefold() not in line.casefold()
+
+
+def test_pair_dry_run_does_not_claim_cached_analysis_lock(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--project-root", str(tmp_path), "pair", "--dry-run"]) == 0
+    assert (
+        "WRITE local-data/derived/corpus-v1/normalized/analysis-*.wav.lock"
+        not in capsys.readouterr().out.splitlines()
+    )

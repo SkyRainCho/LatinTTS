@@ -17,6 +17,31 @@ python -m latintts.corpus doctor
 `doctor` 还会检查试点所需的可选 Python 包。任何 `ALIGNER_UNAVAILABLE` 都必须先解决，不能
 通过跳过检查或手工伪造产物继续。
 
+### 先用 dry-run 核对路径
+
+每个 corpus 子命令都支持把 `--dry-run` 放在子命令之后。例如：
+
+```powershell
+python -m latintts.corpus doctor --dry-run
+python -m latintts.corpus inventory --dry-run --init-intake
+python -m latintts.corpus prepare-text --dry-run --init
+python -m latintts.corpus align --dry-run --smoke-test
+python -m latintts.corpus export-review --dry-run
+python -m latintts.corpus import-review --dry-run
+python -m latintts.corpus report --dry-run
+```
+
+输出每行都是 `READ`、`WRITE` 或 `RECOVER` 加一个项目相对路径。尚不能从静态命令行确定的
+config digest、录音 ID、复核组和内容寻址键用稳定 glob（如 `runs/*/*`）表示；不会为了展开
+glob 去读取 corpus 状态。`RECOVER` 表示正式命令可能恢复的成对状态或事务 namespace，不表示
+dry-run 已执行恢复。
+
+dry-run 是纯声明式规划：它不创建目录或锁，不加载配置或 corpus 文件，不读取或恢复未完成
+事务，不运行 ffmpeg、ffprobe、VAD、模型或对齐后端，也不发布任何文件。`report --dry-run`
+会同时列出输入证据、`report.json`/`report.md`、三个事务 marker、事务私有目录和临时、恢复
+副本 namespace。输出不会包含项目根目录或本机绝对用户目录；项目外的绝对 `--config` 会被
+拒绝。
+
 ## 2. 创建独立的 Python 3.10 语料环境
 
 ```powershell

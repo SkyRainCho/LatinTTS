@@ -15,12 +15,14 @@ from contextlib import suppress
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from latintts.corpus.alignment import result_to_dict
 from latintts.corpus.audio import DerivedAudio, RunCommand, derive_analysis_audio
+from latintts.corpus.cli_safety import safe_error_message
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
+from latintts.corpus.dry_run import plan_corpus_dry_run
 from latintts.corpus.inventory import (
     InventoryInputError,
     inventory_from_manifests,
@@ -134,6 +136,26 @@ _SEGMENT_FIELDS = frozenset(
         "pause",
     }
 )
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> NoReturn:
+        raise ValueError("invalid command-line arguments")
+
+
+def _print_cli_error(
+    code: str,
+    error: BaseException,
+    project_root: Path,
+    *,
+    resolve_project_root: bool = True,
+) -> None:
+    message = safe_error_message(
+        error,
+        project_root,
+        resolve_project_root=resolve_project_root,
+    )
+    print(f"{code}: {message}", file=sys.stderr)
 
 
 def _doctor(project_root: Path) -> int:
@@ -2113,11 +2135,11 @@ def alignment_smoke_test(
     return 0 if success else 1
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare the local LatinTTS corpus")
+def _main(argv: Sequence[str] | None = None) -> int:
+    parser = _SafeArgumentParser(description="Prepare the local LatinTTS corpus")
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("doctor")
+    doctor_parser = subparsers.add_parser("doctor")
     inventory_parser = subparsers.add_parser("inventory")
     inventory_parser.add_argument("--init-intake", action="store_true")
     selection_parser = subparsers.add_parser("select-pilot")
@@ -2171,7 +2193,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
     )
+    for command_parser in (
+        doctor_parser,
+        inventory_parser,
+        selection_parser,
+        prepare_text_parser,
+        segment_parser,
+        pair_parser,
+        align_parser,
+        export_review_parser,
+        import_review_parser,
+        build_manifest_parser,
+        report_parser,
+    ):
+        command_parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.dry_run:
+        if args.command == "prepare-text" and args.replace and not args.init:
+            raise TranscriptInputError("--replace is only valid with --init")
+        paths = CorpusPaths.from_project_root_lexical(args.project_root)
+        plan = plan_corpus_dry_run(
+            args.command,
+            paths,
+            config_path=getattr(args, "config", None),
+            init_intake=getattr(args, "init_intake", False),
+            init_transcript=getattr(args, "init", False),
+            smoke_test=getattr(args, "smoke_test", False),
+            allow_download=getattr(args, "allow_download", False),
+        )
+        for item in plan:
+            print(item.render())
+        return 0
     if args.command == "doctor":
         return _doctor(args.project_root)
     if args.command == "inventory":
@@ -2183,10 +2235,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 inventory_from_manifests(paths)
             except CorpusFailure as error:
-                print(f"{error.code}: {error}", file=sys.stderr)
+                _print_cli_error(error.code, error, args.project_root)
                 return 1
             except InventoryInputError as error:
-                print(f"{error.code}: {error}", file=sys.stderr)
+                _print_cli_error(error.code, error, args.project_root)
                 return 2
         return 0
     if args.command == "select-pilot":
@@ -2195,10 +2247,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             _select_pilot(paths, tuple(args.recording_id), args.replace)
         except InventoryInputError as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 2
         except ValueError as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0
     if args.command == "prepare-text":
@@ -2212,16 +2264,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise TranscriptInputError("--replace is only valid with --init")
                 _prepare_text(paths)
         except TranscriptInputError as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 2
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except InventoryInputError as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 2
         except ValueError as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0
     if args.command == "build-manifest":
@@ -2238,10 +2290,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffmpeg_version=_ffmpeg_version(),
             )
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except (InventoryInputError, OSError, TypeError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1
     if args.command == "report":
@@ -2254,13 +2306,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths.ensure_layout()
             report = build_report(paths, config)
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except ReportOutputRecoveryError as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 2
         except (OSError, TypeError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         print(f"corpus-report: {report.scale_decision.value}")
         return 0
@@ -2277,10 +2329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             return 0 if import_review_bundle(paths, config, ffmpeg_version=_ffmpeg_version()) else 1
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except (InventoryInputError, OSError, TypeError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
     if args.command == "align":
         paths = CorpusPaths.from_project_root(args.project_root)
@@ -2304,10 +2356,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0 if align_corpus(paths, config, alignment_backend) else 1
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except (OSError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
     if args.command == "pair":
         paths = CorpusPaths.from_project_root(args.project_root)
@@ -2329,10 +2381,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffmpeg_version=_ffmpeg_version(),
             )
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except (InventoryInputError, OSError, TypeError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1
     if args.command == "segment":
@@ -2363,10 +2415,70 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffmpeg_version=_ffmpeg_version(),
             )
         except CorpusFailure as error:
-            print(f"{error.code}: {error}", file=sys.stderr)
+            _print_cli_error(error.code, error, args.project_root)
             return 1
         except (InventoryInputError, OSError, TypeError, ValueError) as error:
-            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1
     raise AssertionError(args.command)
+
+
+def _project_root_argument(argv: Sequence[str] | None) -> Path:
+    arguments = tuple(sys.argv[1:] if argv is None else argv)
+    for index, argument in enumerate(arguments):
+        if argument == "--project-root" and index + 1 < len(arguments):
+            return Path(arguments[index + 1])
+        if argument.startswith("--project-root="):
+            return Path(argument.partition("=")[2])
+    return Path.cwd()
+
+
+def _dry_run_requested(argv: Sequence[str] | None) -> bool:
+    return "--dry-run" in tuple(sys.argv[1:] if argv is None else argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        project_root = _project_root_argument(argv)
+    except (OSError, RuntimeError):
+        print(
+            "MANIFEST_SCHEMA_MISMATCH: unable to determine project root",
+            file=sys.stderr,
+        )
+        return 2
+    resolve_project_root = not _dry_run_requested(argv)
+    try:
+        return _main(argv)
+    except ReportOutputRecoveryError as error:
+        _print_cli_error(
+            error.code,
+            error,
+            project_root,
+            resolve_project_root=resolve_project_root,
+        )
+        return 2
+    except (InventoryInputError, TranscriptInputError) as error:
+        _print_cli_error(
+            error.code,
+            error,
+            project_root,
+            resolve_project_root=resolve_project_root,
+        )
+        return 2
+    except CorpusFailure as error:
+        _print_cli_error(
+            error.code,
+            error,
+            project_root,
+            resolve_project_root=resolve_project_root,
+        )
+        return 1
+    except (OSError, ValueError) as error:
+        _print_cli_error(
+            "MANIFEST_SCHEMA_MISMATCH",
+            error,
+            project_root,
+            resolve_project_root=resolve_project_root,
+        )
+        return 2

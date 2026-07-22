@@ -60,7 +60,15 @@ class CorpusPaths:
 
     @classmethod
     def from_project_root(cls, project_root: Path) -> CorpusPaths:
-        root = project_root.resolve()
+        return cls._from_absolute_root(project_root.resolve())
+
+    @classmethod
+    def from_project_root_lexical(cls, project_root: Path) -> CorpusPaths:
+        """Build the fixed layout without querying filesystem aliases or existence."""
+        return cls._from_absolute_root(Path(os.path.abspath(project_root)))
+
+    @classmethod
+    def _from_absolute_root(cls, root: Path) -> CorpusPaths:
         local = root / "local-data"
         derived = local / "derived" / "corpus-v1"
         return cls(
