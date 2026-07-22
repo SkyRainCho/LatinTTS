@@ -97,7 +97,7 @@ class ScaleDecision(str, Enum):
 
 
 class ReportOutputRecoveryError(OSError):
-    """A durable report transaction needs operator-assisted recovery."""
+    """A persisted report transaction needs operator-assisted recovery."""
 
     code = IssueCode.REPORT_OUTPUT_RECOVERY_REQUIRED.value
 
@@ -787,6 +787,7 @@ def _path_present(path: Path) -> bool:
 
 
 def _sync_report_directory(directory: Path) -> None:
+    """Sync metadata where supported; recovery promises process restart, not power loss."""
     if os.name == "nt":
         return
     _sync_report_directory_posix(directory)  # pragma: no cover - exercised on POSIX hosts
@@ -1283,6 +1284,12 @@ def _rename_noreplace_posix(
         )
 
 
+def _sync_report_rename_directories(source: Path, destination: Path) -> None:
+    _sync_report_directory(source.parent)
+    if destination.parent != source.parent:
+        _sync_report_directory(destination.parent)
+
+
 def _claim_report_output(
     target: Path,
     claimed: Path,
@@ -1291,12 +1298,12 @@ def _claim_report_output(
     operation: str,
 ) -> _ReportOutputSnapshot:
     _rename_noreplace(target, claimed)
-    _sync_report_directory(target.parent)
+    _sync_report_rename_directories(target, claimed)
     snapshot = _prepared_report_snapshot(claimed)
     if not _snapshot_matches_identity(snapshot, expected):
         with suppress(OSError):
             _rename_noreplace(claimed, target)
-            _sync_report_directory(target.parent)
+            _sync_report_rename_directories(claimed, target)
         raise _ReportPublicationVerificationError(
             f"report output changed before {operation}: {target.name}"
         )

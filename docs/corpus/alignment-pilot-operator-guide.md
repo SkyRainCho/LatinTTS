@@ -183,6 +183,8 @@ rolled-back、committed 三个 outcome marker 必须至多存在一个，且 out
 和受身份校验保护的清理，不再回滚到旧报告对。若私有目录已经删除但 root
 outcome marker 尚在，只有当登记的 root payload 已全部消失、marker 无冲突，而且当前
 `report.json` / `report.md` 与 intent 中的完整身份完全一致时，才会完成 marker 清理。
+该恢复边界仅覆盖进程中断/重启；不承诺 OS crash 或断电后的目录项持久性，也不把普通
+Windows rename 视为经过验证的断电安全提交。
 只有恢复无法安全自动完成时才返回 `REPORT_OUTPUT_RECOVERY_REQUIRED`。此时不要删除上述
 marker、`.report-output-transaction.*`，也不要删除以 `.recovery.` / `.restore.` 开头的
 登记副本；按报错给出的 `manifests/...` 相对位置核对旧的 `report.json` / `report.md` 文件对，

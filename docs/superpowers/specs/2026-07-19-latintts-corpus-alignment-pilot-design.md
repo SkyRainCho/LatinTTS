@@ -469,6 +469,8 @@ MMS CTC 对齐使用字符或罗马化 token，不直接消费 `PronunciationPla
 - root outcome marker 在登记的 root payload 和私有事务目录之后最后删除。若中断发生在
   私有目录删除后，只有当前报告对的完整身份与 intent 一致且登记 payload 均已消失时，
   才能用 root outcome marker 完成终态恢复。
+- 该协议的验证边界是进程中断/重启；不承诺 OS crash 或断电后的目录项持久性，也不依赖
+  未经验证的 Windows 目录 `FlushFileBuffers` 行为。
 - 删除前核验登记的 device、inode、mode、size 与 SHA-256。该协议依赖
   `corpus_mutation_lease` 协作锁；忽略协作锁的同用户路径 ABA 竞争不属于自动恢复保证。
 

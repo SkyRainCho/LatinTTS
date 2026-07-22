@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -72,6 +73,8 @@ def test_operator_guide_defines_complete_telemetry_and_error_recovery_contract()
     assert "只允许 roll-forward" in guide
     assert "rolled-back 状态只继续清理" in guide
     assert "协作锁" in guide
+    assert "进程中断/重启" in guide
+    assert "不承诺 OS crash 或断电" in guide
     assert "绝对路径" in guide
     for code in IssueCode:
         assert f"`{code.value}`" in guide
@@ -84,6 +87,8 @@ def test_design_spec_registers_report_output_recovery_error() -> None:
     ).read_text(encoding="utf-8")
 
     assert "`REPORT_OUTPUT_RECOVERY_REQUIRED`" in design
+    assert "进程中断/重启" in design
+    assert "不承诺 OS crash 或断电" in design
 
 
 def _valid_report_transaction_intent_raw() -> dict[str, Any]:
@@ -534,6 +539,207 @@ def test_owned_report_cleanup_rejects_replaced_transaction_directory(tmp_path: P
 
     with pytest.raises(OSError, match="directory identity changed"):
         report_module._remove_owned_transaction_directory(directory, expected)
+
+
+def test_report_claim_syncs_both_directories_after_cross_directory_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_directory = tmp_path / "source"
+    claimed_directory = tmp_path / "claimed"
+    source_directory.mkdir()
+    claimed_directory.mkdir()
+    target = source_directory / "report.json"
+    claimed = claimed_directory / "report.json.displaced"
+    target.write_bytes(b"old report\n")
+    expected = report_module._ReportSnapshotIdentity.from_snapshot(
+        report_module._prepared_report_snapshot(target)
+    )
+    synced: list[Path] = []
+    monkeypatch.setattr(report_module, "_sync_report_directory", synced.append)
+
+    report_module._claim_report_output(
+        target,
+        claimed,
+        expected=expected,
+        operation="test claim",
+    )
+
+    assert synced == [source_directory, claimed_directory]
+
+
+def test_report_claim_syncs_shared_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "report.json"
+    claimed = tmp_path / "report.json.displaced"
+    target.write_bytes(b"old report\n")
+    expected = report_module._ReportSnapshotIdentity.from_snapshot(
+        report_module._prepared_report_snapshot(target)
+    )
+    synced: list[Path] = []
+    monkeypatch.setattr(report_module, "_sync_report_directory", synced.append)
+
+    report_module._claim_report_output(
+        target,
+        claimed,
+        expected=expected,
+        operation="test claim",
+    )
+
+    assert synced == [tmp_path]
+
+
+def test_report_claim_compensation_syncs_both_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_directory = tmp_path / "source"
+    claimed_directory = tmp_path / "claimed"
+    source_directory.mkdir()
+    claimed_directory.mkdir()
+    target = source_directory / "report.json"
+    claimed = claimed_directory / "report.json.displaced"
+    old_content = b"old report\n"
+    target.write_bytes(old_content)
+    current = report_module._prepared_report_snapshot(target)
+    mismatched = replace(
+        report_module._ReportSnapshotIdentity.from_snapshot(current),
+        sha256="0" * 64,
+    )
+    synced: list[Path] = []
+    monkeypatch.setattr(report_module, "_sync_report_directory", synced.append)
+
+    with pytest.raises(report_module._ReportPublicationVerificationError):
+        report_module._claim_report_output(
+            target,
+            claimed,
+            expected=mismatched,
+            operation="test compensation",
+        )
+
+    assert target.read_bytes() == old_content
+    assert not claimed.exists()
+    assert synced == [
+        source_directory,
+        claimed_directory,
+        claimed_directory,
+        source_directory,
+    ]
+
+
+class _FailingRenamePrimitive:
+    def __init__(self) -> None:
+        self.argtypes: object = None
+        self.restype: object = None
+        self.calls: list[tuple[object, ...]] = []
+
+    def __call__(self, *args: object) -> int:
+        self.calls.append(args)
+        return -1
+
+
+def _patch_failing_linux_renameat2(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> _FailingRenamePrimitive:
+    primitive = _FailingRenamePrimitive()
+    library = type("FakeCLibrary", (), {"renameat2": primitive})()
+    monkeypatch.setattr(report_module.sys, "platform", "linux")
+    monkeypatch.setattr(report_module.ctypes, "CDLL", lambda *_args, **_kwargs: library)
+    monkeypatch.setattr(report_module.ctypes, "get_errno", lambda: error_number)
+    return primitive
+
+
+def test_posix_noreplace_rename_propagates_eexist_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_bytes(b"source\n")
+    destination.write_bytes(b"destination\n")
+    primitive = _patch_failing_linux_renameat2(monkeypatch, errno.EEXIST)
+    monkeypatch.setattr(
+        report_module.os,
+        "link",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to hard links"),
+    )
+    monkeypatch.setattr(
+        report_module.os,
+        "rename",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to os.rename"),
+    )
+
+    with pytest.raises(OSError) as failure:
+        report_module._rename_noreplace_posix(source, destination)
+
+    assert failure.value.errno == errno.EEXIST
+    assert len(primitive.calls) == 1
+    assert source.read_bytes() == b"source\n"
+    assert destination.read_bytes() == b"destination\n"
+
+
+def test_posix_noreplace_rename_fails_closed_without_renameat2_symbol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_bytes(b"source\n")
+    monkeypatch.setattr(report_module.sys, "platform", "linux")
+    monkeypatch.setattr(report_module.ctypes, "CDLL", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        report_module.os,
+        "link",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to hard links"),
+    )
+    monkeypatch.setattr(
+        report_module.os,
+        "rename",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to os.rename"),
+    )
+
+    with pytest.raises(OSError) as failure:
+        report_module._rename_noreplace_posix(source, destination)
+
+    assert failure.value.errno == errno.ENOTSUP
+    assert source.read_bytes() == b"source\n"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("error_name", ("ENOSYS", "ENOTSUP"))
+def test_posix_noreplace_rename_fails_closed_when_primitive_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_name: str,
+) -> None:
+    if not hasattr(errno, error_name):
+        pytest.skip(f"{error_name} is unavailable on this platform")
+    error_number = getattr(errno, error_name)
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_bytes(b"source\n")
+    primitive = _patch_failing_linux_renameat2(monkeypatch, error_number)
+    monkeypatch.setattr(
+        report_module.os,
+        "link",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to hard links"),
+    )
+    monkeypatch.setattr(
+        report_module.os,
+        "rename",
+        lambda *_args, **_kwargs: pytest.fail("rename must not fall back to os.rename"),
+    )
+
+    with pytest.raises(OSError) as failure:
+        report_module._rename_noreplace_posix(source, destination)
+
+    assert failure.value.errno == error_number
+    assert len(primitive.calls) == 1
+    assert source.read_bytes() == b"source\n"
+    assert not destination.exists()
 
 
 def _copy_config(project: Path) -> None:
@@ -2820,7 +3026,7 @@ def test_existing_report_claim_race_preserves_foreign_and_old_bytes(
     old_markdown = markdown_path.read_bytes()
     foreign = b"foreign writer won the claim race\n"
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
-    real_rename = report_module.os.rename
+    real_rename = report_module._rename_noreplace
     real_replace = report_module.os.replace
     injected = False
 
@@ -2833,7 +3039,7 @@ def test_existing_report_claim_race_preserves_foreign_and_old_bytes(
             real_replace(foreign_source, json_path)
         real_rename(source, destination)
 
-    monkeypatch.setattr(report_module.os, "rename", replace_before_claim)
+    monkeypatch.setattr(report_module, "_rename_noreplace", replace_before_claim)
 
     with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
         build_report(paths, config)
