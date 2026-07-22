@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import secrets
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -70,6 +73,263 @@ from latintts.normalization import tokenize_words
 LosslessExtractor = Callable[..., DerivedAudio]
 AnalysisExtractor = Callable[..., DerivedAudio]
 BeforePublishLink = Callable[[Path], None]
+_MANIFEST_ATTESTATION_FIELDS = frozenset({"schema_version", "terminal_event_id", "evidence"})
+
+
+def _deterministic_processing_event_id(event: ProcessingEvent) -> str:
+    identity = {
+        "recording_id": event.recording_id,
+        "previous_state": event.previous_state.value,
+        "target_state": event.target_state.value,
+        "inputs": event.input_sha256s,
+        "config": event.config_sha256,
+        "tools": event.tool_versions,
+        "result": event.result,
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return f"state-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ManifestAttestation:
+    schema_version: str
+    terminal_event_id: str
+    evidence: ProcessingEvent
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1" or type(self.schema_version) is not str:
+            raise ValueError("manifest attestation schema_version must be '1'")
+        if (
+            not isinstance(self.terminal_event_id, str)
+            or len(self.terminal_event_id) != len("state-") + 16
+            or not self.terminal_event_id.startswith("state-")
+        ):
+            raise ValueError("manifest attestation terminal_event_id is invalid")
+        try:
+            int(self.terminal_event_id.removeprefix("state-"), 16)
+        except ValueError as error:
+            raise ValueError("manifest attestation terminal_event_id is invalid") from error
+        evidence = self.evidence
+        if type(evidence) is not ProcessingEvent:
+            raise TypeError("manifest attestation evidence must be a ProcessingEvent")
+        if (
+            evidence.previous_state is not CorpusState.REVIEWED
+            or evidence.target_state not in {CorpusState.APPROVED, CorpusState.REJECTED}
+            or len(evidence.input_sha256s) != 8
+            or len(evidence.tool_versions) != 2
+            or evidence.tool_versions[0] != "approved-manifest-v2"
+            or evidence.event_id != _deterministic_processing_event_id(evidence)
+        ):
+            raise ValueError("manifest attestation evidence is not deterministic v2 evidence")
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> _ManifestAttestation:
+        require_exact_fields(raw, _MANIFEST_ATTESTATION_FIELDS, "manifest attestation")
+        evidence = raw["evidence"]
+        if type(evidence) is not dict:
+            raise TypeError("manifest attestation evidence must be an object")
+        try:
+            decoded = ProcessingEvent.from_dict(evidence)
+        except (TypeError, ValueError) as error:
+            raise ValueError("manifest attestation evidence is invalid") from error
+        return cls(raw["schema_version"], raw["terminal_event_id"], decoded)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "terminal_event_id": self.terminal_event_id,
+            "evidence": self.evidence.to_dict(),
+        }
+
+
+def _decode_manifest_attestations(
+    rows: tuple[dict[str, Any], ...],
+) -> tuple[_ManifestAttestation, ...]:
+    attestations = tuple(_ManifestAttestation.from_dict(row) for row in rows)
+    terminal_ids = tuple(item.terminal_event_id for item in attestations)
+    evidence_ids = tuple(item.evidence.event_id for item in attestations)
+    recording_ids = tuple(item.evidence.recording_id for item in attestations)
+    if len(terminal_ids) != len(set(terminal_ids)):
+        raise ValueError("manifest attestations contain duplicate terminal_event_id")
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("manifest attestations contain duplicate evidence event_id")
+    if len(recording_ids) != len(set(recording_ids)):
+        raise ValueError("manifest attestations contain duplicate recording_id")
+    return attestations
+
+
+def _canonical_manifest_attestation_bytes(
+    attestations: tuple[_ManifestAttestation, ...],
+) -> bytes:
+    return b"".join(
+        (
+            json.dumps(
+                attestation.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        for attestation in attestations
+    )
+
+
+def _validate_manifest_attestation_links(
+    attestations: tuple[_ManifestAttestation, ...],
+    processing_events: tuple[ProcessingEvent, ...],
+    selection_ids: set[str],
+) -> None:
+    old_terminal_by_id = {
+        event.event_id: event
+        for event in processing_events
+        if event.recording_id in selection_ids
+        and event.previous_state is CorpusState.REVIEWED
+        and event.target_state in {CorpusState.APPROVED, CorpusState.REJECTED}
+        and len(event.tool_versions) == 2
+        and event.tool_versions[0] == "approved-manifest-v1"
+        and len(event.input_sha256s) in {5, 7}
+    }
+    for attestation in attestations:
+        terminal = old_terminal_by_id.get(attestation.terminal_event_id)
+        if terminal is None:
+            raise ValueError("extraneous manifest attestation does not bind an old terminal event")
+        if (
+            terminal.recording_id != attestation.evidence.recording_id
+            or terminal.target_state is not attestation.evidence.target_state
+            or terminal.config_sha256 != attestation.evidence.config_sha256
+        ):
+            raise ValueError("manifest attestation does not bind its linked terminal event")
+
+
+def _read_manifest_attestation_preflight(
+    path: Path,
+    *,
+    processing_events: tuple[ProcessingEvent, ...],
+    selection_ids: set[str],
+) -> tuple[tuple[_ManifestAttestation, ...], bytes | None]:
+    if not (path.exists() or path.is_symlink()):
+        return (), None
+    require_canonical_descendant(
+        path.parent,
+        path,
+        kind="manifest attestation journal",
+        require_file=True,
+    )
+    bytes_before = path.read_bytes()
+    attestations = _decode_manifest_attestations(read_jsonl(path))
+    bytes_after = path.read_bytes()
+    if bytes_before != bytes_after:
+        raise ValueError("manifest attestation journal changed during preflight")
+    if bytes_before != _canonical_manifest_attestation_bytes(attestations):
+        raise ValueError("manifest attestation journal must use canonical appendable bytes")
+    _validate_manifest_attestation_links(attestations, processing_events, selection_ids)
+    return attestations, bytes_before
+
+
+def _publish_bytes_no_clobber(
+    path: Path,
+    content: bytes,
+    *,
+    directory_fd: int | None,
+) -> None:
+    if directory_fd is not None:  # pragma: no cover - exercised on POSIX hosts
+        temporary_name = f".{path.name}.{secrets.token_hex(12)}"
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        active_failure = False
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(directory_fd)
+        except BaseException:
+            active_failure = True
+            raise
+        finally:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                if not active_failure:
+                    raise
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(temporary_name)
+    active_failure = False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+    except BaseException:
+        active_failure = True
+        raise
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not active_failure:
+                raise
+
+
+def _validate_manifest_terminal_event(
+    event: ProcessingEvent,
+    *,
+    recording: RecordingRecord,
+    target: CorpusState,
+    config_sha256: str,
+    v2_inputs: tuple[str, ...],
+    v1_inputs: tuple[str, ...],
+    legacy_inputs: tuple[str, ...],
+) -> str:
+    if len(event.tool_versions) != 2:
+        raise ValueError("manifest terminal event must record marker and builder FFmpeg")
+    marker = event.tool_versions[0]
+    if marker == "approved-manifest-v2" and len(event.input_sha256s) == 8:
+        version = "v2"
+        inputs = v2_inputs
+    elif marker == "approved-manifest-v1" and len(event.input_sha256s) == 7:
+        version = "v1"
+        inputs = v1_inputs
+    elif marker == "approved-manifest-v1" and len(event.input_sha256s) == 5:
+        version = "legacy"
+        inputs = legacy_inputs
+    else:
+        raise ValueError("manifest terminal event marker or input length is unsupported")
+    base = replace(recording, state=CorpusState.REVIEWED)
+    _, expected = advance_recording(
+        base,
+        target,
+        input_sha256s=inputs,
+        config_sha256=config_sha256,
+        tool_versions=event.tool_versions,
+        started_at="1970-01-01T00:00:00+00:00",
+        finished_at="1970-01-01T00:00:00+00:00",
+        result="success",
+    )
+    if event != expected:
+        raise ValueError("processing manifest terminal event does not bind current evidence")
+    return version
 
 
 @dataclass(frozen=True, slots=True)
@@ -1787,8 +2047,14 @@ def _build_manifest_corpus_locked(
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
     all_reviewed = all(record.state is CorpusState.REVIEWED for record in pilot_records)
     processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    attestation_path = processing_path.with_name("manifest-attestations.jsonl")
     processing_rows = read_jsonl(processing_path)
     decoded_processing = validate_processing_events(processing_rows)
+    _, preflight_attestation_bytes = _read_manifest_attestation_preflight(
+        attestation_path,
+        processing_events=decoded_processing,
+        selection_ids=selection_ids,
+    )
     audit_ahead = any(
         event.recording_id in selection_ids
         and event.previous_state is CorpusState.REVIEWED
@@ -1857,6 +2123,31 @@ def _build_manifest_corpus_locked(
         processing_path,
         directory=_namespace_guard.processing,
     )
+    attestation_snapshot: _FileSnapshot | None = None
+    authoritative_attestation_bytes: bytes | None = None
+    if attestation_path.exists() or attestation_path.is_symlink():
+        require_canonical_descendant(
+            processing_path.parent,
+            attestation_path,
+            kind="manifest attestation journal",
+            require_file=True,
+        )
+        attestation_snapshot = _add_file_snapshot(
+            _input_snapshots,
+            attestation_path,
+            directory=_namespace_guard.processing,
+        )
+        existing_attestations, authoritative_attestation_bytes = (
+            _read_manifest_attestation_preflight(
+                attestation_path,
+                processing_events=decoded_processing,
+                selection_ids=selection_ids,
+            )
+        )
+    else:
+        existing_attestations = ()
+    if authoritative_attestation_bytes != preflight_attestation_bytes:
+        raise ValueError("manifest attestation journal changed after preflight")
 
     selection = _load_selection(paths)
     transcript_by_id = _load_transcript_layers(paths, selection)
@@ -1871,6 +2162,11 @@ def _build_manifest_corpus_locked(
     rights = _load_rights(paths)
     processing_rows = read_jsonl(processing_path)
     decoded_processing = validate_processing_events(processing_rows)
+    _validate_manifest_attestation_links(
+        existing_attestations,
+        decoded_processing,
+        selection_ids,
+    )
     audit_ahead = any(
         event.recording_id in selection_ids
         and event.previous_state is CorpusState.REVIEWED
@@ -2156,6 +2452,21 @@ def _build_manifest_corpus_locked(
         )
         current = recordings
         terminal_events: list[ProcessingEvent] = []
+        missing_attestations: list[_ManifestAttestation] = []
+        attestation_by_terminal_id = {
+            item.terminal_event_id: item for item in existing_attestations
+        }
+        consumed_attestation_ids: set[str] = set()
+        existing_terminal_by_recording: dict[str, ProcessingEvent] = {}
+        for processing_event in decoded_processing:
+            if (
+                processing_event.recording_id in selection_ids
+                and processing_event.previous_state is CorpusState.REVIEWED
+                and processing_event.target_state in terminal
+            ):
+                if processing_event.recording_id in existing_terminal_by_recording:
+                    raise ValueError("processing history contains multiple terminal events")
+                existing_terminal_by_recording[processing_event.recording_id] = processing_event
         for context in contexts:
             approved_count, total_takes = decisions_by_recording[context.recording.recording_id]
             target = CorpusState.APPROVED if approved_count else CorpusState.REJECTED
@@ -2163,80 +2474,82 @@ def _build_manifest_corpus_locked(
                 raise AssertionError("approved count exceeds reviewed take count")
             timestamp = "1970-01-01T00:00:00+00:00"
             base = replace(current[context.recording_index], state=CorpusState.REVIEWED)
-            advanced, event = advance_recording(
+            v2_inputs = (
+                context.recording.sha256,
+                inventory_sha256,
+                rights_sha256,
+                transcripts_sha256,
+                context.pairing_sha256,
+                context.alignment_sha256,
+                review_sha256,
+                manifest_sha256,
+            )
+            v1_inputs = (
+                context.recording.sha256,
+                rights_sha256,
+                transcripts_sha256,
+                context.pairing_sha256,
+                context.alignment_sha256,
+                review_sha256,
+                manifest_sha256,
+            )
+            legacy_inputs = (
+                context.recording.sha256,
+                context.pairing_sha256,
+                context.alignment_sha256,
+                review_sha256,
+                manifest_sha256,
+            )
+            advanced, v2_event = advance_recording(
                 base,
                 target,
-                input_sha256s=(
-                    context.recording.sha256,
-                    inventory_sha256,
-                    rights_sha256,
-                    transcripts_sha256,
-                    context.pairing_sha256,
-                    context.alignment_sha256,
-                    review_sha256,
-                    manifest_sha256,
-                ),
+                input_sha256s=v2_inputs,
                 config_sha256=config.digest,
                 tool_versions=("approved-manifest-v2", ffmpeg_version),
                 started_at=timestamp,
                 finished_at=timestamp,
                 result="success",
             )
-            _, v1_event = advance_recording(
-                base,
-                target,
-                input_sha256s=(
-                    context.recording.sha256,
-                    rights_sha256,
-                    transcripts_sha256,
-                    context.pairing_sha256,
-                    context.alignment_sha256,
-                    review_sha256,
-                    manifest_sha256,
-                ),
-                config_sha256=config.digest,
-                tool_versions=("approved-manifest-v1", ffmpeg_version),
-                started_at=timestamp,
-                finished_at=timestamp,
-                result="success",
-            )
-            _, legacy_event = advance_recording(
-                base,
-                target,
-                input_sha256s=(
-                    context.recording.sha256,
-                    context.pairing_sha256,
-                    context.alignment_sha256,
-                    review_sha256,
-                    manifest_sha256,
-                ),
-                config_sha256=config.digest,
-                tool_versions=("approved-manifest-v1", ffmpeg_version),
-                started_at=timestamp,
-                finished_at=timestamp,
-                result="success",
-            )
-            processing_by_id = {
-                item.event_id: item
-                for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
-            }
-            if event.event_id in processing_by_id:
-                if processing_by_id[event.event_id] != event:
-                    raise ValueError("existing terminal event conflicts with deterministic event")
-            elif v1_event.event_id in processing_by_id:
-                if processing_by_id[v1_event.event_id] != v1_event:
-                    raise ValueError("v1 terminal event conflicts with deterministic evidence")
-                event = v1_event
-            elif legacy_event.event_id in processing_by_id:
-                if processing_by_id[legacy_event.event_id] != legacy_event:
-                    raise ValueError("legacy terminal event conflicts with deterministic evidence")
-                event = legacy_event
+            event = existing_terminal_by_recording.get(context.recording.recording_id)
+            if event is None:
+                event = v2_event
+            else:
+                version = _validate_manifest_terminal_event(
+                    event,
+                    recording=context.recording,
+                    target=target,
+                    config_sha256=config.digest,
+                    v2_inputs=v2_inputs,
+                    v1_inputs=v1_inputs,
+                    legacy_inputs=legacy_inputs,
+                )
+                if version != "v2":
+                    attestation = attestation_by_terminal_id.get(event.event_id)
+                    if attestation is None:
+                        missing_attestations.append(
+                            _ManifestAttestation("1", event.event_id, v2_event)
+                        )
+                    else:
+                        attestation_version = _validate_manifest_terminal_event(
+                            attestation.evidence,
+                            recording=context.recording,
+                            target=target,
+                            config_sha256=config.digest,
+                            v2_inputs=v2_inputs,
+                            v1_inputs=v1_inputs,
+                            legacy_inputs=legacy_inputs,
+                        )
+                        if attestation_version != "v2":
+                            raise ValueError("manifest attestation evidence must be v2")
+                        consumed_attestation_ids.add(event.event_id)
             current = (
                 *current[: context.recording_index],
                 advanced,
                 *current[context.recording_index + 1 :],
             )
             terminal_events.append(event)
+        if set(attestation_by_terminal_id) != consumed_attestation_ids:
+            raise ValueError("extraneous manifest attestation does not bind an old terminal event")
         _validate_publication_guards(publication_guards)
         _validate_artifact_guards(artifact_guards)
         namespace_guard.validate()
@@ -2289,6 +2602,43 @@ def _build_manifest_corpus_locked(
             _after_recordings_write=after_recordings_write,
         )
         validate_transaction()
+        if missing_attestations:
+            merged_attestations = (*existing_attestations, *missing_attestations)
+            merged_attestation_bytes = _canonical_manifest_attestation_bytes(merged_attestations)
+            processing_directory_fd = namespace_guard.directory_fd(namespace_guard.processing)
+            if attestation_snapshot is not None:
+                existing_bytes = attestation_path.read_bytes()
+                if existing_bytes != authoritative_attestation_bytes:
+                    raise ValueError("manifest attestation journal changed before publication")
+                if existing_bytes != _canonical_manifest_attestation_bytes(existing_attestations):
+                    raise ValueError(
+                        "manifest attestation journal must use canonical appendable bytes"
+                    )
+                _release_file_snapshot(_input_snapshots, attestation_path)
+                if processing_directory_fd is None:
+                    write_jsonl_atomic(
+                        attestation_path,
+                        (item.to_dict() for item in merged_attestations),
+                    )
+                else:  # pragma: no cover - exercised on POSIX hosts
+                    write_jsonl_atomic(
+                        attestation_path,
+                        (item.to_dict() for item in merged_attestations),
+                        directory_fd=processing_directory_fd,
+                    )
+            else:
+                _publish_bytes_no_clobber(
+                    attestation_path,
+                    merged_attestation_bytes,
+                    directory_fd=processing_directory_fd,
+                )
+            _add_file_snapshot(
+                _durable_snapshots,
+                attestation_path,
+                directory=namespace_guard.processing,
+                expected_sha256=hashlib.sha256(merged_attestation_bytes).hexdigest(),
+            )
+            validate_transaction()
         return True
     finally:
         active_failure = sys.exc_info()[0] is not None

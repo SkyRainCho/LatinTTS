@@ -4,9 +4,13 @@ import hashlib
 import json
 import math
 import os
+import stat
+import sys
 import tempfile
 from collections import Counter, defaultdict
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
+from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
@@ -15,14 +19,19 @@ from latintts.corpus.audio import DerivedAudio, _raw_source, _validate_source_ha
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState, IssueCode
 from latintts.corpus.locking import corpus_mutation_lease
-from latintts.corpus.manifest import _load_rights, _validate_transcript_sources
+from latintts.corpus.manifest import (
+    _decode_manifest_attestations,
+    _load_rights,
+    _ManifestAttestation,
+    _validate_manifest_terminal_event,
+    _validate_transcript_sources,
+)
 from latintts.corpus.pairing import pairing_from_dict
-from latintts.corpus.paths import CorpusPaths
+from latintts.corpus.paths import CorpusPaths, require_canonical_descendant
 from latintts.corpus.records import (
     RecordingRecord,
     ReviewEvent,
     SegmentRecord,
-    advance_recording,
     require_exact_fields,
 )
 from latintts.corpus.review import (
@@ -62,6 +71,31 @@ class ScaleDecision(str, Enum):
     SCALABLE = "scalable"
     OPTIMIZE = "optimize"
     NOT_READY = "not_ready"
+
+
+class ReportOutputRecoveryError(OSError):
+    """A report pair could not be rolled back and preserved backups need recovery."""
+
+    def __init__(self, recovery_paths: tuple[Path, ...]) -> None:
+        self.recovery_paths = tuple(path.resolve() for path in recovery_paths)
+        locations = ", ".join(str(path) for path in self.recovery_paths) or "none remain"
+        super().__init__(
+            f"report output rollback failed; recovery required; preserved backups: {locations}"
+        )
+
+
+class _ReportPublicationVerificationError(OSError):
+    """Publication returned but ownership of the resulting path cannot be proven."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportOutputSnapshot:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    sha256: str
+    content: bytes = dataclass_field(compare=False, repr=False)
 
 
 def _finite_number(value: object, field: str, *, positive: bool = False) -> float:
@@ -320,48 +354,83 @@ def _validate_terminal_processing_evidence(
     segments_sha256: str,
     pairing_sha256s: dict[str, str],
     alignment_sha256s: dict[str, str],
-    ffmpeg_versions: dict[str, str],
+    attestations: tuple[_ManifestAttestation, ...],
 ) -> None:
     events = validate_processing_events(processing_rows)
-    timestamp = "1970-01-01T00:00:00+00:00"
+    attestation_by_terminal_id = {item.terminal_event_id: item for item in attestations}
+    consumed_attestation_ids: set[str] = set()
     for recording in recordings:
-        recording_events = tuple(
-            event for event in events if event.recording_id == recording.recording_id
+        terminal_events = tuple(
+            event
+            for event in events
+            if event.recording_id == recording.recording_id
+            and event.previous_state is CorpusState.REVIEWED
+            and event.target_state is recording.state
         )
-        if not recording_events:
-            raise ValueError("processing history lacks a selected recording")
-        base = replace(recording, state=CorpusState.REVIEWED)
-        tool_versions = (
-            "approved-manifest-v2",
-            ffmpeg_versions[recording.recording_id],
+        if len(terminal_events) != 1:
+            raise ValueError("processing history lacks one terminal event for a selected recording")
+        v2_inputs = (
+            recording.sha256,
+            inventory_sha256,
+            rights_sha256,
+            transcripts_sha256,
+            pairing_sha256s[recording.recording_id],
+            alignment_sha256s[recording.recording_id],
+            review_sha256,
+            segments_sha256,
         )
-        _, current = advance_recording(
-            base,
-            recording.state,
-            input_sha256s=(
-                recording.sha256,
-                inventory_sha256,
-                rights_sha256,
-                transcripts_sha256,
-                pairing_sha256s[recording.recording_id],
-                alignment_sha256s[recording.recording_id],
-                review_sha256,
-                segments_sha256,
-            ),
+        v1_inputs = (
+            recording.sha256,
+            rights_sha256,
+            transcripts_sha256,
+            pairing_sha256s[recording.recording_id],
+            alignment_sha256s[recording.recording_id],
+            review_sha256,
+            segments_sha256,
+        )
+        legacy_inputs = (
+            recording.sha256,
+            pairing_sha256s[recording.recording_id],
+            alignment_sha256s[recording.recording_id],
+            review_sha256,
+            segments_sha256,
+        )
+        terminal_event = terminal_events[0]
+        version = _validate_manifest_terminal_event(
+            terminal_event,
+            recording=recording,
+            target=recording.state,
             config_sha256=config_sha256,
-            tool_versions=tool_versions,
-            started_at=timestamp,
-            finished_at=timestamp,
-            result="success",
+            v2_inputs=v2_inputs,
+            v1_inputs=v1_inputs,
+            legacy_inputs=legacy_inputs,
         )
-        terminal_event = recording_events[-1]
-        if terminal_event.tool_versions[0] != "approved-manifest-v2":
+        if version == "v2":
+            continue
+        attestation = attestation_by_terminal_id.get(terminal_event.event_id)
+        if attestation is None:
             raise ValueError(
-                "legacy terminal processing evidence cannot support a trusted report; "
-                "rebuild the manifest"
+                "legacy terminal evidence lacks a v2 manifest attestation; rebuild the manifest"
             )
-        if terminal_event != current:
-            raise ValueError("processing terminal event does not bind current manifest evidence")
+        try:
+            attestation_version = _validate_manifest_terminal_event(
+                attestation.evidence,
+                recording=recording,
+                target=recording.state,
+                config_sha256=config_sha256,
+                v2_inputs=v2_inputs,
+                v1_inputs=v1_inputs,
+                legacy_inputs=legacy_inputs,
+            )
+        except ValueError as error:
+            raise ValueError(
+                "manifest attestation evidence does not bind current evidence"
+            ) from error
+        if attestation_version != "v2":
+            raise ValueError("manifest attestation evidence must be v2")
+        consumed_attestation_ids.add(terminal_event.event_id)
+    if set(attestation_by_terminal_id) != consumed_attestation_ids:
+        raise ValueError("extraneous manifest attestation does not bind an old terminal event")
 
 
 def _canonical_report_bytes(report: PilotReport) -> bytes:
@@ -462,55 +531,235 @@ def _prepare_atomic(path: Path, content: bytes) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise
     return temporary
+
+
+def _report_output_snapshot(path: Path) -> _ReportOutputSnapshot | None:
+    if not (path.exists() or path.is_symlink()):
+        return None
+    canonical = require_canonical_descendant(
+        path.parent,
+        path,
+        kind="report output",
+        require_file=True,
+    )
+    with canonical.open("rb") as handle:
+        before = os.fstat(handle.fileno())
+        digest = hashlib.sha256()
+        content = bytearray()
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            content.extend(chunk)
+        after = os.fstat(handle.fileno())
+    current = os.lstat(canonical)
+    required_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size)
+    required_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+    required_current = (current.st_dev, current.st_ino, current.st_mode, current.st_size)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or required_before != required_after
+        or required_after != required_current
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+        or len(content) != current.st_size
+    ):
+        raise OSError(f"report output changed while snapshotting: {canonical}")
+    return _ReportOutputSnapshot(
+        device=current.st_dev,
+        inode=current.st_ino,
+        mode=current.st_mode,
+        size=current.st_size,
+        sha256=digest.hexdigest(),
+        content=bytes(content),
+    )
+
+
+def _require_report_output_snapshot(
+    path: Path,
+    expected: _ReportOutputSnapshot | None,
+    *,
+    operation: str,
+) -> None:
+    if _report_output_snapshot(path) != expected:
+        raise OSError(f"report output changed before {operation}: {path}")
+
+
+def _prepared_report_snapshot(path: Path) -> _ReportOutputSnapshot:
+    snapshot = _report_output_snapshot(path)
+    if snapshot is None:
+        raise OSError(f"prepared report output is missing: {path}")
+    return snapshot
+
+
+def _publish_report_output(
+    temporary: Path,
+    target: Path,
+    *,
+    old: _ReportOutputSnapshot | None,
+    prepared: _ReportOutputSnapshot,
+) -> _ReportOutputSnapshot:
+    _require_report_output_snapshot(target, old, operation="publication")
+    if old is None:
+        os.link(temporary, target)
+    else:
+        os.replace(temporary, target)
+    try:
+        published = _prepared_report_snapshot(target)
+    except BaseException as error:
+        raise _ReportPublicationVerificationError(
+            f"published report output cannot be verified: {target}"
+        ) from error
+    if published != prepared:
+        raise _ReportPublicationVerificationError(
+            f"published report output differs from prepared file: {target}"
+        )
+    return published
+
+
+def _rollback_report_output(
+    target: Path,
+    *,
+    old: _ReportOutputSnapshot | None,
+    published: _ReportOutputSnapshot,
+    backup: Path | None,
+    backup_snapshot: _ReportOutputSnapshot | None,
+) -> None:
+    current = _report_output_snapshot(target)
+    if current != published:
+        raise OSError(f"report output ownership changed before rollback: {target}")
+    if old is None:
+        target.unlink()
+        return
+    if backup is None or backup_snapshot is None:
+        raise OSError(f"report output backup is missing before rollback: {target}")
+    _require_report_output_snapshot(backup, backup_snapshot, operation="rollback")
+    os.replace(backup, target)
+    restored = _prepared_report_snapshot(target)
+    if restored.sha256 != old.sha256 or restored.size != old.size:
+        raise OSError(f"restored report output differs from old content: {target}")
 
 
 def _write_outputs(paths: CorpusPaths, report: PilotReport) -> None:
     json_path = paths.manifests / "report.json"
     markdown_path = paths.manifests / "report.md"
-    json_temporary = _prepare_atomic(json_path, _canonical_report_bytes(report))
+    json_old = _report_output_snapshot(json_path)
+    markdown_old = _report_output_snapshot(markdown_path)
+    json_temporary: Path | None = None
     markdown_temporary: Path | None = None
     json_backup: Path | None = None
     markdown_backup: Path | None = None
+    json_backup_snapshot: _ReportOutputSnapshot | None = None
+    markdown_backup_snapshot: _ReportOutputSnapshot | None = None
     json_replaced = False
     markdown_replaced = False
+    json_published: _ReportOutputSnapshot | None = None
+    markdown_published: _ReportOutputSnapshot | None = None
+    preserve_recovery_backups = False
     try:
+        json_temporary = _prepare_atomic(json_path, _canonical_report_bytes(report))
+        json_prepared = _prepared_report_snapshot(json_temporary)
         markdown_temporary = _prepare_atomic(markdown_path, _render_markdown(report))
-        if json_path.exists():
-            json_backup = _prepare_atomic(json_path, json_path.read_bytes())
-        if markdown_path.exists():
-            markdown_backup = _prepare_atomic(markdown_path, markdown_path.read_bytes())
+        markdown_prepared = _prepared_report_snapshot(markdown_temporary)
+        if json_old is not None:
+            json_backup = _prepare_atomic(
+                json_path.with_name(f"recovery.{json_path.name}"),
+                json_old.content,
+            )
+            json_backup_snapshot = _prepared_report_snapshot(json_backup)
+        if markdown_old is not None:
+            markdown_backup = _prepare_atomic(
+                markdown_path.with_name(f"recovery.{markdown_path.name}"),
+                markdown_old.content,
+            )
+            markdown_backup_snapshot = _prepared_report_snapshot(markdown_backup)
+        _require_report_output_snapshot(json_path, json_old, operation="publication")
+        _require_report_output_snapshot(markdown_path, markdown_old, operation="publication")
+        json_published = _publish_report_output(
+            json_temporary,
+            json_path,
+            old=json_old,
+            prepared=json_prepared,
+        )
         json_replaced = True
-        os.replace(json_temporary, json_path)
+        markdown_published = _publish_report_output(
+            markdown_temporary,
+            markdown_path,
+            old=markdown_old,
+            prepared=markdown_prepared,
+        )
         markdown_replaced = True
-        os.replace(markdown_temporary, markdown_path)
-    except BaseException:
-        try:
-            if markdown_replaced:
-                if markdown_backup is None:
-                    markdown_path.unlink(missing_ok=True)
-                else:
-                    os.replace(markdown_backup, markdown_path)
-            if json_replaced:
-                if json_backup is None:
-                    json_path.unlink(missing_ok=True)
-                else:
-                    os.replace(json_backup, json_path)
-        except BaseException as rollback_error:
-            raise RuntimeError(
-                "report output rollback failed; recovery required"
-            ) from rollback_error
+        _require_report_output_snapshot(
+            json_path,
+            json_published,
+            operation="pair commit",
+        )
+        _require_report_output_snapshot(
+            markdown_path,
+            markdown_published,
+            operation="pair commit",
+        )
+    except BaseException as publication_error:
+        rollback_errors: list[BaseException] = []
+        if markdown_replaced:
+            try:
+                if markdown_published is None:
+                    raise OSError("published markdown snapshot is missing")
+                _rollback_report_output(
+                    markdown_path,
+                    old=markdown_old,
+                    published=markdown_published,
+                    backup=markdown_backup,
+                    backup_snapshot=markdown_backup_snapshot,
+                )
+            except BaseException as error:
+                rollback_errors.append(error)
+        if json_replaced:
+            try:
+                if json_published is None:
+                    raise OSError("published JSON snapshot is missing")
+                _rollback_report_output(
+                    json_path,
+                    old=json_old,
+                    published=json_published,
+                    backup=json_backup,
+                    backup_snapshot=json_backup_snapshot,
+                )
+            except BaseException as error:
+                rollback_errors.append(error)
+        if rollback_errors or isinstance(publication_error, _ReportPublicationVerificationError):
+            preserve_recovery_backups = True
+            recovery_paths = tuple(
+                path
+                for path in (json_backup, markdown_backup)
+                if path is not None and path.exists()
+            )
+            cause = rollback_errors[0] if rollback_errors else publication_error
+            raise ReportOutputRecoveryError(recovery_paths) from cause
         raise
     finally:
-        json_temporary.unlink(missing_ok=True)
+        active_failure = sys.exc_info()[0] is not None
+        cleanup_failure: OSError | None = None
+        cleanup_paths: list[Path] = []
+        if json_temporary is not None:
+            cleanup_paths.append(json_temporary)
         if markdown_temporary is not None:
-            markdown_temporary.unlink(missing_ok=True)
-        if json_backup is not None:
-            json_backup.unlink(missing_ok=True)
-        if markdown_backup is not None:
-            markdown_backup.unlink(missing_ok=True)
+            cleanup_paths.append(markdown_temporary)
+        if not preserve_recovery_backups:
+            if json_backup is not None:
+                cleanup_paths.append(json_backup)
+            if markdown_backup is not None:
+                cleanup_paths.append(markdown_backup)
+        for cleanup_path in cleanup_paths:
+            try:
+                cleanup_path.unlink(missing_ok=True)
+            except OSError as error:
+                if cleanup_failure is None:
+                    cleanup_failure = error
+        if cleanup_failure is not None and not active_failure:
+            raise cleanup_failure
 
 
 def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotReport:
@@ -591,9 +840,19 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
     review_path = paths.manifests / "review.jsonl"
     review_events = _load_existing_review_events(review_path)
     review_sha256 = hashlib.sha256(review_path.read_bytes()).hexdigest()
-    processing_rows = read_jsonl(
-        paths.alignments / "runs" / config.digest / "processing-events.jsonl"
-    )
+    processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
+    processing_rows = read_jsonl(processing_path)
+    attestation_path = processing_path.with_name("manifest-attestations.jsonl")
+    if attestation_path.exists() or attestation_path.is_symlink():
+        require_canonical_descendant(
+            processing_path.parent,
+            attestation_path,
+            kind="manifest attestation journal",
+            require_file=True,
+        )
+        attestations = _decode_manifest_attestations(read_jsonl(attestation_path))
+    else:
+        attestations = ()
     _validate_existing_pairing_corrections(paths, config, selection, recordings, review_events)
     events_by_entity: dict[str, tuple[ReviewEvent, ...]] = defaultdict(tuple)
     for event in review_events:
@@ -616,7 +875,6 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
     expected_review_entities: set[str] = set()
     pairing_sha256s: dict[str, str] = {}
     alignment_sha256s: dict[str, str] = {}
-    ffmpeg_versions: dict[str, str] = {}
 
     for recording in pilot:
         run_directory, final_pairing, alignment = _load_pairing_and_alignment(
@@ -628,7 +886,6 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         alignment_sha256s[recording.recording_id] = hashlib.sha256(
             (run_directory / "alignment.json").read_bytes()
         ).hexdigest()
-        ffmpeg_versions[recording.recording_id] = final_pairing.ffmpeg_version
         segmentation_path = run_directory / "segmentation.json"
         segmentation = _one_row(segmentation_path, "segmentation artifact")
         segmentation_sha256 = hashlib.sha256(segmentation_path.read_bytes()).hexdigest()
@@ -926,7 +1183,7 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         segments_sha256=segments_sha256,
         pairing_sha256s=pairing_sha256s,
         alignment_sha256s=alignment_sha256s,
-        ffmpeg_versions=ffmpeg_versions,
+        attestations=attestations,
     )
 
     metrics = PilotMetrics(
