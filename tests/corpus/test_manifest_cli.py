@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -641,12 +642,25 @@ def test_output_namespace_guard_enforces_single_writer_and_releases_lock(tmp_pat
         paths.alignments / "runs" / config.digest / "processing-events.jsonl"  # type: ignore[attr-defined]
     )
     first = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+    failures: list[BaseException] = []
+
+    def contend() -> None:
+        try:
+            contender = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+            contender.close()
+        except BaseException as error:
+            failures.append(error)
+
     try:
-        with pytest.raises((BlockingIOError, OSError)):
-            manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
+        worker = threading.Thread(target=contend)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
     finally:
         first.close()
 
+    assert len(failures) == 1
+    assert isinstance(failures[0], (BlockingIOError, OSError))
     reopened = manifest_module._open_output_namespace_guard(paths, processing_path, {})  # type: ignore[arg-type]
     reopened.close()
 
@@ -2051,12 +2065,24 @@ def test_build_manifest_fails_on_busy_writer_lock_before_any_input_load(
             AssertionError("input was loaded before acquiring the writer lock")
         ),
     )
-    try:
-        with pytest.raises(OSError):
+    failures: list[BaseException] = []
+
+    def contend() -> None:
+        try:
             _build_with_fake_audio(paths, config)
+        except BaseException as error:
+            failures.append(error)
+
+    try:
+        worker = threading.Thread(target=contend)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
     finally:
         first.close()
 
+    assert len(failures) == 1
+    assert isinstance(failures[0], OSError)
     assert not (paths.manifests / "segments.jsonl").exists()  # type: ignore[attr-defined]
 
 

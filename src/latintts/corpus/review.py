@@ -21,6 +21,7 @@ from latintts.corpus.alignment import AlignmentResult, WordSpan, result_from_dic
 from latintts.corpus.audio import DerivedAudio, RunCommand, extract_review_wav
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusState
+from latintts.corpus.locking import corpus_mutation_lease
 from latintts.corpus.pairing import (
     PairingRecording,
     RepetitionGroup,
@@ -138,8 +139,7 @@ def write_textgrid(
                 f"            text = {_quoted(text)}",
             )
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    _write_text_atomic(path, "\n".join(lines) + "\n")
 
 
 _ASSIGNMENT = re.compile(r'^\s*([A-Za-z?]+) = (?:"((?:[^"]|"")*)"|([^\s]+))$')
@@ -400,17 +400,18 @@ def _canonical_json(value: object) -> str:
 
 
 def _write_text_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with corpus_mutation_lease(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -418,17 +419,18 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _write_bytes_atomic(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with corpus_mutation_lease(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _decode_recording(raw: dict[str, Any]) -> RecordingRecord:
@@ -601,17 +603,18 @@ def _alignment_by_take(
 
 
 def _copy_file_atomic(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=destination.parent, prefix=f".{destination.name}."
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with corpus_mutation_lease(destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=destination.parent, prefix=f".{destination.name}."
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _export_review_audio(
@@ -994,6 +997,27 @@ def _export_group(
 
 
 def export_review_bundle(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str | None = None,
+    run_command: RunCommand | None = None,
+) -> tuple[Path, ...]:
+    if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
+        raise TypeError("export_review_bundle requires CorpusPaths and CorpusConfig")
+    with corpus_mutation_lease(
+        paths.manifests / "review.jsonl",
+        paths.manifests / "recordings.jsonl",
+    ):
+        return _export_review_bundle_locked(
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+        )
+
+
+def _export_review_bundle_locked(
     paths: CorpusPaths,
     config: CorpusConfig,
     *,
@@ -2028,6 +2052,29 @@ def _validate_existing_pairing_corrections(
 
 
 def import_review_bundle(
+    paths: CorpusPaths,
+    config: CorpusConfig,
+    *,
+    ffmpeg_version: str | None = None,
+    run_command: RunCommand | None = None,
+    _validate_only: bool = False,
+) -> bool:
+    if type(paths) is not CorpusPaths or type(config) is not CorpusConfig:
+        raise TypeError("import_review_bundle requires CorpusPaths and CorpusConfig")
+    with corpus_mutation_lease(
+        paths.manifests / "review.jsonl",
+        paths.manifests / "recordings.jsonl",
+    ):
+        return _import_review_bundle_locked(
+            paths,
+            config,
+            ffmpeg_version=ffmpeg_version,
+            run_command=run_command,
+            _validate_only=_validate_only,
+        )
+
+
+def _import_review_bundle_locked(
     paths: CorpusPaths,
     config: CorpusConfig,
     *,

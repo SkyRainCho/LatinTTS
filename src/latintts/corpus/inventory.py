@@ -12,6 +12,7 @@ from subprocess import CompletedProcess
 
 from latintts.corpus.domain import CorpusFailure, CorpusState
 from latintts.corpus.intake import load_rights, read_intake
+from latintts.corpus.locking import corpus_mutation_lease
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.records import (
     AudioMetadata,
@@ -243,6 +244,11 @@ def inventory_row(
 
 
 def write_intake_skeleton(paths: CorpusPaths, output: Path) -> bool:
+    with corpus_mutation_lease(output):
+        return _write_intake_skeleton_locked(paths, output)
+
+
+def _write_intake_skeleton_locked(paths: CorpusPaths, output: Path) -> bool:
     if output.exists():
         return False
     discovered = sorted(

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from latintts.corpus.domain import require_transition
+from latintts.corpus.locking import corpus_mutation_lease
 from latintts.corpus.records import ProcessingEvent, RecordingRecord
 
 
@@ -108,6 +109,16 @@ def write_jsonl_atomic(
     *,
     directory_fd: int | None = None,
 ) -> None:
+    with corpus_mutation_lease(path):
+        _write_jsonl_atomic_locked(path, rows, directory_fd=directory_fd)
+
+
+def _write_jsonl_atomic_locked(
+    path: Path,
+    rows: Iterable[dict[str, Any]],
+    *,
+    directory_fd: int | None = None,
+) -> None:
     if directory_fd is not None:  # pragma: no cover - exercised on POSIX hosts
         temporary_name = f".{path.name}.{secrets.token_hex(12)}"
         descriptor = os.open(
@@ -148,8 +159,9 @@ def write_jsonl_atomic(
 
 
 def append_jsonl_event(path: Path, row: dict[str, Any]) -> None:
-    existing = read_jsonl(path) if path.exists() else ()
-    write_jsonl_atomic(path, (*existing, row))
+    with corpus_mutation_lease(path):
+        existing = read_jsonl(path) if path.exists() else ()
+        write_jsonl_atomic(path, (*existing, row))
 
 
 def _read_jsonl_in_directory(
@@ -265,6 +277,22 @@ def persist_recording_transition(
     """Persist one transition in audit-first order without claiming cross-file atomicity."""
     if recordings_path.resolve() == events_path.resolve():
         raise ValueError("recordings_path and events_path must be distinct resolved paths")
+    with corpus_mutation_lease(recordings_path, events_path):
+        _persist_recording_transition_locked(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=recordings,
+            event=event,
+        )
+
+
+def _persist_recording_transition_locked(
+    *,
+    recordings_path: Path,
+    events_path: Path,
+    recordings: Iterable[RecordingRecord],
+    event: ProcessingEvent,
+) -> None:
     target_records = tuple(recordings)
     target_rows = tuple(record.to_dict() for record in target_records)
     require_transition(event.previous_state, event.target_state)
@@ -334,6 +362,40 @@ def persist_recording_transitions(
     """Publish a complete transition set audit-first, with one replace per durable file."""
     if recordings_path.resolve() == events_path.resolve():
         raise ValueError("recordings_path and events_path must be distinct resolved paths")
+    with corpus_mutation_lease(recordings_path, events_path):
+        _persist_recording_transitions_locked(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=recordings,
+            events=events,
+            _recordings_directory_fd=_recordings_directory_fd,
+            _events_directory_fd=_events_directory_fd,
+            _validate_durable_namespace=_validate_durable_namespace,
+            _expected_recordings_sha256=_expected_recordings_sha256,
+            _expected_events_sha256=_expected_events_sha256,
+            _before_events_write=_before_events_write,
+            _after_events_write=_after_events_write,
+            _before_recordings_write=_before_recordings_write,
+            _after_recordings_write=_after_recordings_write,
+        )
+
+
+def _persist_recording_transitions_locked(
+    *,
+    recordings_path: Path,
+    events_path: Path,
+    recordings: Iterable[RecordingRecord],
+    events: Iterable[ProcessingEvent],
+    _recordings_directory_fd: int | None = None,
+    _events_directory_fd: int | None = None,
+    _validate_durable_namespace: Callable[[], None] | None = None,
+    _expected_recordings_sha256: str | None = None,
+    _expected_events_sha256: str | None = None,
+    _before_events_write: Callable[[], None] | None = None,
+    _after_events_write: Callable[[str], None] | None = None,
+    _before_recordings_write: Callable[[], None] | None = None,
+    _after_recordings_write: Callable[[str], None] | None = None,
+) -> None:
     target_records = tuple(recordings)
     target_rows = tuple(record.to_dict() for record in target_records)
     expected_events = tuple(events)

@@ -26,6 +26,7 @@ from latintts.corpus.inventory import (
     inventory_from_manifests,
     write_intake_skeleton,
 )
+from latintts.corpus.locking import corpus_mutation_lease
 from latintts.corpus.manifest import build_manifest_corpus
 from latintts.corpus.mms_alignment import create_alignment_backend
 from latintts.corpus.pairing import (
@@ -1957,17 +1958,18 @@ def _sanitize_pip_freeze(output: str) -> str:
 
 
 def _write_text_atomic(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with corpus_mutation_lease(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def alignment_smoke_test(

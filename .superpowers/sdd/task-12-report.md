@@ -218,7 +218,7 @@
 
 - 在首次写 `segments.jsonl` 前，从 resolved project root 到 manifests、processing-events parent、segments/mode-root parent 的每个现存目录组件都取得 identity-bound guard，并贯穿 segments → events → recordings 全部 durable writes。
 - Windows directory handles 允许 read/write sharing、拒绝 delete sharing；实测 manifests leaf、processing run parent 与 `derived/corpus-v1` ancestor 在 persist 入口或 events replace 后均无法 rename，当前 namespace 保持 segments/event/state 完整一致。
-- 增加 `.build-manifest.lock` 单写协议：Windows 使用无共享 `CreateFileW(OPEN_ALWAYS)` handle；POSIX 使用 manifests `dir_fd` 相对 `O_NOFOLLOW` 打开并 `flock(LOCK_EX|LOCK_NB)`。异常后锁可立即重新取得。
+- 该轮曾增加 build 私有 `.build-manifest.lock`；第六轮审查确认它未覆盖其他内置 writer 后，已由共享 `.corpus-mutation.lock` 完整替代。Windows 仍使用无共享 `CreateFileW(OPEN_ALWAYS)` handle，POSIX 仍使用 manifests `dir_fd` 相对 `O_NOFOLLOW` 打开并 `flock(LOCK_EX|LOCK_NB)`。
 - POSIX `read_jsonl()` / `write_jsonl_atomic()` 新增内部 `directory_fd` 路径：temp create、fsync、`os.replace(src_dir_fd=..., dst_dir_fd=...)` 与 parent fsync 全部绑定同一 pinned directory inode；processing batch 在每次 read/replace 前后调用 namespace identity validator。manifest、rights 与 transcripts digest 也从 pinned manifests directory 读取。
 
 ### 第四轮 RED -> GREEN 证据
@@ -245,7 +245,7 @@
 ### 第四轮残余边界
 
 - Windows 强制依赖 deny-sharing handle；不支持 `NtSetInformationFile(FileLinkInformation)` 的文件系统继续 fail closed。
-- POSIX fd 可固定 inode、相对 replace 可固定写入目录，但标准 POSIX 不提供 Windows 式强制 deny-delete sharing；因此使用所有 LatinTTS writer 必须遵守的 `flock` 单写协议，并在每个 durable checkpoint 前后检测 public path identity 漂移。非合作进程造成漂移时构建失败，不返回成功。
+- POSIX fd 可固定 inode、相对 replace 可固定写入目录，但标准 POSIX 不提供 Windows 式强制 deny-delete sharing。会修改 manifest build 所消费可变 durable evidence 的内置写路径遵守共享 `flock` 协议；内容寻址音频/缓存继续使用独立 key lock。手工或恶意进程若忽略协议，其 namespace ABA 不属于保证范围，也不宣称所有此类漂移都能被检测或回滚。
 - 9 个 skip 仍全部来自当前 Windows token 缺少 symlink privilege；本轮 Windows junction、sharing-violation、identity/hash 与 lock tests 均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
 
@@ -253,7 +253,7 @@
 
 ### 锁生命周期与权威输入 snapshot
 
-- `.build-manifest.lock` 与 output namespace guard 现在在第一次读取 `pilot-selection.json`、`recordings.jsonl`、`processing-events.jsonl` 以及任何 review import/validation 之前取得，并持有到完整 build 返回；第二 writer 在任何 loader、review import、clip extraction 或 `segments.jsonl` 写入前即失败。
+- build writer lease 与 output namespace guard 在第一次读取 `pilot-selection.json`、`recordings.jsonl`、`processing-events.jsonl` 以及任何 review import/validation 之前取得，并持有到完整 build 返回；第六轮起该 lease 使用所有内置 durable writer 共享的 `.corpus-mutation.lock`。第二 writer 在任何 loader、review import、clip extraction 或 `segments.jsonl` 写入前即失败。
 - review import 作为可写 Phase A 在锁内完成；随后丢弃 Phase A 解码对象，重新加载 selection、recordings、rights、transcripts、review 与 processing 的权威 Phase B snapshot。
 - Windows `_FileSnapshot` 使用 `GENERIC_READ`、仅 `FILE_SHARE_READ` 与 `FILE_FLAG_OPEN_REPARSE_POINT`，从持有 handle 取得 identity 与 SHA-256，拒绝后续 write/delete sharing；POSIX 使用 `O_NOFOLLOW` file descriptor、public inode identity 与 handle digest，并在所有 durable checkpoint 前后复验。
 - raw recording、analysis audio、segmentation、pairing、alignment 与可选 `pairing-automatic.json` 同样被纳入 snapshot。event 的 rights、transcripts、pairing、alignment、review digest 与实际构行消费的同一份锁定 snapshot 完全一致。
@@ -291,6 +291,54 @@
 ### 第五轮残余边界
 
 - Windows 依靠 deny-sharing handles 提供强制 content/delete exclusion；snapshot 到 store replace 的有意 handoff 窗口仍受无共享 build lock、expected existing digest、write 后 expected bytes pin 三层约束。
-- POSIX descriptor 能固定 inode，`dir_fd` 能固定 atomic replace parent，`flock` 只约束合作 writer；非合作 writer 无法被标准 POSIX 强制禁止，但每个首次 durable write与 terminal checkpoint 前后的 identity/hash drift 都会令 build 失败，且报告不宣称 Windows 式强制排他。
+- POSIX descriptor 能固定 inode，`dir_fd` 能固定 atomic replace parent，`flock` 只约束合作 writer。共享 lease 保证所有会改变 build 所消费可变 durable evidence 的内置写路径互斥；内容寻址音频/缓存由独立 key lock 管理。非合作 writer 无法被标准 POSIX 强制禁止，其手工/恶意 ABA 明确不在保证范围，报告不宣称 Windows 式强制排他或必然检测每次外部漂移。
 - 全量 9 个 skip 仍全部来自当前 Windows token 缺少 symlink privilege；Windows sharing、snapshot identity/hash、post-write pin 与 lock tests 均实际执行。
+- Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。
+
+## 2026-07-22 第六轮审查整改：共享 corpus mutation lease
+
+### 根因与共享锁协议
+
+- 第五轮 build 私有 `.build-manifest.lock` 只约束 `build-manifest`，`write_jsonl_atomic()`、review helper、inventory intake 与其他真实写路径并不取得同一把锁；POSIX 上 pinned fd/namespace 复验不能替代合作 writer 的跨事务互斥。
+- 新增 `latintts.corpus.locking`，锁文件固定为 `local-data/manifests/.corpus-mutation.lock`，永久保留而不 unlink，避免合作进程锁住不同 inode。目标路径从最近的精确 `local-data` 祖先定位同一 corpus；混合 non-local/local 或不同 local-data root 的多路径事务 fail closed。
+- Windows 同时持有 manifests directory deny-delete handle 与 lock file `CreateFileW(OPEN_ALWAYS, share_mode=0)` handle，拒绝 reparse/directory lock object；POSIX 从 `O_DIRECTORY | O_NOFOLLOW` pinned manifests dirfd 相对打开 regular lock file，比较 fd/public `(st_dev, st_ino)` 后执行 `flock(LOCK_EX | LOCK_NB)`。
+- 进程内每 corpus 使用 nonblocking `RLock`、depth 与显式 `(owner_pid, owner_thread)`：同 PID 同线程嵌套可重入，其他线程立即返回 `CorpusMutationLockBusy`，其他进程由 Windows sharing 或 POSIX flock 拒绝。最后一层 close 才释放 OS lease；acquire/close 异常不会遗留 registry depth。
+- fork child 在触碰可能由消失线程持有的旧 registry mutex 之前重置 registry；继承 backend 只 close child fd，绝不 `LOCK_UN` 父进程 flock。继承的 stale `CorpusMutationLease.close()` 在 PID 不同场景只标记自身 closed，不修改旧 Entry/RLock/backend；同 PID 跨线程 close 仍在任何状态变化前拒绝。
+
+### 内置写路径接入
+
+- `_OutputNamespaceGuard` 删除私有 `.build-manifest.lock`，改持共享 lease，从第一次 input/review 读取前一直贯穿 `segments.jsonl → processing-events.jsonl → recordings.jsonl`、最终 snapshot/artifact 复验与 build return。
+- `store.write_jsonl_atomic()` 对 local-data 目标自动取得共享 lease；`append_jsonl_event()` 把 read+append+replace 放在一个外层 lease；`persist_recording_transition(s)()` 把 audit-first events→recordings 整个事务放在一个外层 lease。build 与高层事务内的 nested store write 通过同线程重入，不自阻塞。
+- review 的 text/JSON/bytes/TextGrid/copy 原子 helper 全部接入共享 lease，`export_review_bundle()` 与 `import_review_bundle()` 还持有覆盖完整多文件流程的 outer lease。inventory `intake.csv` 独占创建与 CLI runtime text 原子写同样接入；inventory/transcript/pairing 的 durable JSON 写入由 store 自动覆盖。
+- 协议范围精确限定为“会改变 manifest build 所消费可变 durable evidence 的内置写路径”。内容寻址 audio/cache 继续使用已有独立 key lock 与 build artifact/snapshot guards，不声称共享 corpus lease 覆盖所有派生缓存写入。
+
+### 第六轮 RED → GREEN 证据
+
+1. 首个共享锁测试在 collection 阶段按预期失败于 `ModuleNotFoundError: latintts.corpus.locking`；最小实现后同线程嵌套 store write、跨线程 fail-fast、review helper、persist 双文件 outer lease、nonregular lock 与 alias 拒绝转绿。
+2. build-style outer lease 下，第二线程分别写 rights、transcripts、review、recordings、pairing 五类路径均返回 `CorpusMutationLockBusy`，原字节不变：`5 passed`。
+3. 真实子进程争用共享 lock 返回明确 busy 且不改变 corpus bytes；release 后可重新写。backend acquire/close failure、nested refcount、junction manifests alias 与 lock directory 非 regular 专项均通过。
+4. inventory direct `intake.csv` writer 与 CLI direct text helper 的 RED 均表现为第二线程可成功写入；接入共享 lease 后均 GREEN。
+5. 旧测试用同一线程打开第二个 output guard，和新“同线程可重入”契约冲突；改用第二线程后，第二 build 在任何 `_load_selection` 前失败，guard release 后可重新取得。
+6. 跨线程 close RED 精确暴露旧行为 `cannot release un-acquired lock`，并会先腐化 depth/backend；owner 校验前移后，错误线程零状态变化、原 owner 可正常 close、随后第三线程可取得。
+7. PID fallback RED 证明旧 `_entry_for()` 丢 registry 时未调用 `close_after_fork()`；统一 child reset 后 mock inherited backend 已关闭。另有 POSIX-only真实 `fork()` 回归：child stale close 不释放 parent flock，child 新 acquire 仍 busy；当前 Windows 将该项标为平台 skip。
+
+### 第六轮最终门禁
+
+- locking 精确覆盖：`20 passed, 1 skipped`；`locking.py` 为 `186 statements / 8 missing = 95.70%`。
+- expanded focused（locking、manifest、store、review、inventory、transcript、pairing、alignment smoke 共 11 个文件）：`530 passed, 6 skipped`；owner/fork 修复后相关专项再跑 `72 passed, 2 skipped`。
+- `python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q`：
+  - `1477 passed, 10 skipped`
+  - displayed coverage：`95.01%`
+  - raw coverage：`95.0096498483595%`（`7254` statements，`362` missing）
+- `python -m ruff check src tests`：PASS。
+- `python -m ruff format --check src tests`：PASS（74 files already formatted）。
+- `python -m mypy src`：PASS（32 source files）。
+- `python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl`：PASS（351/351）。
+- `git diff --check`：PASS。
+
+### 第六轮威胁边界
+
+- Windows sharing handles 为合作与非合作 writer 提供更强的 open/write/delete exclusion；不支持所需 handle/API 的文件系统继续 fail closed。
+- POSIX 保证所有会改变 build 所消费可变 durable evidence 的 LatinTTS 内置写路径合作互斥；`flock` 无法强制手工或恶意外部进程合作。外部 rename/replace namespace ABA 明确不在保证范围，不承诺每次都能检测、回滚或阻止。
+- 10 个 skip 中 9 个仍来自当前 Windows token 缺少 symlink privilege；新增 1 个是只在 POSIX 执行的真实 fork/flock 回归。Windows 上跨线程、跨进程、junction、sharing 与模拟 PID fallback 均实际执行。
 - Task 12 仍不启动 Task 13，不写入真实 corpus，不执行 push/merge/PR。

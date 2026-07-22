@@ -27,6 +27,7 @@ from latintts.corpus.audio import (
 )
 from latintts.corpus.config import CorpusConfig
 from latintts.corpus.domain import CorpusFailure, CorpusState
+from latintts.corpus.locking import CorpusMutationLease, corpus_mutation_lease
 from latintts.corpus.pairing import PairingRecording
 from latintts.corpus.paths import CorpusPaths, require_canonical_descendant
 from latintts.corpus.records import (
@@ -1076,7 +1077,7 @@ class _OutputNamespaceGuard:
     directories: dict[Path, _PublicationGuard]
     manifests: _PublicationGuard
     processing: _PublicationGuard
-    lock_handle: object
+    mutation_lease: CorpusMutationLease
     windows: bool
 
     def validate(self) -> None:
@@ -1089,15 +1090,7 @@ class _OutputNamespaceGuard:
     def close(self) -> None:
         failure: OSError | None = None
         try:
-            if self.windows:
-                _windows_close_handle(self.lock_handle)
-            else:  # pragma: no cover - exercised on POSIX hosts
-                fcntl: Any = __import__("fcntl")
-                lock_descriptor = cast(int, self.lock_handle)
-                try:
-                    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
-                finally:
-                    os.close(lock_descriptor)
+            self.mutation_lease.close()
         except OSError as error:
             failure = error
         for guard in reversed(tuple(self.directories.values())):
@@ -1138,7 +1131,7 @@ def _open_output_namespace_guard(
         key=lambda path: (len(path.parts), str(path).casefold()),
     )
     directories: dict[Path, _PublicationGuard] = {}
-    lock_handle: object | None = None
+    mutation_lease: CorpusMutationLease | None = None
     try:
         for directory in ordered_paths:
             directories[directory] = _open_directory_guard(
@@ -1147,47 +1140,23 @@ def _open_output_namespace_guard(
             )
         manifest_guard = directories[manifests]
         processing_guard = directories[processing]
-        lock_path = manifests / ".build-manifest.lock"
-        if os.name == "nt":
-            lock_handle = _windows_open_handle(
-                lock_path,
-                desired_access=0x80000000 | 0x40000000,
-                share_mode=0,
-                flags=0x00200000,
-                creation_disposition=4,  # OPEN_ALWAYS
-            )
-            _windows_handle_identity(lock_handle, kind="manifest transaction lock")
-        else:  # pragma: no cover - exercised on POSIX hosts
-            fcntl: Any = __import__("fcntl")
-            lock_descriptor = os.open(
-                lock_path.name,
-                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=cast(int, manifest_guard.handle),
-            )
-            lock_handle = lock_descriptor
-            try:
-                fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except Exception:
-                os.close(lock_descriptor)
-                lock_handle = None
-                raise
+        mutation_lease = corpus_mutation_lease(
+            paths.manifests / "segments.jsonl",
+            processing_path,
+        )
         guard = _OutputNamespaceGuard(
             directories,
             manifest_guard,
             processing_guard,
-            lock_handle,
+            mutation_lease,
             os.name == "nt",
         )
         guard.validate()
         return guard
     except Exception:
-        if lock_handle is not None:
+        if mutation_lease is not None:
             with suppress(OSError):
-                if os.name == "nt":
-                    _windows_close_handle(lock_handle)
-                else:  # pragma: no cover - exercised on POSIX hosts
-                    os.close(cast(int, lock_handle))
+                mutation_lease.close()
         for directory_guard in reversed(tuple(directories.values())):
             with suppress(OSError):
                 directory_guard.close()
