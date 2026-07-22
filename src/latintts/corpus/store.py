@@ -405,8 +405,8 @@ def _persist_recording_transitions_locked(
     event_by_id = {event.recording_id: event for event in expected_events}
     if len(target_by_id) != len(target_records) or len(event_by_id) != len(expected_events):
         raise ValueError("batch transition identities must be unique")
-    if set(target_by_id) != set(event_by_id):
-        raise ValueError("batch transition must cover every target recording exactly once")
+    if not set(event_by_id) <= set(target_by_id):
+        raise ValueError("event recording_ids must be a subset of target recordings")
     for recording_id, event in event_by_id.items():
         require_transition(event.previous_state, event.target_state)
         if target_by_id[recording_id].state is not event.target_state:
@@ -425,11 +425,18 @@ def _persist_recording_transitions_locked(
         raise ValueError("target manifest recording_id set and count must remain unchanged")
     for recording_id, target_record in target_by_id.items():
         existing_row = existing_by_id[recording_id]
-        event = event_by_id[recording_id]
-        existing_state = existing_row.get("state")
-        if existing_state not in {event.previous_state.value, event.target_state.value}:
-            raise ValueError("existing manifest state is outside the recoverable transition")
         target_row = target_record.to_dict()
+        target_event = event_by_id.get(recording_id)
+        if target_event is None:
+            if target_row != existing_row:
+                raise ValueError("non-event recording must remain unchanged")
+            continue
+        existing_state = existing_row.get("state")
+        if existing_state not in {
+            target_event.previous_state.value,
+            target_event.target_state.value,
+        }:
+            raise ValueError("existing manifest state is outside the recoverable transition")
         if {key: value for key, value in existing_row.items() if key != "state"} != {
             key: value for key, value in target_row.items() if key != "state"
         }:

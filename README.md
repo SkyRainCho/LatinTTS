@@ -60,6 +60,7 @@ git diff --check
 ## 规则、来源与数据使用
 
 - [现代罗马教会式拉丁语发音规范](docs/pronunciation/roman-ecclesiastical.md)
+- [语料对齐试点操作指南](docs/corpus/alignment-pilot-operator-guide.md)
 - [来源登记](src/latintts/resources/pronunciation_sources.json)
 - [已批准的系统设计](docs/superpowers/specs/2026-07-17-latintts-system-design.md)
 

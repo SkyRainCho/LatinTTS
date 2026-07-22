@@ -1434,7 +1434,7 @@ def test_build_manifest_recovers_batch_commit_checkpoints_without_duplicate_even
 
 
 def _materialize_mixed_legacy_terminal_state(
-    paths: object, config: CorpusConfig
+    paths: object, config: CorpusConfig, version: str
 ) -> tuple[str, str]:
     recordings_path = paths.manifests / "recordings.jsonl"  # type: ignore[attr-defined]
     events_path = (
@@ -1449,18 +1449,30 @@ def _materialize_mixed_legacy_terminal_state(
         if row["previous_state"] == "REVIEWED"
     ]
     rec1_current = next(event for event in terminal_rows if event.recording_id == rec1.recording_id)
-    _, legacy = advance_recording(
-        replace(rec1, state=CorpusState.REVIEWED),
-        rec1.state,
-        input_sha256s=(
+    if version == "v1":
+        inputs = (
             rec1_current.input_sha256s[0],
+            rec1_current.input_sha256s[2],
             rec1_current.input_sha256s[3],
             rec1_current.input_sha256s[4],
             rec1_current.input_sha256s[5],
             rec1_current.input_sha256s[6],
-        ),
+            rec1_current.input_sha256s[7],
+        )
+    else:
+        inputs = (
+            rec1_current.input_sha256s[0],
+            rec1_current.input_sha256s[4],
+            rec1_current.input_sha256s[5],
+            rec1_current.input_sha256s[6],
+            rec1_current.input_sha256s[7],
+        )
+    _, legacy = advance_recording(
+        replace(rec1, state=CorpusState.REVIEWED),
+        rec1.state,
+        input_sha256s=inputs,
         config_sha256=rec1_current.config_sha256,
-        tool_versions=rec1_current.tool_versions,
+        tool_versions=("approved-manifest-v1", rec1_current.tool_versions[1]),
         started_at=rec1_current.started_at,
         finished_at=rec1_current.finished_at,
         result=rec1_current.result,
@@ -1474,10 +1486,12 @@ def _materialize_mixed_legacy_terminal_state(
     return legacy.event_id, rec2.recording_id
 
 
+@pytest.mark.parametrize("old_version", ("v1", "legacy"))
 @pytest.mark.parametrize("rec1_decision", ("rejected", "approved"))
 def test_build_manifest_recovers_mixed_legacy_subset_and_appends_only_missing_current_event(
     tmp_path: Path,
     rec1_decision: str,
+    old_version: str,
 ) -> None:
     paths, config = _two_recording_aligned_project(tmp_path)
     _write_rights(paths)
@@ -1496,7 +1510,9 @@ def test_build_manifest_recovers_mixed_legacy_subset_and_appends_only_missing_cu
         assert builder(paths, config)
     events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
     recordings_path = paths.manifests / "recordings.jsonl"
-    legacy_id, missing_recording_id = _materialize_mixed_legacy_terminal_state(paths, config)
+    legacy_id, missing_recording_id = _materialize_mixed_legacy_terminal_state(
+        paths, config, old_version
+    )
     mixed_events = events_path.read_bytes()
 
     if builder is build_manifest_corpus:
@@ -1510,7 +1526,7 @@ def test_build_manifest_recovers_mixed_legacy_subset_and_appends_only_missing_cu
     ]
     assert [event.event_id for event in terminals[:-1]] == [legacy_id]
     assert terminals[-1].recording_id == missing_recording_id
-    assert len(terminals[-1].input_sha256s) == 7
+    assert len(terminals[-1].input_sha256s) == 8
     assert events_path.read_bytes().startswith(mixed_events)
     assert all(row["state"] in {"APPROVED", "REJECTED"} for row in read_jsonl(recordings_path))
     durable = {path: path.read_bytes() for path in (events_path, recordings_path)}
@@ -1538,7 +1554,7 @@ def test_build_manifest_mixed_legacy_recovery_conflicts_fail_without_writes(
         _set_decisions(group, decision=decision, reason=f"fixture {decision}")
     assert import_review_bundle(paths, config)
     assert _build_with_fake_audio(paths, config)
-    _materialize_mixed_legacy_terminal_state(paths, config)
+    _materialize_mixed_legacy_terminal_state(paths, config, "legacy")
     events_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
     recordings_path = paths.manifests / "recordings.jsonl"
     manifest_path = paths.manifests / "segments.jsonl"
@@ -2387,15 +2403,30 @@ def test_terminal_event_digests_equal_the_consumed_authoritative_snapshot(
             paths.manifests / "transcripts.jsonl",  # type: ignore[attr-defined]
         )
     )
-    assert tuple(terminal["input_sha256s"][1:3]) == expected
+    recordings = tuple(
+        review_module._decode_recording(row)
+        for row in read_jsonl(paths.manifests / "recordings.jsonl")  # type: ignore[attr-defined]
+    )
+    selection_ids = set(read_jsonl(paths.manifests / "pilot-selection.json")[0]["recording_ids"])  # type: ignore[attr-defined]
+    inventory_sha256 = store_module.jsonl_sha256(
+        (
+            replace(recording, state=CorpusState.REVIEWED)
+            if recording.recording_id in selection_ids
+            else recording
+        ).to_dict()
+        for recording in recordings
+    )
+    assert terminal["tool_versions"][0] == "approved-manifest-v2"
+    assert terminal["input_sha256s"][1] == inventory_sha256
+    assert tuple(terminal["input_sha256s"][2:4]) == expected
     assert (
-        terminal["input_sha256s"][5]
+        terminal["input_sha256s"][6]
         == hashlib.sha256(
             (paths.manifests / "review.jsonl").read_bytes()  # type: ignore[attr-defined]
         ).hexdigest()
     )
     assert (
-        terminal["input_sha256s"][6]
+        terminal["input_sha256s"][7]
         == hashlib.sha256(
             (paths.manifests / "segments.jsonl").read_bytes()  # type: ignore[attr-defined]
         ).hexdigest()

@@ -193,6 +193,53 @@ def test_persist_transitions_publishes_all_events_then_one_recordings_snapshot(
     assert read_jsonl(recordings_path) == (updated.to_dict(), other_updated.to_dict())
 
 
+def test_persist_transitions_preserves_unchanged_recordings_without_events(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    unselected = _other_recording()
+    write_jsonl_atomic(recordings_path, (original.to_dict(), unselected.to_dict()))
+
+    store.persist_recording_transitions(
+        recordings_path=recordings_path,
+        events_path=events_path,
+        recordings=(updated, unselected),
+        events=(event,),
+    )
+
+    assert read_jsonl(events_path) == (event.to_dict(),)
+    assert read_jsonl(recordings_path) == (updated.to_dict(), unselected.to_dict())
+
+
+@pytest.mark.parametrize("field", ("state", "notes"))
+def test_persist_transitions_rejects_changes_to_recordings_without_events(
+    tmp_path: Path, field: str
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    unselected = _other_recording()
+    changed = (
+        replace(unselected, state=CorpusState.INVENTORIED)
+        if field == "state"
+        else replace(unselected, notes="changed")
+    )
+    write_jsonl_atomic(recordings_path, (original.to_dict(), unselected.to_dict()))
+
+    with pytest.raises(ValueError, match="non-event recording must remain unchanged"):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(updated, changed),
+            events=(event,),
+        )
+
+    assert read_jsonl(recordings_path) == (original.to_dict(), unselected.to_dict())
+    assert not events_path.exists()
+
+
 def test_persist_transitions_rejects_stale_expected_snapshot_before_any_write(
     tmp_path: Path,
 ) -> None:
@@ -365,7 +412,7 @@ def test_persist_transitions_rejects_prospective_state_chain_gap_without_writes(
         ("alias", "distinct resolved"),
         ("empty", "non-empty"),
         ("duplicate-events", "identities.*unique"),
-        ("coverage", "cover every"),
+        ("coverage", "event recording_ids must be a subset"),
         ("target-state", "target manifest state"),
         ("id-set", "recording_id set"),
         ("existing-state", "recoverable transition"),
@@ -389,7 +436,7 @@ def test_persist_transitions_rejects_invalid_batch_contracts(
     elif case == "duplicate-events":
         events = (event, event)
     elif case == "coverage":
-        targets = (updated, replace(updated, recording_id="rec-other"))
+        events = (replace(event, recording_id="rec-other"),)
     elif case == "target-state":
         targets = (original,)
     elif case == "id-set":

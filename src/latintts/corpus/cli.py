@@ -51,6 +51,7 @@ from latintts.corpus.records import (
     advance_recording,
     require_exact_fields,
 )
+from latintts.corpus.report import build_report
 from latintts.corpus.review import (
     _require_canonical_descendant,
     export_review_bundle,
@@ -2164,6 +2165,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("config/corpus/pilot-v1.json"),
     )
+    report_parser = subparsers.add_parser("report")
+    report_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/corpus/pilot-v1.json"),
+    )
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.project_root)
@@ -2237,6 +2244,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2
         return 0 if successful else 1
+    if args.command == "report":
+        paths = CorpusPaths.from_project_root(args.project_root)
+        config_path = args.config
+        if not config_path.is_absolute():
+            config_path = args.project_root / config_path
+        try:
+            config = CorpusConfig.load(config_path)
+            paths.ensure_layout()
+            report = build_report(paths, config)
+        except CorpusFailure as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 1
+        except (OSError, TypeError, ValueError) as error:
+            print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
+            return 2
+        print(f"corpus-report: {report.scale_decision.value}")
+        return 0
     if args.command in {"export-review", "import-review"}:
         paths = CorpusPaths.from_project_root(args.project_root)
         config_path = args.config

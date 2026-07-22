@@ -1767,8 +1767,9 @@ def _build_manifest_corpus_locked(
     by_id = {
         recording.recording_id: (index, recording) for index, recording in enumerate(recordings)
     }
-    if len(by_id) != len(recordings) or set(by_id) != set(selection.recording_ids):
-        raise ValueError("recordings must uniquely and exactly match pilot selection")
+    selection_ids = set(selection.recording_ids)
+    if len(by_id) != len(recordings) or not selection_ids <= set(by_id):
+        raise ValueError("recordings must be unique and contain every pilot selection")
     for recording_id, expected_hash in zip(
         selection.recording_ids, selection.inventory_hashes, strict=True
     ):
@@ -1781,13 +1782,13 @@ def _build_manifest_corpus_locked(
             derived=False,
         )
     terminal = {CorpusState.APPROVED, CorpusState.REJECTED}
-    if any(record.state not in {CorpusState.REVIEWED, *terminal} for _, record in by_id.values()):
+    pilot_records = tuple(by_id[recording_id][1] for recording_id in selection.recording_ids)
+    if any(record.state not in {CorpusState.REVIEWED, *terminal} for record in pilot_records):
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
-    all_reviewed = all(record.state is CorpusState.REVIEWED for record in recordings)
+    all_reviewed = all(record.state is CorpusState.REVIEWED for record in pilot_records)
     processing_path = paths.alignments / "runs" / config.digest / "processing-events.jsonl"
     processing_rows = read_jsonl(processing_path)
     decoded_processing = validate_processing_events(processing_rows)
-    selection_ids = set(selection.recording_ids)
     audit_ahead = any(
         event.recording_id in selection_ids
         and event.previous_state is CorpusState.REVIEWED
@@ -1864,21 +1865,22 @@ def _build_manifest_corpus_locked(
     by_id = {
         recording.recording_id: (index, recording) for index, recording in enumerate(recordings)
     }
-    if len(by_id) != len(recordings) or set(by_id) != set(selection.recording_ids):
-        raise ValueError("recordings must uniquely and exactly match pilot selection")
+    selection_ids = set(selection.recording_ids)
+    if len(by_id) != len(recordings) or not selection_ids <= set(by_id):
+        raise ValueError("recordings must be unique and contain every pilot selection")
     rights = _load_rights(paths)
     processing_rows = read_jsonl(processing_path)
     decoded_processing = validate_processing_events(processing_rows)
-    selection_ids = set(selection.recording_ids)
     audit_ahead = any(
         event.recording_id in selection_ids
         and event.previous_state is CorpusState.REVIEWED
         and event.target_state in terminal
         for event in decoded_processing
     )
-    all_reviewed = all(record.state is CorpusState.REVIEWED for record in recordings)
+    pilot_records = tuple(by_id[recording_id][1] for recording_id in selection.recording_ids)
+    all_reviewed = all(record.state is CorpusState.REVIEWED for record in pilot_records)
     recovery_only = audit_ahead or not all_reviewed
-    if any(record.state not in {CorpusState.REVIEWED, *terminal} for record in recordings):
+    if any(record.state not in {CorpusState.REVIEWED, *terminal} for record in pilot_records):
         raise CorpusFailure("REVIEW_REQUIRED", "manifest build requires REVIEWED recordings")
     for recording_id, expected_hash in zip(
         selection.recording_ids, selection.inventory_hashes, strict=True
@@ -2144,6 +2146,14 @@ def _build_manifest_corpus_locked(
         manifest_sha256 = _durable_snapshots[str(Path(os.path.abspath(manifest_path)))].sha256
         rights_sha256 = rights_snapshot.sha256
         transcripts_sha256 = transcripts_snapshot.sha256
+        inventory_sha256 = jsonl_sha256(
+            (
+                replace(recording, state=CorpusState.REVIEWED)
+                if recording.recording_id in selection_ids
+                else recording
+            ).to_dict()
+            for recording in recordings
+        )
         current = recordings
         terminal_events: list[ProcessingEvent] = []
         for context in contexts:
@@ -2154,6 +2164,25 @@ def _build_manifest_corpus_locked(
             timestamp = "1970-01-01T00:00:00+00:00"
             base = replace(current[context.recording_index], state=CorpusState.REVIEWED)
             advanced, event = advance_recording(
+                base,
+                target,
+                input_sha256s=(
+                    context.recording.sha256,
+                    inventory_sha256,
+                    rights_sha256,
+                    transcripts_sha256,
+                    context.pairing_sha256,
+                    context.alignment_sha256,
+                    review_sha256,
+                    manifest_sha256,
+                ),
+                config_sha256=config.digest,
+                tool_versions=("approved-manifest-v2", ffmpeg_version),
+                started_at=timestamp,
+                finished_at=timestamp,
+                result="success",
+            )
+            _, v1_event = advance_recording(
                 base,
                 target,
                 input_sha256s=(
@@ -2171,7 +2200,7 @@ def _build_manifest_corpus_locked(
                 finished_at=timestamp,
                 result="success",
             )
-            legacy_advanced, legacy_event = advance_recording(
+            _, legacy_event = advance_recording(
                 base,
                 target,
                 input_sha256s=(
@@ -2187,7 +2216,6 @@ def _build_manifest_corpus_locked(
                 finished_at=timestamp,
                 result="success",
             )
-            del legacy_advanced
             processing_by_id = {
                 item.event_id: item
                 for item in (ProcessingEvent.from_dict(row) for row in processing_rows)
@@ -2195,6 +2223,10 @@ def _build_manifest_corpus_locked(
             if event.event_id in processing_by_id:
                 if processing_by_id[event.event_id] != event:
                     raise ValueError("existing terminal event conflicts with deterministic event")
+            elif v1_event.event_id in processing_by_id:
+                if processing_by_id[v1_event.event_id] != v1_event:
+                    raise ValueError("v1 terminal event conflicts with deterministic evidence")
+                event = v1_event
             elif legacy_event.event_id in processing_by_id:
                 if processing_by_id[legacy_event.event_id] != legacy_event:
                     raise ValueError("legacy terminal event conflicts with deterministic evidence")
