@@ -170,12 +170,28 @@ git diff --cached --name-only
 
 所有恢复都应先修正输入或环境，再原样重跑失败命令。内容寻址缓存和处理事件负责安全复用；
 不要通过删除 `local-data/raw/`、手工改状态或伪造 JSON 来“越过”错误。
-`report` 在发布双文件前会持久化 `.report-output-transaction.json`；若进程中断，下一次
-`report` 会在读取新的评测证据前先恢复未完成事务。只有恢复无法安全自动完成时才返回
-`REPORT_OUTPUT_RECOVERY_REQUIRED`。此时不要删除 `.report-output-transaction.json`、
-`.report-output-transaction.*` 或以 `.recovery.` 开头的备份；按报错给出的
-`manifests/...` 相对位置核对旧的 `report.json` / `report.md` 文件对，再重新运行
-`report`。CLI 不得输出项目绝对路径，避免在日志中暴露本机目录。
+`report` 在发布双文件前会持久化 active marker `.report-output-transaction.json`。回滚先
+恢复并联合校验旧报告对，再将 active marker 原子移交为
+`.report-output-transaction.rolled-back.json`；只有 rolled-back 状态可以清理旧事务副本。
+报告对完成原子提交后，root committed marker `.report-output-transaction.completed.json`
+与事务私有目录中的 `intent.completed` 会在清理期间提供冗余恢复锚点。root 下的 active、
+rolled-back、committed 三个 outcome marker 必须至多存在一个，且 outcome marker 始终在
+已登记 payload 与私有目录清理完成后才最后删除。
+
+若进程中断，下一次 `report` 会在读取新的评测证据前先恢复未完成事务：active 状态只执行
+回滚，rolled-back 状态只继续清理旧报告事务，一旦进入 committed 状态就只允许 roll-forward
+和受身份校验保护的清理，不再回滚到旧报告对。若私有目录已经删除但 root
+outcome marker 尚在，只有当登记的 root payload 已全部消失、marker 无冲突，而且当前
+`report.json` / `report.md` 与 intent 中的完整身份完全一致时，才会完成 marker 清理。
+只有恢复无法安全自动完成时才返回 `REPORT_OUTPUT_RECOVERY_REQUIRED`。此时不要删除上述
+marker、`.report-output-transaction.*`，也不要删除以 `.recovery.` / `.restore.` 开头的
+登记副本；按报错给出的 `manifests/...` 相对位置核对旧的 `report.json` / `report.md` 文件对，
+再重新运行 `report`。CLI 不得输出项目绝对路径，避免在日志中暴露本机目录。
+
+事务清理以 `corpus_mutation_lease` 的协作锁为并发边界，并在删除前核验 device、inode、mode、
+size 与 SHA-256。忽略该锁的同一用户进程仍可能在“校验后、删除前”制造路径 ABA 竞争；这
+不是对抗性文件系统安全边界。遇到此类外部写入时应停止并保留恢复证据，不要扩大自动清理
+范围。
 
 | 错误码 | 恢复动作 |
 | --- | --- |
@@ -195,7 +211,7 @@ git diff --cached --name-only
 | `ALIGNMENT_LOW_CONFIDENCE` | 复核文本和音频，检查模型/runtime；不得自动批准。 |
 | `AUDIO_QUALITY_REJECTED` | 核对源媒体和转码环境；保留 raw，不做破坏性降噪覆盖。 |
 | `CACHE_ARTIFACT_INVALID` | 停止并调查哈希、来源链或中断恢复；只清理已确认损坏的派生缓存。 |
-| `REPORT_OUTPUT_RECOVERY_REQUIRED` | 保留 intent、private claim 与 `.recovery.` 证据；核对报错中的 `manifests/...` 相对位置，恢复完整同代报告对后原样重跑。 |
+| `REPORT_OUTPUT_RECOVERY_REQUIRED` | 保留 outcome marker、private claim、当前报告对以及 `.recovery.` / `.restore.` / prepared 证据；核对报错中的 `manifests/...` 相对位置，恢复完整同代报告对后原样重跑。 |
 | `REVIEW_REQUIRED` | 完成缺失的人工 decision/边界审核，再导入并重跑。 |
 | `MANIFEST_SCHEMA_MISMATCH` | 按当前 schema 修正字段、版本或交叉引用；不要手改状态跳级。 |
 

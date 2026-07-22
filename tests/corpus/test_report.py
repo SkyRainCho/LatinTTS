@@ -4,10 +4,12 @@ import hashlib
 import json
 import math
 import shutil
+import stat
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -64,9 +66,474 @@ def test_operator_guide_defines_complete_telemetry_and_error_recovery_contract()
     assert "模型权重与 Hugging Face cache" in guide
     assert "lock、临时文件、`report.json` 和 `report.md`" in guide
     assert "`.recovery.`" in guide
+    assert "`.report-output-transaction.rolled-back.json`" in guide
+    assert "`.report-output-transaction.completed.json`" in guide
+    assert "`intent.completed`" in guide
+    assert "只允许 roll-forward" in guide
+    assert "rolled-back 状态只继续清理" in guide
+    assert "协作锁" in guide
     assert "绝对路径" in guide
     for code in IssueCode:
         assert f"`{code.value}`" in guide
+
+
+def test_design_spec_registers_report_output_recovery_error() -> None:
+    design = (
+        Path(__file__).parents[2]
+        / "docs/superpowers/specs/2026-07-19-latintts-corpus-alignment-pilot-design.md"
+    ).read_text(encoding="utf-8")
+
+    assert "`REPORT_OUTPUT_RECOVERY_REQUIRED`" in design
+
+
+def _valid_report_transaction_intent_raw() -> dict[str, Any]:
+    directory_mode = stat.S_IFDIR | 0o700
+    file_mode = stat.S_IFREG | 0o600
+
+    def snapshot(inode: int, size: int, sha256: str) -> dict[str, object]:
+        return {
+            "device": 1,
+            "inode": inode,
+            "mode": file_mode,
+            "size": size,
+            "sha256": sha256,
+        }
+
+    outputs: list[dict[str, object]] = []
+    for index, target_name in enumerate(("report.json", "report.md"), start=1):
+        outputs.append(
+            {
+                "target_name": target_name,
+                "prepared_name": f".{target_name}.prepared-{index}",
+                "backup_name": f".recovery.{target_name}.backup-{index}",
+                "restore_name": f".restore.{target_name}.restore-{index}",
+                "old_snapshot": snapshot(index * 10, 3, "a" * 64),
+                "prepared_snapshot": snapshot(index * 10 + 1, 4, "b" * 64),
+                "backup_snapshot": snapshot(index * 10 + 2, 3, "a" * 64),
+                "restore_snapshot": snapshot(index * 10 + 3, 3, "a" * 64),
+            }
+        )
+    return {
+        "schema_version": "1",
+        "transaction_directory": ".report-output-transaction.fixture",
+        "directory_identity": {"device": 1, "inode": 2, "mode": directory_mode},
+        "outputs": outputs,
+    }
+
+
+def test_report_intent_decoder_accepts_complete_owned_identity_contract() -> None:
+    decoded = report_module._decode_report_intent(_valid_report_transaction_intent_raw())
+
+    assert decoded.transaction_directory == ".report-output-transaction.fixture"
+    assert tuple(output.target_name for output in decoded.outputs) == (
+        "report.json",
+        "report.md",
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "top_fields",
+        "schema_version",
+        "transaction_directory",
+        "directory_fields",
+        "directory_negative",
+        "directory_mode",
+        "outputs_shape",
+        "output_fields",
+        "target_name",
+        "prepared_name",
+        "backup_name",
+        "restore_name",
+        "old_coherence",
+        "snapshot_fields",
+        "snapshot_negative",
+        "snapshot_mode",
+        "snapshot_sha256",
+        "backup_content",
+        "restore_content",
+        "output_order",
+    ),
+)
+def test_report_intent_decoder_rejects_noncanonical_ownership_contract(case: str) -> None:
+    raw = deepcopy(_valid_report_transaction_intent_raw())
+    first = raw["outputs"][0]
+    if case == "top_fields":
+        raw["extra"] = None
+    elif case == "schema_version":
+        raw["schema_version"] = "2"
+    elif case == "transaction_directory":
+        raw["transaction_directory"] = 1
+    elif case == "directory_fields":
+        raw["directory_identity"]["extra"] = 1
+    elif case == "directory_negative":
+        raw["directory_identity"]["inode"] = -1
+    elif case == "directory_mode":
+        raw["directory_identity"]["mode"] = stat.S_IFREG | 0o600
+    elif case == "outputs_shape":
+        raw["outputs"] = []
+    elif case == "output_fields":
+        first["extra"] = None
+    elif case == "target_name":
+        first["target_name"] = "foreign.json"
+    elif case == "prepared_name":
+        first["prepared_name"] = "prepared.json"
+    elif case == "backup_name":
+        first["backup_name"] = "backup.json"
+    elif case == "restore_name":
+        first["restore_name"] = "restore.json"
+    elif case == "old_coherence":
+        first["restore_name"] = None
+    elif case == "snapshot_fields":
+        first["prepared_snapshot"]["extra"] = 1
+    elif case == "snapshot_negative":
+        first["prepared_snapshot"]["size"] = -1
+    elif case == "snapshot_mode":
+        first["prepared_snapshot"]["mode"] = stat.S_IFDIR | 0o700
+    elif case == "snapshot_sha256":
+        first["prepared_snapshot"]["sha256"] = "invalid"
+    elif case == "backup_content":
+        first["backup_snapshot"]["sha256"] = "c" * 64
+    elif case == "restore_content":
+        first["restore_snapshot"]["size"] = 4
+    else:
+        raw["outputs"].reverse()
+
+    with pytest.raises((TypeError, ValueError)):
+        report_module._decode_report_intent(raw)
+
+
+@pytest.mark.parametrize("kind", ("invalid-json", "noncanonical-json"))
+def test_report_intent_marker_rejects_noncanonical_bytes(tmp_path: Path, kind: str) -> None:
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    transaction_directory = manifests / ".report-output-transaction.fixture"
+    transaction_directory.mkdir()
+    metadata = transaction_directory.stat()
+    raw = _valid_report_transaction_intent_raw()
+    raw["directory_identity"] = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+    }
+    marker = manifests / ".report-output-transaction.json"
+    if kind == "invalid-json":
+        marker.write_bytes(b"{\n")
+    else:
+        marker.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        report_module._read_report_intent_marker(manifests, marker)
+
+
+def _write_canonical_report_intent_marker(
+    manifests: Path,
+    marker: Path,
+    transaction_directory: Path,
+) -> report_module._ReportTransactionIntent:
+    raw = _valid_report_transaction_intent_raw()
+    metadata = transaction_directory.stat()
+    raw["transaction_directory"] = transaction_directory.name
+    raw["directory_identity"] = {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": metadata.st_mode,
+    }
+    intent = report_module._decode_report_intent(raw)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_bytes(report_module._canonical_intent_bytes(intent))
+    return intent
+
+
+def _dummy_loaded_report_transaction(
+    manifests: Path,
+    intent: report_module._ReportTransactionIntent,
+    *,
+    state: report_module._ReportTransactionState = report_module._ReportTransactionState.ACTIVE,
+) -> report_module._LoadedReportTransaction:
+    marker_content = b"fixture marker\n"
+    marker_snapshot = report_module._ReportOutputSnapshot(
+        device=0,
+        inode=0,
+        mode=stat.S_IFREG | 0o600,
+        size=len(marker_content),
+        sha256=hashlib.sha256(marker_content).hexdigest(),
+        content=marker_content,
+    )
+    return report_module._LoadedReportTransaction(
+        state=state,
+        intent=intent,
+        marker_paths=(),
+        marker_snapshot=marker_snapshot,
+        transaction_directory=manifests / intent.transaction_directory,
+        directory_identity=intent.directory_identity,
+        directory_present=True,
+    )
+
+
+def test_report_transaction_directory_guards_name_and_file_type(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    regular_file = manifests / ".report-output-transaction.file"
+    regular_file.write_bytes(b"not a directory\n")
+
+    with pytest.raises(ValueError, match="directory name is invalid"):
+        report_module._transaction_directory_path(manifests, "transaction.fixture")
+    with pytest.raises(ValueError, match="must be a directory"):
+        report_module._directory_identity(regular_file)
+
+
+def test_active_report_marker_requires_its_private_directory(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    marker = manifests / ".report-output-transaction.json"
+    intent = report_module._decode_report_intent(_valid_report_transaction_intent_raw())
+    marker.write_bytes(report_module._canonical_intent_bytes(intent))
+
+    with pytest.raises(ValueError, match="directory is missing"):
+        report_module._read_report_intent_marker(manifests, marker)
+
+
+def test_report_loader_rejects_active_marker_with_private_final_marker(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    transaction_directory = manifests / ".report-output-transaction.fixture"
+    transaction_directory.mkdir(parents=True)
+    (manifests / ".report-output-transaction.json").write_bytes(b"active\n")
+    (transaction_directory / "intent.completed").write_bytes(b"final\n")
+
+    with pytest.raises(ValueError, match="rollback and committed"):
+        report_module._load_report_transaction(manifests)
+
+
+def test_report_loader_rejects_committed_marker_with_unrelated_final_marker(
+    tmp_path: Path,
+) -> None:
+    manifests = tmp_path / "manifests"
+    transaction_directory = manifests / ".report-output-transaction.fixture"
+    transaction_directory.mkdir(parents=True)
+    _write_canonical_report_intent_marker(
+        manifests,
+        manifests / ".report-output-transaction.completed.json",
+        transaction_directory,
+    )
+    unrelated_directory = manifests / ".report-output-transaction.unrelated"
+    unrelated_directory.mkdir()
+    (unrelated_directory / "intent.completed").write_bytes(b"unrelated final\n")
+
+    with pytest.raises(ValueError, match="multiple committed"):
+        report_module._load_report_transaction(manifests)
+
+
+def test_report_loader_rejects_multiple_private_final_markers(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    for suffix in ("first", "second"):
+        directory = manifests / f".report-output-transaction.{suffix}"
+        directory.mkdir(parents=True)
+        (directory / "intent.completed").write_bytes(b"final\n")
+
+    with pytest.raises(ValueError, match="multiple final"):
+        report_module._load_report_transaction(manifests)
+
+
+def test_report_loader_rejects_private_final_marker_in_wrong_directory(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    transaction_directory = manifests / ".report-output-transaction.fixture"
+    marker_directory = manifests / ".report-output-transaction.marker"
+    transaction_directory.mkdir(parents=True)
+    marker_directory.mkdir()
+    _write_canonical_report_intent_marker(
+        manifests,
+        marker_directory / "intent.completed",
+        transaction_directory,
+    )
+
+    with pytest.raises(ValueError, match="wrong directory"):
+        report_module._load_report_transaction(manifests)
+
+
+def _publication_guard_fixture(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    Path,
+    report_module._ReportOutputSnapshot,
+    report_module._LoadedReportTransaction,
+]:
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    temporary = manifests / ".report.json.fixture"
+    temporary.write_bytes(b"prepared report\n")
+    prepared = report_module._prepared_report_snapshot(temporary)
+    intent = report_module._decode_report_intent(_valid_report_transaction_intent_raw())
+    output = replace(
+        intent.outputs[0],
+        prepared_name=temporary.name,
+        prepared_snapshot=report_module._ReportSnapshotIdentity.from_snapshot(prepared),
+    )
+    intent = replace(intent, outputs=(output, intent.outputs[1]))
+    return (
+        temporary,
+        manifests / "report.json",
+        prepared,
+        _dummy_loaded_report_transaction(manifests, intent),
+    )
+
+
+def test_report_publication_requires_active_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary, target, prepared, _loaded = _publication_guard_fixture(tmp_path)
+    monkeypatch.setattr(report_module, "_load_report_transaction", lambda _manifests: None)
+
+    with pytest.raises(OSError, match="intent is missing"):
+        report_module._publish_report_output(temporary, target, old=None, prepared=prepared)
+
+
+def test_report_publication_requires_registered_prepared_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary, target, prepared, loaded = _publication_guard_fixture(tmp_path)
+    output = replace(loaded.intent.outputs[0], prepared_name=".report.json.other")
+    loaded = replace(
+        loaded, intent=replace(loaded.intent, outputs=(output, loaded.intent.outputs[1]))
+    )
+    monkeypatch.setattr(report_module, "_load_report_transaction", lambda _manifests: loaded)
+
+    with pytest.raises(OSError, match="does not match transaction intent"):
+        report_module._publish_report_output(temporary, target, old=None, prepared=prepared)
+
+
+def test_report_publication_rejects_changed_prepared_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary, target, prepared, loaded = _publication_guard_fixture(tmp_path)
+    monkeypatch.setattr(report_module, "_load_report_transaction", lambda _manifests: loaded)
+    temporary.write_bytes(b"changed prepared report\n")
+
+    with pytest.raises(OSError, match="changed before publication"):
+        report_module._publish_report_output(temporary, target, old=None, prepared=prepared)
+
+
+def test_report_publication_rejects_missing_old_snapshot_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary, target, prepared, loaded = _publication_guard_fixture(tmp_path)
+    monkeypatch.setattr(report_module, "_load_report_transaction", lambda _manifests: loaded)
+
+    with pytest.raises(OSError, match="old output identity is inconsistent"):
+        report_module._publish_report_output(temporary, target, old=None, prepared=prepared)
+
+
+def test_report_publication_rejects_mismatched_old_snapshot_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary, target, prepared, loaded = _publication_guard_fixture(tmp_path)
+    old_path = temporary.parent / "old-report.json"
+    old_path.write_bytes(b"old report\n")
+    old = report_module._prepared_report_snapshot(old_path)
+    monkeypatch.setattr(report_module, "_load_report_transaction", lambda _manifests: loaded)
+
+    with pytest.raises(OSError, match="old output identity is inconsistent"):
+        report_module._publish_report_output(temporary, target, old=old, prepared=prepared)
+
+
+@pytest.mark.parametrize(
+    "claim_name",
+    ("_claim_completed_intent", "_claim_rolled_back_intent"),
+)
+def test_report_marker_handoff_requires_shared_parent(
+    tmp_path: Path,
+    claim_name: str,
+) -> None:
+    intent_path = tmp_path / "first" / ".report-output-transaction.json"
+    transaction_directory = tmp_path / "second" / ".report-output-transaction.fixture"
+    marker_snapshot = _dummy_loaded_report_transaction(
+        tmp_path,
+        report_module._decode_report_intent(_valid_report_transaction_intent_raw()),
+    ).marker_snapshot
+
+    with pytest.raises(OSError, match="private directory disagree"):
+        getattr(report_module, claim_name)(intent_path, transaction_directory, marker_snapshot)
+
+
+def test_private_final_anchor_requires_root_committed_marker(tmp_path: Path) -> None:
+    intent_path = tmp_path / ".report-output-transaction.json"
+    transaction_directory = tmp_path / ".report-output-transaction.fixture"
+    marker_snapshot = _dummy_loaded_report_transaction(
+        tmp_path,
+        report_module._decode_report_intent(_valid_report_transaction_intent_raw()),
+    ).marker_snapshot
+
+    with pytest.raises(OSError, match="only the committed"):
+        report_module._claim_final_intent(intent_path, transaction_directory, marker_snapshot)
+
+
+def test_private_final_anchor_rejects_changed_root_marker(tmp_path: Path) -> None:
+    intent_path = tmp_path / ".report-output-transaction.completed.json"
+    transaction_directory = tmp_path / ".report-output-transaction.fixture"
+    transaction_directory.mkdir()
+    intent_path.write_bytes(b"original marker\n")
+    marker_snapshot = report_module._prepared_report_snapshot(intent_path)
+    intent_path.write_bytes(b"changed marker\n")
+
+    with pytest.raises(OSError, match="changed before final anchoring"):
+        report_module._claim_final_intent(intent_path, transaction_directory, marker_snapshot)
+
+
+def test_root_anchor_rebuild_rejects_changed_private_marker(tmp_path: Path) -> None:
+    final_path = tmp_path / ".report-output-transaction.fixture" / "intent.completed"
+    final_path.parent.mkdir()
+    final_path.write_bytes(b"original marker\n")
+    marker_snapshot = report_module._prepared_report_snapshot(final_path)
+    final_path.write_bytes(b"changed marker\n")
+
+    with pytest.raises(OSError, match="changed before rebuilding"):
+        report_module._claim_root_committed_intent(final_path, tmp_path, marker_snapshot)
+
+
+def test_terminal_cleanup_rejects_registered_root_payload(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    intent = report_module._decode_report_intent(_valid_report_transaction_intent_raw())
+    (manifests / intent.outputs[0].prepared_name).write_bytes(b"remaining payload\n")
+
+    with pytest.raises(OSError, match="root payload remains"):
+        report_module._require_registered_root_payloads_absent(manifests, intent)
+
+
+@pytest.mark.parametrize("case", ("missing", "changed"))
+def test_owned_report_cleanup_rejects_missing_or_changed_file(tmp_path: Path, case: str) -> None:
+    path = tmp_path / "owned-report-artifact"
+    if case == "changed":
+        path.write_bytes(b"current artifact\n")
+        current = report_module._prepared_report_snapshot(path)
+        expected = replace(
+            report_module._ReportSnapshotIdentity.from_snapshot(current),
+            sha256="0" * 64,
+        )
+    else:
+        expected = report_module._ReportSnapshotIdentity(
+            device=0,
+            inode=0,
+            mode=stat.S_IFREG | 0o600,
+            size=0,
+            sha256=hashlib.sha256(b"").hexdigest(),
+        )
+
+    with pytest.raises(OSError, match="owned report transaction file"):
+        report_module._delete_owned_report_file(path, expected)
+
+
+def test_owned_report_cleanup_rejects_replaced_transaction_directory(tmp_path: Path) -> None:
+    directory = tmp_path / ".report-output-transaction.fixture"
+    directory.mkdir()
+    expected = replace(
+        report_module._directory_identity(directory), inode=directory.stat().st_ino + 1
+    )
+
+    with pytest.raises(OSError, match="directory identity changed"):
+        report_module._remove_owned_transaction_directory(directory, expected)
 
 
 def _copy_config(project: Path) -> None:
@@ -1681,6 +2148,127 @@ def test_report_output_pair_rolls_back_when_second_publication_fails(
     assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
 
 
+def _inject_markdown_report_publication_failure(
+    paths: CorpusPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    real_publish = report_module._publish_report_output
+    markdown_path = paths.manifests / "report.md"
+
+    def fail_markdown_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
+            raise OSError("injected Markdown publication failure")
+        return real_publish(temporary, target, old=old, prepared=prepared)
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_markdown_publication)
+    return real_publish
+
+
+def test_rolled_back_handoff_survives_hard_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    old_pair = tuple((paths.manifests / name).read_bytes() for name in ("report.json", "report.md"))
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = _inject_markdown_report_publication_failure(paths, monkeypatch)
+    real_claim = getattr(
+        report_module,
+        "_claim_rolled_back_intent",
+        report_module._claim_completed_intent,
+    )
+
+    def crash_after_rolled_back_handoff(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        real_claim(intent_path, transaction_directory, marker_snapshot)
+        raise SystemExit("simulated rolled-back handoff crash")
+
+    monkeypatch.setattr(
+        report_module,
+        "_claim_rolled_back_intent",
+        crash_after_rolled_back_handoff,
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit, match="rolled-back handoff crash"):
+        build_report(paths, config)
+
+    rolled_back = paths.manifests / ".report-output-transaction.rolled-back.json"
+    assert rolled_back.is_file()
+    assert (
+        tuple((paths.manifests / name).read_bytes() for name in ("report.json", "report.md"))
+        == old_pair
+    )
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    monkeypatch.setattr(report_module, "_claim_rolled_back_intent", real_claim)
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not rolled_back.exists()
+
+
+def test_rolled_back_cleanup_resumes_after_first_payload_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = _inject_markdown_report_publication_failure(paths, monkeypatch)
+    real_delete = report_module._delete_owned_report_file
+    crashed = False
+
+    def crash_after_first_rolled_back_payload_delete(
+        path: Path,
+        expected: report_module._ReportSnapshotIdentity,
+        *,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal crashed
+        is_rolled_back_payload = (
+            path.parent == paths.manifests
+            and path.name.startswith(".report.json.")
+            and (paths.manifests / ".report-output-transaction.rolled-back.json").is_file()
+        )
+        real_delete(path, expected, missing_ok=missing_ok)
+        if is_rolled_back_payload and not crashed:
+            crashed = True
+            raise SystemExit("simulated rolled-back payload cleanup crash")
+
+    monkeypatch.setattr(
+        report_module,
+        "_delete_owned_report_file",
+        crash_after_first_rolled_back_payload_delete,
+    )
+
+    with pytest.raises(SystemExit, match="rolled-back payload cleanup crash"):
+        build_report(paths, config)
+
+    assert crashed
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    monkeypatch.setattr(report_module, "_delete_owned_report_file", real_delete)
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
+
+
 @pytest.mark.parametrize("target_name", ("report.json", "report.md"))
 def test_first_report_publication_does_not_clobber_concurrent_file(
     tmp_path: Path,
@@ -2135,7 +2723,7 @@ def test_report_output_pair_surfaces_rollback_failure(
     monkeypatch.setattr(report_module, "_publish_report_output", fail_publication)
     monkeypatch.setattr(report_module.os, "link", fail_json_restore)
 
-    with pytest.raises(report_module.ReportOutputRecoveryError, match="rollback failed") as failure:
+    with pytest.raises(report_module.ReportOutputRecoveryError, match="recovery failed") as failure:
         build_report(paths, config)
 
     assert isinstance(failure.value.__cause__, OSError)
@@ -2143,6 +2731,11 @@ def test_report_output_pair_surfaces_rollback_failure(
     assert recovery_backups
     assert any(path.read_bytes() in before for path in recovery_backups)
     for path in recovery_backups:
+        assert f"manifests/{path.name}" in str(failure.value)
+    recovery_restores = tuple(paths.manifests.glob(".restore.*"))
+    assert recovery_restores
+    for path in recovery_restores:
+        assert path in failure.value.recovery_paths
         assert f"manifests/{path.name}" in str(failure.value)
 
 
@@ -2198,7 +2791,8 @@ def test_report_cli_uses_dedicated_recovery_code_without_absolute_paths(
     _copy_config(tmp_path)
     manifests = tmp_path / "local-data" / "manifests"
     backup = manifests / ".recovery.report.json.fixture"
-    error = report_module.ReportOutputRecoveryError((backup,), manifests_root=manifests)
+    outside = tmp_path / "outside-recovery-evidence"
+    error = report_module.ReportOutputRecoveryError((backup, outside), manifests_root=manifests)
     monkeypatch.setattr(
         cli,
         "build_report",
@@ -2209,6 +2803,7 @@ def test_report_cli_uses_dedicated_recovery_code_without_absolute_paths(
     stderr = capsys.readouterr().err
     assert stderr.startswith("REPORT_OUTPUT_RECOVERY_REQUIRED:")
     assert "manifests/.recovery.report.json.fixture" in stderr
+    assert "manifests/<invalid-recovery-path>" in stderr
     assert str(tmp_path.resolve()) not in stderr
 
 
@@ -2338,6 +2933,60 @@ def test_report_recovers_durable_intent_left_after_json_publication(
         encoding="utf-8"
     )
     assert not intent_path.exists()
+
+
+def test_active_recovery_resumes_registered_restore_after_hard_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    markdown_path = paths.manifests / "report.md"
+    old_pair = (json_path.read_bytes(), markdown_path.read_bytes())
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+    real_restore = report_module._restore_old_report_output
+    crashed = False
+
+    def fail_markdown_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
+            raise OSError("injected Markdown publication failure")
+        return real_publish(temporary, target, old=old, prepared=prepared)
+
+    def crash_after_json_restore(
+        manifests: Path,
+        transaction_directory: Path,
+        output: report_module._ReportTransactionOutput,
+    ) -> report_module._ReportOutputSnapshot | None:
+        nonlocal crashed
+        restored = real_restore(manifests, transaction_directory, output)
+        if output.target_name == "report.json" and not crashed:
+            crashed = True
+            raise SystemExit("simulated rollback hard exit")
+        return restored
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_markdown_publication)
+    monkeypatch.setattr(report_module, "_restore_old_report_output", crash_after_json_restore)
+    with pytest.raises(SystemExit, match="rollback hard exit"):
+        build_report(paths, config)
+
+    assert crashed
+    assert (json_path.read_bytes(), markdown_path.read_bytes()) == old_pair
+    assert (paths.manifests / ".report-output-transaction.json").is_file()
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    monkeypatch.setattr(report_module, "_restore_old_report_output", real_restore)
+    report = build_report(paths, config)
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == report.to_dict()
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
 
 
 def test_report_rejects_malformed_recovery_intent_before_evidence_validation(
@@ -2477,6 +3126,622 @@ def test_report_recovery_rejects_unregistered_private_transaction_path_before_ev
     assert intent_path.is_file()
 
 
+def test_report_handoff_revalidates_pair_before_destroying_backups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    old_json = json_path.read_bytes()
+    foreign = b"foreign JSON after intent handoff\n"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_claim = report_module._claim_completed_intent
+    real_replace = report_module.os.replace
+    injected = False
+
+    def claim_then_replace_json(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        nonlocal injected
+        result = real_claim(intent_path, transaction_directory, marker_snapshot)
+        replacement = json_path.with_name("foreign.after-handoff.json")
+        replacement.write_bytes(foreign)
+        real_replace(replacement, json_path)
+        injected = True
+        return result
+
+    monkeypatch.setattr(report_module, "_claim_completed_intent", claim_then_replace_json)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert injected
+    assert json_path.read_bytes() == foreign
+    assert any(
+        path.is_file() and path.read_bytes() == old_json for path in failure.value.recovery_paths
+    )
+    assert (paths.manifests / ".report-output-transaction.completed.json").is_file()
+
+
+def test_committed_handoff_before_private_anchor_recovers_after_hard_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_claim = report_module._claim_completed_intent
+
+    def crash_after_committed_handoff(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        real_claim(intent_path, transaction_directory, marker_snapshot)
+        raise SystemExit("simulated committed handoff crash")
+
+    monkeypatch.setattr(report_module, "_claim_completed_intent", crash_after_committed_handoff)
+    with pytest.raises(SystemExit, match="committed handoff crash"):
+        build_report(paths, config)
+
+    committed = paths.manifests / ".report-output-transaction.completed.json"
+    assert committed.is_file()
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*/intent.completed"))
+    monkeypatch.setattr(report_module, "_claim_completed_intent", real_claim)
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not committed.exists()
+
+
+def test_final_report_verification_failure_is_not_masked_by_unpublished_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    json_path = paths.manifests / "report.json"
+    foreign = b"foreign JSON at final verification\n"
+    real_require = report_module._require_report_output_snapshot
+    real_replace = report_module.os.replace
+    injected = False
+
+    def replace_before_final_verification(
+        path: Path,
+        expected: report_module._ReportOutputSnapshot | None,
+        *,
+        operation: str,
+    ) -> None:
+        nonlocal injected
+        if path == json_path and operation == "final report commit" and not injected:
+            replacement = json_path.with_name("foreign.final-verification.json")
+            replacement.write_bytes(foreign)
+            real_replace(replacement, json_path)
+            injected = True
+        real_require(path, expected, operation=operation)
+
+    monkeypatch.setattr(
+        report_module,
+        "_require_report_output_snapshot",
+        replace_before_final_verification,
+    )
+
+    with pytest.raises(OSError, match="changed before final report commit"):
+        build_report(paths, config)
+
+    assert injected
+    assert json_path.read_bytes() == foreign
+
+
+def test_existing_report_same_bytes_new_inode_is_not_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    old_json = json_path.read_bytes()
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_rename = report_module.os.rename
+    real_replace = report_module.os.replace
+    injected = False
+
+    def replace_source_before_claim(source: Path, destination: Path) -> None:
+        nonlocal injected
+        if Path(source) == json_path and Path(destination).name == "report.json.displaced":
+            replacement = paths.manifests / "same-bytes-new-inode.json"
+            replacement.write_bytes(old_json)
+            real_replace(replacement, json_path)
+            injected = True
+        real_rename(source, destination)
+
+    monkeypatch.setattr(
+        report_module,
+        "_rename_noreplace",
+        replace_source_before_claim,
+        raising=False,
+    )
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert injected
+    assert any(
+        path.is_file() and path.read_bytes() == old_json
+        for path in (json_path, *failure.value.recovery_paths)
+    )
+
+
+def test_report_claim_destination_race_is_no_clobber(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_noreplace = getattr(report_module, "_rename_noreplace", report_module.os.rename)
+    foreign = b"foreign private claim destination\n"
+    injected_path: Path | None = None
+
+    def occupy_destination_before_claim(source: Path, destination: Path) -> None:
+        nonlocal injected_path
+        if Path(destination).name == "report.json.displaced" and injected_path is None:
+            injected_path = Path(destination)
+            injected_path.write_bytes(foreign)
+        real_noreplace(source, destination)
+
+    monkeypatch.setattr(
+        report_module,
+        "_rename_noreplace",
+        occupy_destination_before_claim,
+        raising=False,
+    )
+
+    with pytest.raises(report_module.ReportOutputRecoveryError):
+        build_report(paths, config)
+
+    assert injected_path is not None
+    assert injected_path.read_bytes() == foreign
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    (
+        ("unregistered.after-completion", b"unregistered cleanup evidence\n"),
+        ("report.json.rollback-current", b"foreign allowed-name evidence\n"),
+    ),
+)
+def test_committed_cleanup_rejects_foreign_private_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    content: bytes,
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_claim = report_module._claim_completed_intent
+    injected_path: Path | None = None
+
+    def claim_then_inject(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        nonlocal injected_path
+        result = real_claim(intent_path, transaction_directory, marker_snapshot)
+        injected_path = transaction_directory / name
+        injected_path.write_bytes(content)
+        return result
+
+    monkeypatch.setattr(report_module, "_claim_completed_intent", claim_then_inject)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert injected_path is not None
+    assert injected_path.read_bytes() == content
+    assert tuple(paths.manifests.glob(".recovery.report.*"))
+    assert (
+        paths.manifests / ".report-output-transaction.completed.json"
+    ) in failure.value.recovery_paths
+
+
+@pytest.mark.parametrize("remove_root_marker", (False, True))
+def test_report_recovers_completed_marker_orphan_on_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remove_root_marker: bool,
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_claim = report_module._claim_final_intent
+
+    def crash_after_completed_claim(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        real_claim(intent_path, transaction_directory, marker_snapshot)
+        raise SystemExit("simulated completed-marker crash")
+
+    monkeypatch.setattr(report_module, "_claim_final_intent", crash_after_completed_claim)
+    with pytest.raises(SystemExit, match="completed-marker crash"):
+        build_report(paths, config)
+
+    assert tuple(paths.manifests.glob(".report-output-transaction.*/intent.completed"))
+    if remove_root_marker:
+        (paths.manifests / ".report-output-transaction.completed.json").unlink()
+    monkeypatch.setattr(report_module, "_claim_final_intent", real_claim)
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
+
+
+def test_report_resumes_committed_cleanup_after_one_payload_was_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_delete = report_module._delete_owned_report_file
+    crashed = False
+
+    def crash_after_first_committed_payload_delete(
+        path: Path,
+        expected: report_module._ReportSnapshotIdentity,
+        *,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal crashed
+        is_committed_payload = (
+            path.parent == paths.manifests
+            and path.name.startswith(".report.json.")
+            and (paths.manifests / ".report-output-transaction.completed.json").is_file()
+            and bool(tuple(paths.manifests.glob(".report-output-transaction.*/intent.completed")))
+        )
+        real_delete(path, expected, missing_ok=missing_ok)
+        if is_committed_payload and not crashed:
+            crashed = True
+            raise SystemExit("simulated partial committed cleanup")
+
+    monkeypatch.setattr(
+        report_module,
+        "_delete_owned_report_file",
+        crash_after_first_committed_payload_delete,
+    )
+    with pytest.raises(SystemExit, match="partial committed cleanup"):
+        build_report(paths, config)
+
+    assert crashed
+    assert (paths.manifests / ".report-output-transaction.completed.json").is_file()
+    monkeypatch.setattr(report_module, "_delete_owned_report_file", real_delete)
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
+
+
+def test_redundant_committed_markers_must_share_full_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_claim = report_module._claim_final_intent
+
+    def crash_after_final_anchor(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        real_claim(intent_path, transaction_directory, marker_snapshot)
+        raise SystemExit("simulated redundant-marker crash")
+
+    monkeypatch.setattr(report_module, "_claim_final_intent", crash_after_final_anchor)
+    with pytest.raises(SystemExit, match="redundant-marker crash"):
+        build_report(paths, config)
+
+    final_marker = next(paths.manifests.glob(".report-output-transaction.*/intent.completed"))
+    replacement = final_marker.with_name("replacement.intent.completed")
+    replacement.write_bytes(final_marker.read_bytes())
+    report_module.os.replace(replacement, final_marker)
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_claim_final_intent", real_claim)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert final_marker.is_file()
+    assert final_marker in failure.value.recovery_paths
+    assert (paths.manifests / ".report-output-transaction.completed.json").is_file()
+
+
+def test_root_committed_marker_survives_private_directory_cleanup_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_delete = report_module._delete_owned_report_file
+    foreign_path: Path | None = None
+
+    def inject_after_private_marker_delete(
+        path: Path,
+        expected: report_module._ReportSnapshotIdentity,
+        *,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal foreign_path
+        real_delete(path, expected, missing_ok=missing_ok)
+        if path.name == "intent.completed" and foreign_path is None:
+            foreign_path = path.parent / "foreign-after-private-marker"
+            foreign_path.write_bytes(b"foreign private cleanup race\n")
+
+    monkeypatch.setattr(
+        report_module,
+        "_delete_owned_report_file",
+        inject_after_private_marker_delete,
+    )
+
+    with pytest.raises(report_module.ReportOutputRecoveryError):
+        build_report(paths, config)
+
+    assert foreign_path is not None
+    assert foreign_path.read_bytes() == b"foreign private cleanup race\n"
+    assert (paths.manifests / ".report-output-transaction.completed.json").is_file()
+
+
+def _leave_outcome_marker_after_private_directory_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> tuple[CorpusPaths, CorpusConfig, Path]:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+    if outcome == "rolled-back":
+        real_publish = _inject_markdown_report_publication_failure(paths, monkeypatch)
+    marker_name = {
+        "rolled-back": ".report-output-transaction.rolled-back.json",
+        "committed": ".report-output-transaction.completed.json",
+    }[outcome]
+    marker = paths.manifests / marker_name
+    real_remove = report_module._remove_owned_transaction_directory
+    crashed = False
+
+    def crash_after_outcome_directory_removal(
+        directory: Path,
+        expected_identity: report_module._ReportDirectoryIdentity,
+    ) -> None:
+        nonlocal crashed
+        real_remove(directory, expected_identity)
+        if marker.is_file() and not crashed:
+            crashed = True
+            raise SystemExit(f"simulated {outcome} terminal cleanup crash")
+
+    monkeypatch.setattr(
+        report_module,
+        "_remove_owned_transaction_directory",
+        crash_after_outcome_directory_removal,
+    )
+    with pytest.raises(SystemExit, match=f"{outcome} terminal cleanup crash"):
+        build_report(paths, config)
+
+    assert crashed
+    assert marker.is_file()
+    monkeypatch.setattr(report_module, "_remove_owned_transaction_directory", real_remove)
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    return paths, config, marker
+
+
+@pytest.mark.parametrize("outcome", ("rolled-back", "committed"))
+def test_terminal_outcome_marker_recovers_after_private_directory_hard_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    paths, config, marker = _leave_outcome_marker_after_private_directory_removal(
+        tmp_path,
+        monkeypatch,
+        outcome,
+    )
+
+    report = build_report(paths, config)
+
+    assert json.loads((paths.manifests / "report.json").read_text(encoding="utf-8")) == (
+        report.to_dict()
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("outcome", ("rolled-back", "committed"))
+def test_terminal_outcome_rejects_corrupted_authoritative_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    paths, config, marker = _leave_outcome_marker_after_private_directory_removal(
+        tmp_path,
+        monkeypatch,
+        outcome,
+    )
+    json_path = paths.manifests / "report.json"
+    replacement = json_path.with_name("foreign.terminal-report.json")
+    replacement.write_bytes(b"foreign terminal report\n")
+    report_module.os.replace(replacement, json_path)
+    (paths.manifests / "pilot-telemetry.json").unlink()
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert marker.is_file()
+    assert marker in failure.value.recovery_paths
+
+
+def test_report_rejects_corrupted_completed_marker_orphan_before_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    json_path = paths.manifests / "report.json"
+    real_claim = report_module._claim_final_intent
+
+    def crash_after_completed_claim(
+        intent_path: Path,
+        transaction_directory: Path,
+        marker_snapshot: report_module._ReportOutputSnapshot,
+    ) -> object:
+        real_claim(intent_path, transaction_directory, marker_snapshot)
+        raise SystemExit("simulated corrupted-completed crash")
+
+    monkeypatch.setattr(report_module, "_claim_final_intent", crash_after_completed_claim)
+    with pytest.raises(SystemExit, match="corrupted-completed crash"):
+        build_report(paths, config)
+
+    json_path.write_bytes(b"corrupted committed report\n")
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_claim_final_intent", real_claim)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert tuple(paths.manifests.glob(".recovery.report.*"))
+    assert any(path.name == "intent.completed" for path in failure.value.recovery_paths)
+
+
+def test_active_intent_requires_every_prepared_output_before_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+
+    def crash_before_first_publication(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit("simulated active-intent crash")
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_before_first_publication)
+    with pytest.raises(SystemExit, match="active-intent crash"):
+        build_report(paths, config)
+
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    prepared = paths.manifests / intent["outputs"][0]["prepared_name"]
+    prepared.unlink()
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert intent_path.is_file()
+    assert intent_path in failure.value.recovery_paths
+
+
+def test_active_intent_rejects_same_name_transaction_directory_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+
+    def crash_before_first_publication(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit("simulated directory-replacement crash")
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_before_first_publication)
+    with pytest.raises(SystemExit, match="directory-replacement crash"):
+        build_report(paths, config)
+
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    transaction_directory = paths.manifests / intent["transaction_directory"]
+    preserved_owned_directory = transaction_directory.with_name(
+        f"preserved-{transaction_directory.name}"
+    )
+    transaction_directory.rename(preserved_owned_directory)
+    transaction_directory.mkdir()
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert transaction_directory.is_dir()
+    assert intent_path.is_file()
+    assert transaction_directory in failure.value.recovery_paths
+
+
+def test_active_and_committed_markers_are_rejected_as_ambiguous_before_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+
+    def crash_before_first_publication(*_args: object, **_kwargs: object) -> object:
+        raise SystemExit("simulated ambiguous-marker crash")
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_before_first_publication)
+    with pytest.raises(SystemExit, match="ambiguous-marker crash"):
+        build_report(paths, config)
+
+    active = paths.manifests / ".report-output-transaction.json"
+    committed = paths.manifests / ".report-output-transaction.completed.json"
+    report_module.os.link(active, committed)
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert active.is_file()
+    assert committed.is_file()
+    assert active in failure.value.recovery_paths
+    assert committed in failure.value.recovery_paths
+
+
 def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2516,7 +3781,7 @@ def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
     monkeypatch.setattr(report_module.os, "link", fail_json_restore)
     monkeypatch.setattr(type(telemetry_path), "unlink", fail_report_temporary_cleanup)
 
-    with pytest.raises(OSError, match="rollback failed") as failure:
+    with pytest.raises(OSError, match="recovery failed") as failure:
         build_report(paths, config)
 
     assert isinstance(failure.value.__cause__, OSError)
@@ -2527,7 +3792,7 @@ def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
         assert f"manifests/{path.name}" in str(failure.value)
 
 
-@pytest.mark.parametrize("failed_prepare_call", (2, 3, 4))
+@pytest.mark.parametrize("failed_prepare_call", (2, 3, 4, 5, 6))
 def test_report_output_pair_preserves_existing_files_when_preparation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
