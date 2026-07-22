@@ -213,6 +213,28 @@ def test_persist_transitions_preserves_unchanged_recordings_without_events(
     assert read_jsonl(recordings_path) == (updated.to_dict(), unselected.to_dict())
 
 
+def test_persist_transitions_rejects_reordered_non_event_recording_without_writes(
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    unselected = _other_recording()
+    before = (original.to_dict(), unselected.to_dict())
+    write_jsonl_atomic(recordings_path, before)
+
+    with pytest.raises(ValueError, match="recording order must remain unchanged"):
+        store.persist_recording_transitions(
+            recordings_path=recordings_path,
+            events_path=events_path,
+            recordings=(unselected, updated),
+            events=(event,),
+        )
+
+    assert read_jsonl(recordings_path) == before
+    assert not events_path.exists()
+
+
 @pytest.mark.parametrize("field", ("state", "notes"))
 def test_persist_transitions_rejects_changes_to_recordings_without_events(
     tmp_path: Path, field: str

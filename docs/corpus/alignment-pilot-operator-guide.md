@@ -170,8 +170,12 @@ git diff --cached --name-only
 
 所有恢复都应先修正输入或环境，再原样重跑失败命令。内容寻址缓存和处理事件负责安全复用；
 不要通过删除 `local-data/raw/`、手工改状态或伪造 JSON 来“越过”错误。
-如果 `report` 报错列出以 `.recovery.` 开头的备份，不要删除这些文件；按报错给出的绝对路径
-核对并恢复旧的 `report.json` / `report.md` 文件对，再重新运行 `report`。
+`report` 在发布双文件前会持久化 `.report-output-transaction.json`；若进程中断，下一次
+`report` 会在读取新的评测证据前先恢复未完成事务。只有恢复无法安全自动完成时才返回
+`REPORT_OUTPUT_RECOVERY_REQUIRED`。此时不要删除 `.report-output-transaction.json`、
+`.report-output-transaction.*` 或以 `.recovery.` 开头的备份；按报错给出的
+`manifests/...` 相对位置核对旧的 `report.json` / `report.md` 文件对，再重新运行
+`report`。CLI 不得输出项目绝对路径，避免在日志中暴露本机目录。
 
 | 错误码 | 恢复动作 |
 | --- | --- |
@@ -191,6 +195,7 @@ git diff --cached --name-only
 | `ALIGNMENT_LOW_CONFIDENCE` | 复核文本和音频，检查模型/runtime；不得自动批准。 |
 | `AUDIO_QUALITY_REJECTED` | 核对源媒体和转码环境；保留 raw，不做破坏性降噪覆盖。 |
 | `CACHE_ARTIFACT_INVALID` | 停止并调查哈希、来源链或中断恢复；只清理已确认损坏的派生缓存。 |
+| `REPORT_OUTPUT_RECOVERY_REQUIRED` | 保留 intent、private claim 与 `.recovery.` 证据；核对报错中的 `manifests/...` 相对位置，恢复完整同代报告对后原样重跑。 |
 | `REVIEW_REQUIRED` | 完成缺失的人工 decision/边界审核，再导入并重跑。 |
 | `MANIFEST_SCHEMA_MISMATCH` | 按当前 schema 修正字段、版本或交叉引用；不要手改状态跳级。 |
 

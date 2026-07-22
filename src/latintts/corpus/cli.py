@@ -51,7 +51,7 @@ from latintts.corpus.records import (
     advance_recording,
     require_exact_fields,
 )
-from latintts.corpus.report import build_report
+from latintts.corpus.report import ReportOutputRecoveryError, build_report
 from latintts.corpus.review import (
     _require_canonical_descendant,
     export_review_bundle,
@@ -2256,6 +2256,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except CorpusFailure as error:
             print(f"{error.code}: {error}", file=sys.stderr)
             return 1
+        except ReportOutputRecoveryError as error:
+            print(f"{error.code}: {error}", file=sys.stderr)
+            return 2
         except (OSError, TypeError, ValueError) as error:
             print(f"MANIFEST_SCHEMA_MISMATCH: {error}", file=sys.stderr)
             return 2

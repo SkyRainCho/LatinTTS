@@ -423,6 +423,8 @@ def _persist_recording_transitions_locked(
     existing_by_id = {row.get("recording_id"): row for row in existing_rows}
     if len(existing_by_id) != len(existing_rows) or set(existing_by_id) != set(target_by_id):
         raise ValueError("target manifest recording_id set and count must remain unchanged")
+    if tuple(existing_by_id) != tuple(target_by_id):
+        raise ValueError("recording order must remain unchanged")
     for recording_id, target_record in target_by_id.items():
         existing_row = existing_by_id[recording_id]
         target_row = target_record.to_dict()

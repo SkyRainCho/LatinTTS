@@ -354,6 +354,20 @@ def _first_review_automatic_path(paths: object, config: object) -> Path:
     return next(review_root.glob("*/automatic.json"))
 
 
+def _first_analysis_audio_path(paths: object, config: object) -> Path:
+    segmentation = json.loads(
+        (_first_selected_run_directory(paths, config) / "segmentation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return paths.resolve_local(segmentation["analysis_audio"]["relative_path"])  # type: ignore[attr-defined]
+
+
+def _first_lossless_audio_path(paths: object) -> Path:
+    segment = read_jsonl(paths.manifests / "segments.jsonl")[0]  # type: ignore[attr-defined]
+    return paths.resolve_local(segment["derived_audio_relative_path"])  # type: ignore[attr-defined]
+
+
 def _completed_project_with_unselected_spoken(tmp_path: Path) -> tuple[object, object]:
     paths, config = _two_recording_aligned_project(tmp_path)
     _write_rights(paths)
@@ -444,6 +458,64 @@ def test_build_report_rejects_unselected_spoken_metadata_drift(tmp_path: Path) -
 
     with pytest.raises(ValueError, match=r"inventory.*evidence|terminal.*evidence"):
         build_report(paths, config)
+
+
+@pytest.mark.parametrize("artifact", ("analysis", "lossless"))
+@pytest.mark.parametrize("tamper", ("changed", "missing"))
+def test_build_report_rejects_missing_or_tampered_derived_audio_without_publishing(
+    tmp_path: Path, artifact: str, tamper: str
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    output_paths = (paths.manifests / "report.json", paths.manifests / "report.md")
+    before = tuple(path.read_bytes() for path in output_paths)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    audio_path = (
+        _first_analysis_audio_path(paths, config)
+        if artifact == "analysis"
+        else _first_lossless_audio_path(paths)
+    )
+    if tamper == "changed":
+        audio_path.write_bytes(audio_path.read_bytes() + b"tampered")
+    else:
+        audio_path.unlink()
+
+    with pytest.raises(CorpusFailure) as failure:
+        build_report(paths, config)
+
+    assert failure.value.code == "CACHE_ARTIFACT_INVALID"
+    assert tuple(path.read_bytes() for path in output_paths) == before
+
+
+@pytest.mark.parametrize("artifact", ("analysis", "lossless"))
+def test_build_report_rejects_derived_audio_alias_without_publishing(
+    tmp_path: Path, artifact: str
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    write_jsonl_atomic(paths.manifests / "pilot-telemetry.json", (_telemetry_row(),))
+    build_report(paths, config)
+    output_paths = (paths.manifests / "report.json", paths.manifests / "report.md")
+    before = tuple(path.read_bytes() for path in output_paths)
+    audio_path = (
+        _first_analysis_audio_path(paths, config)
+        if artifact == "analysis"
+        else _first_lossless_audio_path(paths)
+    )
+    real_path = audio_path.with_name(f"real-{audio_path.name}")
+    audio_path.replace(real_path)
+    try:
+        audio_path.symlink_to(real_path)
+    except OSError as error:
+        real_path.replace(audio_path)
+        pytest.skip(f"symlink creation is unavailable: {error}")
+
+    with pytest.raises(CorpusFailure) as failure:
+        build_report(paths, config)
+
+    assert failure.value.code == "CACHE_ARTIFACT_INVALID"
+    assert tuple(path.read_bytes() for path in output_paths) == before
 
 
 @pytest.mark.parametrize(
@@ -1571,7 +1643,7 @@ def test_rejection_reason_comes_from_final_effective_rejection(tmp_path: Path) -
     assert report.approved_segment_count == 11
 
 
-def test_report_output_pair_rolls_back_when_second_replace_fails(
+def test_report_output_pair_rolls_back_when_second_publication_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths, config = _completed_two_recording_project(tmp_path)
@@ -1582,23 +1654,31 @@ def test_report_output_pair_rolls_back_when_second_replace_fails(
     markdown_path = paths.manifests / "report.md"
     before = (json_path.read_bytes(), markdown_path.read_bytes())
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
-    real_replace = report_module.os.replace
+    real_publish = report_module._publish_report_output
     failed = False
 
-    def fail_markdown_once(source: Path, destination: Path) -> None:
+    def fail_markdown_once(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
         nonlocal failed
-        if Path(destination) == markdown_path and not failed:
+        if target == markdown_path and not failed:
             failed = True
-            raise OSError("injected second replace failure")
-        real_replace(source, destination)
+            raise OSError("injected second publication failure")
+        return real_publish(temporary, target, old=old, prepared=prepared)
 
-    monkeypatch.setattr(report_module.os, "replace", fail_markdown_once)
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_markdown_once)
 
-    with pytest.raises(OSError, match="injected second replace failure"):
+    with pytest.raises(OSError, match="injected second publication failure"):
         build_report(paths, config)
 
     assert (json_path.read_bytes(), markdown_path.read_bytes()) == before
     assert not tuple(paths.manifests.glob(".report.*"))
+    assert not tuple(paths.manifests.glob(".recovery.*"))
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
 
 
 @pytest.mark.parametrize("target_name", ("report.json", "report.md"))
@@ -1614,18 +1694,8 @@ def test_first_report_publication_does_not_clobber_concurrent_file(
         paths.manifests / ({"report.json": "report.md", "report.md": "report.json"}[target_name])
     )
     foreign_bytes = f"foreign {target_name}\n".encode()
-    real_replace = report_module.os.replace
     real_link = report_module.os.link
     injected = False
-
-    def inject_before_replace(
-        source: Path, destination: Path, *args: object, **kwargs: object
-    ) -> None:
-        nonlocal injected
-        if Path(destination) == target and not injected:
-            injected = True
-            target.write_bytes(foreign_bytes)
-        real_replace(source, destination, *args, **kwargs)  # type: ignore[arg-type]
 
     def inject_before_link(
         source: Path, destination: Path, *args: object, **kwargs: object
@@ -1636,15 +1706,15 @@ def test_first_report_publication_does_not_clobber_concurrent_file(
             target.write_bytes(foreign_bytes)
         real_link(source, destination, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(report_module.os, "replace", inject_before_replace)
     monkeypatch.setattr(report_module.os, "link", inject_before_link)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
         build_report(paths, config)
 
     assert injected
     assert target.read_bytes() == foreign_bytes
     assert not other.exists()
+    assert paths.manifests / ".report-output-transaction.json" in failure.value.recovery_paths
 
 
 @pytest.mark.parametrize("target_name", ("report.json", "report.md"))
@@ -1684,12 +1754,16 @@ def test_existing_report_drift_after_backup_is_rejected_before_publication(
 
     monkeypatch.setattr(report_module, "_prepare_atomic", drift_after_backup)
 
-    with pytest.raises(OSError, match="changed before publication"):
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
         build_report(paths, config)
 
     assert injected
     assert target.read_bytes() == foreign_bytes
     assert other.read_bytes() == other_before
+    assert any(
+        path.is_file() and path.read_bytes() != foreign_bytes
+        for path in failure.value.recovery_paths
+    )
 
 
 def test_report_rollback_refuses_to_overwrite_concurrent_replacement(
@@ -1705,30 +1779,29 @@ def test_report_rollback_refuses_to_overwrite_concurrent_replacement(
     old_markdown = markdown_path.read_bytes()
     foreign_bytes = b"foreign replacement after json publication\n"
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
     real_replace = report_module.os.replace
     injected = False
 
     def replace_then_take_over_before_second_publication(
-        source: Path, destination: Path, *args: object, **kwargs: object
-    ) -> None:
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
         nonlocal injected
-        source_path = Path(source)
-        destination_path = Path(destination)
-        if (
-            destination_path == markdown_path
-            and source_path.name.startswith(".report.md.")
-            and not injected
-        ):
+        if target == markdown_path and not injected:
             injected = True
             replacement = json_path.with_name("foreign.report.json")
             replacement.write_bytes(foreign_bytes)
             real_replace(replacement, json_path)
             raise OSError("injected second publication failure")
-        real_replace(source, destination, *args, **kwargs)  # type: ignore[arg-type]
+        return real_publish(temporary, target, old=old, prepared=prepared)
 
     monkeypatch.setattr(
-        report_module.os,
-        "replace",
+        report_module,
+        "_publish_report_output",
         replace_then_take_over_before_second_publication,
     )
 
@@ -1742,7 +1815,7 @@ def test_report_rollback_refuses_to_overwrite_concurrent_replacement(
     assert recovery_backups
     assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_pair_commit_revalidates_json_after_markdown_publication(
@@ -1790,7 +1863,7 @@ def test_report_pair_commit_revalidates_json_after_markdown_publication(
     assert recovery_backups
     assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_publication_snapshot_failure_preserves_old_backup(
@@ -1821,14 +1894,14 @@ def test_report_publication_snapshot_failure_preserves_old_backup(
     with pytest.raises(report_module.ReportOutputRecoveryError, match="recovery") as failure:
         build_report(paths, config)
 
-    assert "cannot be verified" in str(failure.value.__cause__)
-    assert json_path.read_bytes() != old_json
+    assert "injected published JSON snapshot failure" in str(failure.value.__cause__)
+    assert json_path.is_file()
     assert markdown_path.read_bytes() == old_markdown
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_publication_rejects_target_that_differs_from_prepared_file(
@@ -1844,39 +1917,33 @@ def test_report_publication_rejects_target_that_differs_from_prepared_file(
     old_markdown = markdown_path.read_bytes()
     foreign_bytes = b"foreign JSON before publication verification\n"
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_link = report_module.os.link
     real_replace = report_module.os.replace
     injected = False
 
-    def replace_then_take_over_json(source: Path, destination: Path) -> None:
+    def link_then_take_over_json(source: Path, destination: Path) -> None:
         nonlocal injected
-        source_path = Path(source)
-        if (
-            Path(destination) == json_path
-            and source_path.name.startswith(".report.json.")
-            and not injected
-        ):
-            real_replace(source, destination)
+        real_link(source, destination)
+        if Path(destination) == json_path and not injected:
             replacement = json_path.with_name("foreign.report.json")
             replacement.write_bytes(foreign_bytes)
             real_replace(replacement, json_path)
             injected = True
-            return
-        real_replace(source, destination)
 
-    monkeypatch.setattr(report_module.os, "replace", replace_then_take_over_json)
+    monkeypatch.setattr(report_module.os, "link", link_then_take_over_json)
 
     with pytest.raises(report_module.ReportOutputRecoveryError, match="recovery") as failure:
         build_report(paths, config)
 
     assert injected
-    assert "differs from prepared" in str(failure.value.__cause__)
+    assert "foreign report output blocks recovery" in str(failure.value.__cause__)
     assert json_path.read_bytes() == foreign_bytes
     assert markdown_path.read_bytes() == old_markdown
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_pair_commit_preserves_concurrent_markdown_replacement(
@@ -1924,12 +1991,12 @@ def test_report_pair_commit_preserves_concurrent_markdown_replacement(
     assert injected
     assert json_path.read_bytes() == old_json
     assert markdown_path.read_bytes() == foreign_bytes
-    assert "ownership changed" in str(failure.value.__cause__)
+    assert "foreign report output blocks recovery" in str(failure.value.__cause__)
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     assert any(path.read_bytes() == old_markdown for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_rollback_requires_a_snapshot_for_existing_backup(
@@ -1977,14 +2044,14 @@ def test_report_rollback_requires_a_snapshot_for_existing_backup(
     with pytest.raises(report_module.ReportOutputRecoveryError, match="recovery") as failure:
         build_report(paths, config)
 
-    assert "backup is missing" in str(failure.value.__cause__)
-    assert json_path.read_bytes() != old_json
+    assert "backup is invalid" in str(failure.value.__cause__)
+    assert json_path.read_bytes() == old_json
     assert markdown_path.read_bytes() == old_markdown
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_rollback_detects_corrupted_restored_output(
@@ -1999,24 +2066,28 @@ def test_report_rollback_detects_corrupted_restored_output(
     old_markdown = markdown_path.read_bytes()
     corrupt_bytes = b"corrupt restored JSON\n"
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
-    real_replace = report_module.os.replace
+    old_json = json_path.read_bytes()
+    real_publish = report_module._publish_report_output
+    real_link = report_module.os.link
 
-    def fail_markdown_and_corrupt_json_rollback(source: Path, destination: Path) -> None:
-        source_path = Path(source)
-        destination_path = Path(destination)
-        if destination_path == markdown_path and source_path.name.startswith(".report.md."):
+    def fail_markdown_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
             raise OSError("injected Markdown publication failure")
-        if destination_path == json_path and source_path.name.startswith(".recovery.report.json."):
-            real_replace(source, destination)
-            json_path.write_bytes(corrupt_bytes)
-            return
-        real_replace(source, destination)
+        return real_publish(temporary, target, old=old, prepared=prepared)
 
-    monkeypatch.setattr(
-        report_module.os,
-        "replace",
-        fail_markdown_and_corrupt_json_rollback,
-    )
+    def corrupt_json_restore(source: Path, destination: Path) -> None:
+        real_link(source, destination)
+        if Path(destination) == json_path and Path(source).name.startswith(".restore.report.json."):
+            json_path.write_bytes(corrupt_bytes)
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_markdown_publication)
+    monkeypatch.setattr(report_module.os, "link", corrupt_json_restore)
 
     with pytest.raises(report_module.ReportOutputRecoveryError, match="recovery") as failure:
         build_report(paths, config)
@@ -2026,8 +2097,9 @@ def test_report_rollback_detects_corrupted_restored_output(
     assert markdown_path.read_bytes() == old_markdown
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
+    assert any(path.read_bytes() == old_json for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_output_pair_surfaces_rollback_failure(
@@ -2041,17 +2113,27 @@ def test_report_output_pair_surfaces_rollback_failure(
     markdown_path = paths.manifests / "report.md"
     before = (json_path.read_bytes(), markdown_path.read_bytes())
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
-    real_replace = report_module.os.replace
+    real_publish = report_module._publish_report_output
+    real_link = report_module.os.link
 
-    def fail_publication_and_rollback(source: Path, destination: Path) -> None:
-        source_path = Path(source)
-        if Path(destination) == markdown_path and source_path.name.startswith(".report.md."):
+    def fail_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
             raise OSError("injected publication failure")
-        if Path(destination) == json_path and source_path.name.startswith(".recovery.report.json."):
-            raise OSError("injected rollback failure")
-        real_replace(source, destination)
+        return real_publish(temporary, target, old=old, prepared=prepared)
 
-    monkeypatch.setattr(report_module.os, "replace", fail_publication_and_rollback)
+    def fail_json_restore(source: Path, destination: Path) -> None:
+        if Path(destination) == json_path and Path(source).name.startswith(".restore.report.json."):
+            raise OSError("injected rollback failure")
+        real_link(source, destination)
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_publication)
+    monkeypatch.setattr(report_module.os, "link", fail_json_restore)
 
     with pytest.raises(report_module.ReportOutputRecoveryError, match="rollback failed") as failure:
         build_report(paths, config)
@@ -2061,7 +2143,7 @@ def test_report_output_pair_surfaces_rollback_failure(
     assert recovery_backups
     assert any(path.read_bytes() in before for path in recovery_backups)
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 def test_report_cli_maps_output_recovery_failure_and_lists_backups(
@@ -2076,26 +2158,323 @@ def test_report_cli_maps_output_recovery_failure_and_lists_backups(
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
     json_path = paths.manifests / "report.json"
     markdown_path = paths.manifests / "report.md"
-    real_replace = report_module.os.replace
+    real_publish = report_module._publish_report_output
+    real_link = report_module.os.link
 
-    def fail_publication_and_rollback(source: Path, destination: Path) -> None:
-        source_path = Path(source)
-        if Path(destination) == markdown_path and source_path.name.startswith(".report.md."):
+    def fail_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
             raise OSError("injected publication failure")
-        if Path(destination) == json_path and source_path.name.startswith(".recovery.report.json."):
-            raise OSError("injected rollback failure")
-        real_replace(source, destination)
+        return real_publish(temporary, target, old=old, prepared=prepared)
 
-    monkeypatch.setattr(report_module.os, "replace", fail_publication_and_rollback)
+    def fail_json_restore(source: Path, destination: Path) -> None:
+        if Path(destination) == json_path and Path(source).name.startswith(".restore.report.json."):
+            raise OSError("injected rollback failure")
+        real_link(source, destination)
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_publication)
+    monkeypatch.setattr(report_module.os, "link", fail_json_restore)
 
     assert cli.main(["--project-root", str(tmp_path), "report"]) == 2
     stderr = capsys.readouterr().err
-    assert stderr.startswith("MANIFEST_SCHEMA_MISMATCH:")
+    assert stderr.startswith("REPORT_OUTPUT_RECOVERY_REQUIRED:")
     assert "recovery" in stderr
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     for path in recovery_backups:
-        assert str(path.resolve()) in stderr
+        assert f"manifests/{path.name}" in stderr
+
+
+def test_report_cli_uses_dedicated_recovery_code_without_absolute_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _copy_config(tmp_path)
+    manifests = tmp_path / "local-data" / "manifests"
+    backup = manifests / ".recovery.report.json.fixture"
+    error = report_module.ReportOutputRecoveryError((backup,), manifests_root=manifests)
+    monkeypatch.setattr(
+        cli,
+        "build_report",
+        lambda *_args: (_ for _ in ()).throw(error),
+    )
+
+    assert cli.main(["--project-root", str(tmp_path), "report"]) == 2
+    stderr = capsys.readouterr().err
+    assert stderr.startswith("REPORT_OUTPUT_RECOVERY_REQUIRED:")
+    assert "manifests/.recovery.report.json.fixture" in stderr
+    assert str(tmp_path.resolve()) not in stderr
+
+
+def test_existing_report_claim_race_preserves_foreign_and_old_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    markdown_path = paths.manifests / "report.md"
+    old_json = json_path.read_bytes()
+    old_markdown = markdown_path.read_bytes()
+    foreign = b"foreign writer won the claim race\n"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_rename = report_module.os.rename
+    real_replace = report_module.os.replace
+    injected = False
+
+    def replace_before_claim(source: Path, destination: Path) -> None:
+        nonlocal injected
+        if Path(source) == json_path and Path(destination).name == "report.json.displaced":
+            injected = True
+            foreign_source = paths.manifests / "foreign.report.json"
+            foreign_source.write_bytes(foreign)
+            real_replace(foreign_source, json_path)
+        real_rename(source, destination)
+
+    monkeypatch.setattr(report_module.os, "rename", replace_before_claim)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert injected
+    preserved = [
+        path.read_bytes() for path in (json_path, *failure.value.recovery_paths) if path.is_file()
+    ]
+    assert foreign in preserved
+    assert old_json in preserved
+    assert markdown_path.read_bytes() == old_markdown
+
+
+def test_failed_rollback_verification_keeps_immutable_old_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    old_json = json_path.read_bytes()
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+    real_link = report_module.os.link
+
+    def fail_markdown_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target.name == "report.md":
+            raise OSError("injected Markdown publication failure")
+        return real_publish(temporary, target, old=old, prepared=prepared)
+
+    def corrupt_restored_json(source: Path, destination: Path) -> None:
+        real_link(source, destination)
+        if Path(destination) == json_path and Path(source).name.startswith(".restore.report.json."):
+            json_path.write_bytes(b"corrupt rollback target\n")
+
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_markdown_publication)
+    monkeypatch.setattr(report_module.os, "link", corrupt_restored_json)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert any(
+        path.is_file() and path.read_bytes() == old_json for path in failure.value.recovery_paths
+    )
+
+
+def test_report_recovers_durable_intent_left_after_json_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    json_path = paths.manifests / "report.json"
+    markdown_path = paths.manifests / "report.md"
+    old_pair = (json_path.read_bytes(), markdown_path.read_bytes())
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    real_publish = report_module._publish_report_output
+    crashed = False
+
+    def crash_after_json_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        nonlocal crashed
+        published = real_publish(temporary, target, old=old, prepared=prepared)
+        if target == json_path and not crashed:
+            crashed = True
+            raise SystemExit("simulated hard exit")
+        return published
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_after_json_publication)
+    with pytest.raises(SystemExit, match="simulated hard exit"):
+        build_report(paths, config)
+
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    assert crashed
+    assert intent_path.is_file()
+    assert json_path.read_bytes() != old_pair[0]
+    assert markdown_path.read_bytes() == old_pair[1]
+
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    report = build_report(paths, config)
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == report.to_dict()
+    assert "Human review minutes / audio minute | 1.500000" in markdown_path.read_text(
+        encoding="utf-8"
+    )
+    assert not intent_path.exists()
+
+
+def test_report_rejects_malformed_recovery_intent_before_evidence_validation(
+    tmp_path: Path,
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    outputs = (paths.manifests / "report.json", paths.manifests / "report.md")
+    before = tuple(path.read_bytes() for path in outputs)
+    telemetry_path.unlink()
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    intent_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert tuple(path.read_bytes() for path in outputs) == before
+    assert intent_path in failure.value.recovery_paths
+    assert intent_path.is_file()
+
+
+def test_intent_link_followed_by_directory_sync_failure_recovers_without_dangling_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    outputs = (paths.manifests / "report.json", paths.manifests / "report.md")
+    before = tuple(path.read_bytes() for path in outputs)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    real_sync = report_module._sync_report_directory
+    injected = False
+
+    def fail_first_sync_after_intent_link(directory: Path) -> None:
+        nonlocal injected
+        if intent_path.is_file() and not injected:
+            injected = True
+            raise OSError("injected intent directory sync failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(report_module, "_sync_report_directory", fail_first_sync_after_intent_link)
+
+    with pytest.raises(OSError, match="intent directory sync failure"):
+        build_report(paths, config)
+
+    assert injected
+    assert tuple(path.read_bytes() for path in outputs) == before
+    assert not intent_path.exists()
+    assert not tuple(paths.manifests.glob(".report-output-transaction.*"))
+
+
+def test_first_report_recovers_durable_intent_left_after_json_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    write_jsonl_atomic(paths.manifests / "pilot-telemetry.json", (_telemetry_row(),))
+    json_path = paths.manifests / "report.json"
+    markdown_path = paths.manifests / "report.md"
+    real_publish = report_module._publish_report_output
+    crashed = False
+
+    def crash_after_json_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        nonlocal crashed
+        published = real_publish(temporary, target, old=old, prepared=prepared)
+        if target == json_path and not crashed:
+            crashed = True
+            raise SystemExit("simulated first-report hard exit")
+        return published
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_after_json_publication)
+    with pytest.raises(SystemExit, match="first-report hard exit"):
+        build_report(paths, config)
+
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    assert intent_path.is_file()
+    assert json_path.is_file()
+    assert not markdown_path.exists()
+
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+    report = build_report(paths, config)
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == report.to_dict()
+    assert markdown_path.is_file()
+    assert not intent_path.exists()
+
+
+def test_report_recovery_rejects_unregistered_private_transaction_path_before_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    telemetry_path = paths.manifests / "pilot-telemetry.json"
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(),))
+    build_report(paths, config)
+    write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
+    json_path = paths.manifests / "report.json"
+    real_publish = report_module._publish_report_output
+
+    def crash_after_json_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        published = real_publish(temporary, target, old=old, prepared=prepared)
+        if target == json_path:
+            raise SystemExit("simulated private-path crash")
+        return published
+
+    monkeypatch.setattr(report_module, "_publish_report_output", crash_after_json_publication)
+    with pytest.raises(SystemExit, match="private-path crash"):
+        build_report(paths, config)
+
+    intent_path = paths.manifests / ".report-output-transaction.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    private_directory = paths.manifests / intent["transaction_directory"]
+    unexpected = private_directory / "unregistered.evidence"
+    unexpected.write_bytes(b"must not be silently removed")
+    telemetry_path.unlink()
+    monkeypatch.setattr(report_module, "_publish_report_output", real_publish)
+
+    with pytest.raises(report_module.ReportOutputRecoveryError) as failure:
+        build_report(paths, config)
+
+    assert "private" in str(failure.value.__cause__)
+    assert unexpected.is_file()
+    assert intent_path.is_file()
 
 
 def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
@@ -2108,23 +2487,33 @@ def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
     write_jsonl_atomic(telemetry_path, (_telemetry_row(review_seconds=30.0),))
     json_path = paths.manifests / "report.json"
     markdown_path = paths.manifests / "report.md"
-    real_replace = report_module.os.replace
+    real_publish = report_module._publish_report_output
+    real_link = report_module.os.link
     real_unlink = type(telemetry_path).unlink
 
-    def fail_publication_and_rollback(source: Path, destination: Path) -> None:
-        source_path = Path(source)
-        if Path(destination) == markdown_path and source_path.name.startswith(".report.md."):
+    def fail_publication(
+        temporary: Path,
+        target: Path,
+        *,
+        old: report_module._ReportOutputSnapshot | None,
+        prepared: report_module._ReportOutputSnapshot,
+    ) -> report_module._ReportOutputSnapshot:
+        if target == markdown_path:
             raise OSError("injected publication failure")
-        if Path(destination) == json_path and source_path.name.startswith(".recovery.report.json."):
+        return real_publish(temporary, target, old=old, prepared=prepared)
+
+    def fail_json_restore(source: Path, destination: Path) -> None:
+        if Path(destination) == json_path and Path(source).name.startswith(".restore.report.json."):
             raise OSError("injected rollback failure")
-        real_replace(source, destination)
+        real_link(source, destination)
 
     def fail_report_temporary_cleanup(self: Path, missing_ok: bool = False) -> None:
         if self.parent == paths.manifests and self.name.startswith(".report."):
             raise OSError("injected cleanup failure")
         real_unlink(self, missing_ok=missing_ok)
 
-    monkeypatch.setattr(report_module.os, "replace", fail_publication_and_rollback)
+    monkeypatch.setattr(report_module, "_publish_report_output", fail_publication)
+    monkeypatch.setattr(report_module.os, "link", fail_json_restore)
     monkeypatch.setattr(type(telemetry_path), "unlink", fail_report_temporary_cleanup)
 
     with pytest.raises(OSError, match="rollback failed") as failure:
@@ -2135,7 +2524,7 @@ def test_report_output_cleanup_failure_does_not_mask_recovery_failure(
     recovery_backups = tuple(paths.manifests.glob(".recovery.*"))
     assert recovery_backups
     for path in recovery_backups:
-        assert str(path.resolve()) in str(failure.value)
+        assert f"manifests/{path.name}" in str(failure.value)
 
 
 @pytest.mark.parametrize("failed_prepare_call", (2, 3, 4))

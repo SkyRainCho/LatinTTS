@@ -5,7 +5,6 @@ import json
 import math
 import os
 import stat
-import sys
 import tempfile
 from collections import Counter, defaultdict
 from contextlib import suppress
@@ -65,6 +64,20 @@ _TELEMETRY_FIELDS = frozenset(
 )
 _BOUNDARY_FIELDS = frozenset({"segment_start", "segment_end"})
 _SAMPLE_RATE = 16_000
+_REPORT_INTENT_NAME = ".report-output-transaction.json"
+_REPORT_TARGET_NAMES = ("report.json", "report.md")
+_REPORT_INTENT_FIELDS = frozenset({"schema_version", "transaction_directory", "outputs"})
+_REPORT_INTENT_OUTPUT_FIELDS = frozenset(
+    {
+        "target_name",
+        "prepared_name",
+        "backup_name",
+        "old_sha256",
+        "old_size",
+        "new_sha256",
+        "new_size",
+    }
+)
 
 
 class ScaleDecision(str, Enum):
@@ -74,11 +87,21 @@ class ScaleDecision(str, Enum):
 
 
 class ReportOutputRecoveryError(OSError):
-    """A report pair could not be rolled back and preserved backups need recovery."""
+    """A durable report transaction needs operator-assisted recovery."""
 
-    def __init__(self, recovery_paths: tuple[Path, ...]) -> None:
-        self.recovery_paths = tuple(path.resolve() for path in recovery_paths)
-        locations = ", ".join(str(path) for path in self.recovery_paths) or "none remain"
+    code = "REPORT_OUTPUT_RECOVERY_REQUIRED"
+
+    def __init__(self, recovery_paths: tuple[Path, ...], *, manifests_root: Path) -> None:
+        self.recovery_paths = tuple(Path(os.path.abspath(path)) for path in recovery_paths)
+        root = manifests_root.resolve()
+        relative_locations: list[str] = []
+        for path in self.recovery_paths:
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                relative = "<invalid-recovery-path>"
+            relative_locations.append(f"manifests/{relative}")
+        locations = ", ".join(relative_locations) or "manifests/<none>"
         super().__init__(
             f"report output rollback failed; recovery required; preserved backups: {locations}"
         )
@@ -96,6 +119,34 @@ class _ReportOutputSnapshot:
     size: int
     sha256: str
     content: bytes = dataclass_field(compare=False, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportTransactionOutput:
+    target_name: str
+    prepared_name: str
+    backup_name: str | None
+    old_sha256: str | None
+    old_size: int | None
+    new_sha256: str
+    new_size: int
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportTransactionIntent:
+    schema_version: str
+    transaction_directory: str
+    outputs: tuple[_ReportTransactionOutput, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "transaction_directory": self.transaction_directory,
+            "outputs": [output.to_dict() for output in self.outputs],
+        }
 
 
 def _finite_number(value: object, field: str, *, positive: bool = False) -> float:
@@ -594,6 +645,268 @@ def _prepared_report_snapshot(path: Path) -> _ReportOutputSnapshot:
     return snapshot
 
 
+def _validate_derived_audio_file(
+    paths: CorpusPaths,
+    relative_path: str,
+    expected_sha256: str,
+    *,
+    root: Path,
+    kind: str,
+) -> None:
+    lexical_path = paths.local_data.joinpath(*relative_path.split("/"))
+    try:
+        canonical = require_canonical_descendant(
+            root,
+            lexical_path,
+            kind=kind,
+            require_file=True,
+        )
+        _validate_source_hash(canonical, expected_sha256, derived=True)
+    except CorpusFailure:
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        raise CorpusFailure("CACHE_ARTIFACT_INVALID", f"{kind} is invalid") from error
+
+
+def _canonical_intent_bytes(intent: _ReportTransactionIntent) -> bytes:
+    return (
+        json.dumps(
+            intent.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _snapshot_matches(
+    snapshot: _ReportOutputSnapshot | None,
+    sha256: str | None,
+    size: int | None,
+) -> bool:
+    if sha256 is None or size is None:
+        return snapshot is None
+    return snapshot is not None and snapshot.sha256 == sha256 and snapshot.size == size
+
+
+def _sync_report_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _transaction_directory(manifests: Path, name: str) -> Path:
+    if (
+        not isinstance(name, str)
+        or not name.startswith(".report-output-transaction.")
+        or Path(name).name != name
+        or "/" in name
+        or "\\" in name
+    ):
+        raise ValueError("report transaction directory name is invalid")
+    directory = require_canonical_descendant(
+        manifests,
+        manifests / name,
+        kind="report transaction directory",
+    )
+    metadata = os.lstat(directory)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("report transaction directory must be a directory")
+    return directory
+
+
+def _validate_transaction_private_namespace(directory: Path) -> None:
+    exact_names = {
+        "report.json.displaced",
+        "report.md.displaced",
+        "report.json.rollback-current",
+        "report.md.rollback-current",
+        "intent.completed",
+    }
+    restore_prefixes = (".restore.report.json.", ".restore.report.md.")
+    for child in directory.iterdir():
+        if child.name not in exact_names and not child.name.startswith(restore_prefixes):
+            raise ValueError("report transaction private path is not registered")
+        require_canonical_descendant(
+            directory,
+            child,
+            kind="report transaction private path",
+            require_file=True,
+        )
+
+
+def _decode_report_intent(raw: object) -> _ReportTransactionIntent:
+    if type(raw) is not dict or set(raw) != _REPORT_INTENT_FIELDS:
+        raise ValueError("report transaction intent must contain exact fields")
+    if raw.get("schema_version") != "1" or type(raw.get("schema_version")) is not str:
+        raise ValueError("report transaction intent schema_version must be '1'")
+    transaction_directory = raw.get("transaction_directory")
+    if not isinstance(transaction_directory, str):
+        raise TypeError("report transaction directory must be a string")
+    output_rows = raw.get("outputs")
+    if type(output_rows) is not list or len(output_rows) != 2:
+        raise ValueError("report transaction intent must contain exactly two outputs")
+    outputs: list[_ReportTransactionOutput] = []
+    for row in output_rows:
+        if type(row) is not dict or set(row) != _REPORT_INTENT_OUTPUT_FIELDS:
+            raise ValueError("report transaction output must contain exact fields")
+        target_name = row.get("target_name")
+        prepared_name = row.get("prepared_name")
+        backup_name = row.get("backup_name")
+        old_sha256 = row.get("old_sha256")
+        old_size = row.get("old_size")
+        new_sha256 = row.get("new_sha256")
+        new_size = row.get("new_size")
+        if target_name not in _REPORT_TARGET_NAMES or type(target_name) is not str:
+            raise ValueError("report transaction target is invalid")
+        if (
+            not isinstance(prepared_name, str)
+            or Path(prepared_name).name != prepared_name
+            or not prepared_name.startswith(f".{target_name}.")
+        ):
+            raise ValueError("report transaction prepared path is invalid")
+        if backup_name is not None and (
+            not isinstance(backup_name, str)
+            or Path(backup_name).name != backup_name
+            or not backup_name.startswith(f".recovery.{target_name}.")
+        ):
+            raise ValueError("report transaction backup path is invalid")
+        old_absent = backup_name is None and old_sha256 is None and old_size is None
+        old_present = (
+            isinstance(backup_name, str)
+            and _is_sha256(old_sha256)
+            and type(old_size) is int
+            and old_size >= 0
+        )
+        if not old_absent and not old_present:
+            raise ValueError("report transaction old output identity is invalid")
+        if not _is_sha256(new_sha256) or type(new_size) is not int or new_size < 0:
+            raise ValueError("report transaction new output identity is invalid")
+        outputs.append(
+            _ReportTransactionOutput(
+                target_name=target_name,
+                prepared_name=prepared_name,
+                backup_name=backup_name,
+                old_sha256=old_sha256,
+                old_size=old_size,
+                new_sha256=cast(str, new_sha256),
+                new_size=new_size,
+            )
+        )
+    if tuple(output.target_name for output in outputs) != _REPORT_TARGET_NAMES:
+        raise ValueError("report transaction output order is invalid")
+    return _ReportTransactionIntent("1", transaction_directory, tuple(outputs))
+
+
+def _load_report_intent(
+    manifests: Path,
+) -> tuple[_ReportTransactionIntent, Path, Path, _ReportOutputSnapshot] | None:
+    intent_path = manifests / _REPORT_INTENT_NAME
+    if not (intent_path.exists() or intent_path.is_symlink()):
+        return None
+    canonical = require_canonical_descendant(
+        manifests,
+        intent_path,
+        kind="report transaction intent",
+        require_file=True,
+    )
+    raw_bytes = canonical.read_bytes()
+    try:
+        raw = json.loads(raw_bytes)
+    except json.JSONDecodeError as error:
+        raise ValueError("report transaction intent is not valid JSON") from error
+    intent = _decode_report_intent(raw)
+    if raw_bytes != _canonical_intent_bytes(intent):
+        raise ValueError("report transaction intent is not canonical")
+    directory = _transaction_directory(manifests, intent.transaction_directory)
+    _validate_transaction_private_namespace(directory)
+    marker_snapshot = _prepared_report_snapshot(canonical)
+    for output in intent.outputs:
+        prepared_path = require_canonical_descendant(
+            manifests,
+            manifests / output.prepared_name,
+            kind="report transaction prepared output",
+        )
+        if prepared_path.exists() or prepared_path.is_symlink():
+            prepared = _prepared_report_snapshot(prepared_path)
+            if not _snapshot_matches(prepared, output.new_sha256, output.new_size):
+                raise ValueError("report transaction prepared output is invalid")
+        if output.backup_name is not None:
+            backup_path = require_canonical_descendant(
+                manifests,
+                manifests / output.backup_name,
+                kind="report transaction backup",
+                require_file=True,
+            )
+            backup = _prepared_report_snapshot(backup_path)
+            if not _snapshot_matches(backup, output.old_sha256, output.old_size):
+                raise ValueError("report transaction backup is invalid")
+    return intent, canonical, directory, marker_snapshot
+
+
+def _recovery_paths(
+    manifests: Path,
+    loaded: tuple[_ReportTransactionIntent, Path, Path, _ReportOutputSnapshot] | None,
+) -> tuple[Path, ...]:
+    candidates: list[Path] = [manifests / _REPORT_INTENT_NAME]
+    candidates.extend(manifests.glob(".recovery.report.*"))
+    candidates.extend(manifests.glob(".report-output-transaction.*"))
+    if loaded is not None:
+        intent, _marker, directory, _snapshot = loaded
+        candidates.extend(
+            manifests / output.backup_name
+            for output in intent.outputs
+            if output.backup_name is not None
+        )
+        candidates.append(directory)
+        with suppress(OSError):
+            candidates.extend(path for path in directory.iterdir())
+    unique: list[Path] = []
+    for candidate in candidates:
+        absolute = Path(os.path.abspath(candidate))
+        if (absolute.exists() or absolute.is_symlink()) and absolute not in unique:
+            unique.append(absolute)
+    return tuple(unique)
+
+
+def _claim_report_output(
+    target: Path,
+    claimed: Path,
+    *,
+    expected_sha256: str,
+    expected_size: int,
+    operation: str,
+) -> _ReportOutputSnapshot:
+    if claimed.exists() or claimed.is_symlink():
+        raise OSError(f"report output claim already exists during {operation}")
+    os.rename(target, claimed)
+    _sync_report_directory(target.parent)
+    snapshot = _prepared_report_snapshot(claimed)
+    if not _snapshot_matches(snapshot, expected_sha256, expected_size):
+        with suppress(OSError):
+            os.link(claimed, target)
+            _sync_report_directory(target.parent)
+        raise _ReportPublicationVerificationError(
+            f"report output changed before {operation}: {target.name}"
+        )
+    return snapshot
+
+
 def _publish_report_output(
     temporary: Path,
     target: Path,
@@ -601,165 +914,282 @@ def _publish_report_output(
     old: _ReportOutputSnapshot | None,
     prepared: _ReportOutputSnapshot,
 ) -> _ReportOutputSnapshot:
-    _require_report_output_snapshot(target, old, operation="publication")
+    loaded = _load_report_intent(target.parent)
+    if loaded is None:
+        raise OSError("report transaction intent is missing before publication")
+    intent, _marker, transaction_directory, _marker_snapshot = loaded
+    output = next(item for item in intent.outputs if item.target_name == target.name)
+    if temporary.name != output.prepared_name:
+        raise OSError("prepared report output does not match transaction intent")
+    current_prepared = _prepared_report_snapshot(temporary)
+    if current_prepared != prepared or not _snapshot_matches(
+        prepared, output.new_sha256, output.new_size
+    ):
+        raise OSError("prepared report output changed before publication")
     if old is None:
-        os.link(temporary, target)
+        if output.old_sha256 is not None or output.old_size is not None:
+            raise OSError("report transaction old output identity is inconsistent")
     else:
-        os.replace(temporary, target)
+        if not _snapshot_matches(old, output.old_sha256, output.old_size):
+            raise OSError("report transaction old output identity is inconsistent")
+        _claim_report_output(
+            target,
+            transaction_directory / f"{target.name}.displaced",
+            expected_sha256=old.sha256,
+            expected_size=old.size,
+            operation="publication",
+        )
+    os.link(temporary, target)
+    _sync_report_directory(target.parent)
     try:
         published = _prepared_report_snapshot(target)
-    except BaseException as error:
+    except Exception as error:
         raise _ReportPublicationVerificationError(
-            f"published report output cannot be verified: {target}"
+            f"published report output cannot be verified: {target.name}"
         ) from error
     if published != prepared:
         raise _ReportPublicationVerificationError(
-            f"published report output differs from prepared file: {target}"
+            f"published report output differs from prepared file: {target.name}"
         )
     return published
 
 
-def _rollback_report_output(
-    target: Path,
-    *,
-    old: _ReportOutputSnapshot | None,
-    published: _ReportOutputSnapshot,
-    backup: Path | None,
-    backup_snapshot: _ReportOutputSnapshot | None,
+def _restore_old_report_output(
+    manifests: Path,
+    transaction_directory: Path,
+    output: _ReportTransactionOutput,
 ) -> None:
+    target = manifests / output.target_name
     current = _report_output_snapshot(target)
-    if current != published:
-        raise OSError(f"report output ownership changed before rollback: {target}")
-    if old is None:
-        target.unlink()
+    if _snapshot_matches(current, output.old_sha256, output.old_size):
         return
-    if backup is None or backup_snapshot is None:
-        raise OSError(f"report output backup is missing before rollback: {target}")
-    _require_report_output_snapshot(backup, backup_snapshot, operation="rollback")
-    os.replace(backup, target)
+    if output.old_sha256 is None or output.old_size is None or output.backup_name is None:
+        if current is None:
+            return
+        if not _snapshot_matches(current, output.new_sha256, output.new_size):
+            raise OSError(f"foreign report output blocks recovery: {target.name}")
+        _claim_report_output(
+            target,
+            transaction_directory / f"{target.name}.rollback-current",
+            expected_sha256=output.new_sha256,
+            expected_size=output.new_size,
+            operation="rollback",
+        )
+        return
+    if current is not None:
+        if not _snapshot_matches(current, output.new_sha256, output.new_size):
+            raise OSError(f"foreign report output blocks recovery: {target.name}")
+        _claim_report_output(
+            target,
+            transaction_directory / f"{target.name}.rollback-current",
+            expected_sha256=output.new_sha256,
+            expected_size=output.new_size,
+            operation="rollback",
+        )
+    backup = _prepared_report_snapshot(manifests / output.backup_name)
+    if not _snapshot_matches(backup, output.old_sha256, output.old_size):
+        raise OSError(f"report output backup is invalid before rollback: {target.name}")
+    restore = _prepare_atomic(
+        transaction_directory / f"restore.{target.name}",
+        backup.content,
+    )
+    restore_snapshot = _prepared_report_snapshot(restore)
+    if not _snapshot_matches(restore_snapshot, output.old_sha256, output.old_size):
+        raise OSError(f"report output restore copy is invalid: {target.name}")
+    os.link(restore, target)
+    _sync_report_directory(target.parent)
     restored = _prepared_report_snapshot(target)
-    if restored.sha256 != old.sha256 or restored.size != old.size:
-        raise OSError(f"restored report output differs from old content: {target}")
+    if not _snapshot_matches(restored, output.old_sha256, output.old_size):
+        raise OSError(f"restored report output differs from old content: {target.name}")
+
+
+def _claim_completed_intent(
+    intent_path: Path,
+    transaction_directory: Path,
+    marker_snapshot: _ReportOutputSnapshot,
+) -> None:
+    completed = transaction_directory / "intent.completed"
+    _claim_report_output(
+        intent_path,
+        completed,
+        expected_sha256=marker_snapshot.sha256,
+        expected_size=marker_snapshot.size,
+        operation="transaction completion",
+    )
+
+
+def _cleanup_report_transaction(
+    manifests: Path,
+    intent: _ReportTransactionIntent,
+    transaction_directory: Path,
+) -> None:
+    for output in intent.outputs:
+        for name in (output.prepared_name, output.backup_name):
+            if name is None:
+                continue
+            path = manifests / name
+            if path.exists() or path.is_symlink():
+                canonical = require_canonical_descendant(
+                    manifests,
+                    path,
+                    kind="report transaction cleanup file",
+                    require_file=True,
+                )
+                canonical.unlink()
+    for child in tuple(transaction_directory.iterdir()):
+        canonical = require_canonical_descendant(
+            transaction_directory,
+            child,
+            kind="report transaction private file",
+            require_file=True,
+        )
+        canonical.unlink()
+    transaction_directory.rmdir()
+    _sync_report_directory(manifests)
+
+
+def _recover_report_transaction(manifests: Path) -> None:
+    loaded: tuple[_ReportTransactionIntent, Path, Path, _ReportOutputSnapshot] | None = None
+    try:
+        loaded = _load_report_intent(manifests)
+        if loaded is None:
+            return
+        intent, marker, transaction_directory, marker_snapshot = loaded
+        recovery_errors: list[Exception] = []
+        for output in intent.outputs:
+            try:
+                _restore_old_report_output(manifests, transaction_directory, output)
+            except Exception as error:
+                recovery_errors.append(error)
+        if recovery_errors:
+            raise recovery_errors[0]
+        for output in intent.outputs:
+            current = _report_output_snapshot(manifests / output.target_name)
+            if not _snapshot_matches(current, output.old_sha256, output.old_size):
+                raise OSError("restored report output pair is inconsistent")
+        _claim_completed_intent(marker, transaction_directory, marker_snapshot)
+        _cleanup_report_transaction(manifests, intent, transaction_directory)
+    except ReportOutputRecoveryError:
+        raise
+    except Exception as error:
+        raise ReportOutputRecoveryError(
+            _recovery_paths(manifests, loaded),
+            manifests_root=manifests,
+        ) from error
+
+
+def _publish_report_intent(manifests: Path, intent: _ReportTransactionIntent) -> Path:
+    intent_path = manifests / _REPORT_INTENT_NAME
+    temporary = _prepare_atomic(intent_path, _canonical_intent_bytes(intent))
+    try:
+        os.link(temporary, intent_path)
+        _sync_report_directory(manifests)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return intent_path
+
+
+def _cleanup_unpublished_report_transaction(
+    transaction_directory: Path | None,
+    artifacts: tuple[Path, ...],
+) -> None:
+    for artifact in artifacts:
+        artifact.unlink(missing_ok=True)
+    if transaction_directory is not None:
+        for child in tuple(transaction_directory.iterdir()):
+            child.unlink(missing_ok=True)
+        transaction_directory.rmdir()
 
 
 def _write_outputs(paths: CorpusPaths, report: PilotReport) -> None:
-    json_path = paths.manifests / "report.json"
-    markdown_path = paths.manifests / "report.md"
-    json_old = _report_output_snapshot(json_path)
-    markdown_old = _report_output_snapshot(markdown_path)
-    json_temporary: Path | None = None
-    markdown_temporary: Path | None = None
-    json_backup: Path | None = None
-    markdown_backup: Path | None = None
-    json_backup_snapshot: _ReportOutputSnapshot | None = None
-    markdown_backup_snapshot: _ReportOutputSnapshot | None = None
-    json_replaced = False
-    markdown_replaced = False
-    json_published: _ReportOutputSnapshot | None = None
-    markdown_published: _ReportOutputSnapshot | None = None
-    preserve_recovery_backups = False
+    manifests = paths.manifests
+    json_path = manifests / "report.json"
+    markdown_path = manifests / "report.md"
+    old_snapshots = (
+        _report_output_snapshot(json_path),
+        _report_output_snapshot(markdown_path),
+    )
+    transaction_directory: Path | None = None
+    artifacts: list[Path] = []
+    intent_published = False
     try:
-        json_temporary = _prepare_atomic(json_path, _canonical_report_bytes(report))
-        json_prepared = _prepared_report_snapshot(json_temporary)
-        markdown_temporary = _prepare_atomic(markdown_path, _render_markdown(report))
-        markdown_prepared = _prepared_report_snapshot(markdown_temporary)
-        if json_old is not None:
-            json_backup = _prepare_atomic(
-                json_path.with_name(f"recovery.{json_path.name}"),
-                json_old.content,
+        transaction_directory = Path(
+            tempfile.mkdtemp(dir=manifests, prefix=".report-output-transaction.")
+        )
+        prepared_items: list[Path] = []
+        prepared_items.append(_prepare_atomic(json_path, _canonical_report_bytes(report)))
+        artifacts.append(prepared_items[-1])
+        prepared_items.append(_prepare_atomic(markdown_path, _render_markdown(report)))
+        artifacts.append(prepared_items[-1])
+        prepared_paths = tuple(prepared_items)
+        prepared_snapshots = tuple(_prepared_report_snapshot(path) for path in prepared_paths)
+        backup_paths: list[Path | None] = []
+        for target, old in zip((json_path, markdown_path), old_snapshots, strict=True):
+            backup = (
+                _prepare_atomic(target.with_name(f"recovery.{target.name}"), old.content)
+                if old is not None
+                else None
             )
-            json_backup_snapshot = _prepared_report_snapshot(json_backup)
-        if markdown_old is not None:
-            markdown_backup = _prepare_atomic(
-                markdown_path.with_name(f"recovery.{markdown_path.name}"),
-                markdown_old.content,
-            )
-            markdown_backup_snapshot = _prepared_report_snapshot(markdown_backup)
-        _require_report_output_snapshot(json_path, json_old, operation="publication")
-        _require_report_output_snapshot(markdown_path, markdown_old, operation="publication")
-        json_published = _publish_report_output(
-            json_temporary,
-            json_path,
-            old=json_old,
-            prepared=json_prepared,
-        )
-        json_replaced = True
-        markdown_published = _publish_report_output(
-            markdown_temporary,
-            markdown_path,
-            old=markdown_old,
-            prepared=markdown_prepared,
-        )
-        markdown_replaced = True
-        _require_report_output_snapshot(
-            json_path,
-            json_published,
-            operation="pair commit",
-        )
-        _require_report_output_snapshot(
-            markdown_path,
-            markdown_published,
-            operation="pair commit",
-        )
-    except BaseException as publication_error:
-        rollback_errors: list[BaseException] = []
-        if markdown_replaced:
-            try:
-                if markdown_published is None:
-                    raise OSError("published markdown snapshot is missing")
-                _rollback_report_output(
-                    markdown_path,
-                    old=markdown_old,
-                    published=markdown_published,
-                    backup=markdown_backup,
-                    backup_snapshot=markdown_backup_snapshot,
+            backup_paths.append(backup)
+            if backup is not None:
+                artifacts.append(backup)
+        intent = _ReportTransactionIntent(
+            schema_version="1",
+            transaction_directory=transaction_directory.name,
+            outputs=tuple(
+                _ReportTransactionOutput(
+                    target_name=target.name,
+                    prepared_name=prepared.name,
+                    backup_name=backup.name if backup is not None else None,
+                    old_sha256=old.sha256 if old is not None else None,
+                    old_size=old.size if old is not None else None,
+                    new_sha256=prepared_snapshot.sha256,
+                    new_size=prepared_snapshot.size,
                 )
-            except BaseException as error:
-                rollback_errors.append(error)
-        if json_replaced:
-            try:
-                if json_published is None:
-                    raise OSError("published JSON snapshot is missing")
-                _rollback_report_output(
-                    json_path,
-                    old=json_old,
-                    published=json_published,
-                    backup=json_backup,
-                    backup_snapshot=json_backup_snapshot,
+                for target, prepared, backup, old, prepared_snapshot in zip(
+                    (json_path, markdown_path),
+                    prepared_paths,
+                    backup_paths,
+                    old_snapshots,
+                    prepared_snapshots,
+                    strict=True,
                 )
-            except BaseException as error:
-                rollback_errors.append(error)
-        if rollback_errors or isinstance(publication_error, _ReportPublicationVerificationError):
-            preserve_recovery_backups = True
-            recovery_paths = tuple(
-                path
-                for path in (json_backup, markdown_backup)
-                if path is not None and path.exists()
+            ),
+        )
+        _publish_report_intent(manifests, intent)
+        intent_published = True
+        published = tuple(
+            _publish_report_output(prepared, target, old=old, prepared=prepared_snapshot)
+            for prepared, target, old, prepared_snapshot in zip(
+                prepared_paths,
+                (json_path, markdown_path),
+                old_snapshots,
+                prepared_snapshots,
+                strict=True,
             )
-            cause = rollback_errors[0] if rollback_errors else publication_error
-            raise ReportOutputRecoveryError(recovery_paths) from cause
+        )
+        for target, expected in zip((json_path, markdown_path), published, strict=True):
+            _require_report_output_snapshot(target, expected, operation="pair commit")
+        loaded = _load_report_intent(manifests)
+        if loaded is None:
+            raise OSError("report transaction intent disappeared before pair commit")
+        committed_intent, marker, committed_directory, marker_snapshot = loaded
+        _claim_completed_intent(marker, committed_directory, marker_snapshot)
+        intent_published = False
+        _cleanup_report_transaction(manifests, committed_intent, committed_directory)
+    except Exception:
+        marker_exists = (manifests / _REPORT_INTENT_NAME).exists() or (
+            manifests / _REPORT_INTENT_NAME
+        ).is_symlink()
+        if intent_published or marker_exists:
+            _recover_report_transaction(manifests)
+        else:
+            with suppress(OSError):
+                _cleanup_unpublished_report_transaction(
+                    transaction_directory,
+                    tuple(artifacts),
+                )
         raise
-    finally:
-        active_failure = sys.exc_info()[0] is not None
-        cleanup_failure: OSError | None = None
-        cleanup_paths: list[Path] = []
-        if json_temporary is not None:
-            cleanup_paths.append(json_temporary)
-        if markdown_temporary is not None:
-            cleanup_paths.append(markdown_temporary)
-        if not preserve_recovery_backups:
-            if json_backup is not None:
-                cleanup_paths.append(json_backup)
-            if markdown_backup is not None:
-                cleanup_paths.append(markdown_backup)
-        for cleanup_path in cleanup_paths:
-            try:
-                cleanup_path.unlink(missing_ok=True)
-            except OSError as error:
-                if cleanup_failure is None:
-                    cleanup_failure = error
-        if cleanup_failure is not None and not active_failure:
-            raise cleanup_failure
 
 
 def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotReport:
@@ -910,6 +1340,13 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
             or analysis_audio.metrics is None
         ):
             raise ValueError("segmentation provenance does not match pairing and recording")
+        _validate_derived_audio_file(
+            paths,
+            analysis_audio.relative_path,
+            analysis_audio.sha256,
+            root=paths.normalized,
+            kind="analysis audio artifact",
+        )
         _count_issue(issue_counts, segmentation.get("issue_code"))
         speech_intervals = _vad_intervals(
             segmentation,
@@ -1171,6 +1608,13 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         ]
         if any(getattr(row, field) != value for field, value in expected.items()):
             raise ValueError("segment row evidence does not match approved review provenance")
+        _validate_derived_audio_file(
+            paths,
+            row.derived_audio_relative_path,
+            row.derived_audio_sha256,
+            root=paths.segments / "lossless",
+            kind="lossless segment artifact",
+        )
 
     _validate_terminal_processing_evidence(
         recordings=pilot,
@@ -1232,4 +1676,5 @@ def build_report(paths: CorpusPaths, config: CorpusConfig) -> PilotReport:
         paths.manifests / "report.json",
         paths.manifests / "report.md",
     ):
+        _recover_report_transaction(paths.manifests)
         return _build_report_locked(paths, config)
