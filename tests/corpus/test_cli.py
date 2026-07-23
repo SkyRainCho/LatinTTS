@@ -199,6 +199,203 @@ def test_safe_error_message_redacts_absolute_path_variants(
 
 
 @pytest.mark.parametrize(
+    "message",
+    (
+        "failed at file:%2F%2F%2Fhome%2Falice%2Fsecret.txt",
+        "failed at FILE:%5C%5Cserver%5Cshare%5CUsers%5Calice%5Csecret.txt",
+        "failed at file%3A%2F%2F%2Fhome%2Falice%2Fsecret.txt",
+        "failed at FILE%3a%5C%5Cserver%5Cshare%5CUsers%5Calice%5Csecret.txt",
+        "failed at %66ile%3A%2F%2F%2Fhome%2Falice%2Fsecret.txt",
+        "failed at f%69le:%5C%5Cserver%5Cshare%5CUsers%5Calice%5Csecret.txt",
+        "failed at %46%49%4C%45%3a%2f%2f%2fhome%2falice%2fsecret.txt",
+    ),
+)
+def test_safe_error_message_redacts_percent_encoded_file_uris(
+    message: str,
+    tmp_path: Path,
+) -> None:
+    rendered = safe_error_message(OSError(message), tmp_path)
+    assert "<outside-project-root>" in rendered
+    assert "alice" not in rendered.casefold()
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\alice\secret.txt",
+        r"\\?\Volume{abc}\Users\alice\secret.txt",
+    ),
+)
+def test_safe_error_message_redacts_exact_windows_device_namespace(
+    message: str,
+    tmp_path: Path,
+) -> None:
+    assert safe_error_message(OSError(message), tmp_path) == "<outside-project-root>"
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    (
+        (r"failed at <C:\Users\alice\secret.txt>", "alice"),
+        (r"failed at <\\server\share\Users\alice\secret.txt>", "alice"),
+        ("failed at </home/alice/secret.txt>", "alice"),
+        ("failed at path:/home/alice/secret.txt", "alice"),
+    ),
+)
+def test_safe_error_message_redacts_delimiter_adjacent_absolute_paths(
+    message: str,
+    secret: str,
+    tmp_path: Path,
+) -> None:
+    rendered = safe_error_message(OSError(message), tmp_path)
+    assert "<outside-project-root>" in rendered
+    assert secret.casefold() not in rendered.casefold()
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "failed at marker./home/alice/secret.txt",
+        "failed at marker-/home/alice/secret.txt",
+        "failed at marker_/home/alice/secret.txt",
+        r"failed at marker.\server\share\alice\secret.txt",
+    ),
+)
+def test_safe_error_message_redacts_punctuation_adjacent_absolute_paths(
+    message: str,
+    tmp_path: Path,
+) -> None:
+    rendered = safe_error_message(OSError(message), tmp_path)
+    assert "<outside-project-root>" in rendered
+    assert "alice" not in rendered.casefold()
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "failed at relative/path.txt",
+        "failed at ./relative/path.txt",
+        "failed at ../relative/path.txt",
+    ),
+)
+def test_safe_error_message_preserves_unambiguous_relative_paths(
+    message: str,
+    tmp_path: Path,
+) -> None:
+    assert safe_error_message(OSError(message), tmp_path) == message
+
+
+def test_safe_error_message_preserves_project_root_placeholder(tmp_path: Path) -> None:
+    rendered = safe_error_message(
+        OSError(f"failed at {tmp_path / 'local-data' / 'evidence.json'}"),
+        tmp_path,
+    )
+    assert rendered == "failed at <project-root>/local-data/evidence.json"
+
+
+def test_safe_error_message_redacts_project_root_parent_traversal(tmp_path: Path) -> None:
+    outside = tmp_path / ".." / "private" / "alice" / "evidence.json"
+
+    rendered = safe_error_message(OSError(f"failed at {outside}"), tmp_path)
+
+    assert "<outside-project-root>" in rendered
+    assert "alice" not in rendered.casefold()
+    assert "<project-root>/.." not in rendered
+
+
+def test_safe_error_message_treats_posix_root_aliases_as_case_sensitive() -> None:
+    rendered = safe_error_message(
+        OSError(
+            "inside /srv/LatinTTS/local-data/evidence.json; "
+            "outside /srv/latintts/private/alice/evidence.json"
+        ),
+        Path("/srv/LatinTTS"),
+        resolve_project_root=False,
+    )
+
+    assert "<project-root>/local-data/evidence.json" in rendered
+    assert "<outside-project-root>" in rendered
+    assert "alice" not in rendered.casefold()
+
+
+@pytest.mark.parametrize(
+    ("command", "target"),
+    (
+        ("build-manifest", "build_manifest_corpus"),
+        ("report", "build_report"),
+        ("export-review", "export_review_bundle"),
+        ("import-review", "import_review_bundle"),
+        ("pair", "pair_corpus"),
+        ("segment", "segment_corpus"),
+    ),
+)
+def test_command_core_programmer_type_error_propagates(
+    command: str,
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.CorpusConfig, "load", lambda _path: object())
+    monkeypatch.setattr(cli.CorpusPaths, "ensure_layout", lambda _paths: None)
+    monkeypatch.setattr(cli, "_ffmpeg_version", lambda: "test-ffmpeg")
+    monkeypatch.setattr(cli, "create_alignment_backend", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "_validate_segmentation_config",
+        lambda _config: (
+            {
+                "threshold": 0.5,
+                "neg_threshold": 0.35,
+                "min_speech_duration_ms": 250,
+                "min_silence_duration_ms": 100,
+                "max_speech_duration_s": 30.0,
+                "speech_pad_ms": 30,
+                "min_silence_at_max_speech": 98,
+                "use_max_poss_sil_at_max_speech": True,
+                "sample_rate": 16_000,
+                "window_samples": 512,
+            },
+            object(),
+        ),
+    )
+    monkeypatch.setattr(cli, "SileroVadBackend", lambda **_kwargs: object())
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr(cli, target, fail)
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        main(["--project-root", str(tmp_path), command])
+
+
+@pytest.mark.parametrize("target", ("SileroVadBackend", "classify_pauses"))
+def test_segment_config_validator_programmer_type_error_propagates(
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = Path(__file__).parents[2] / "config" / "corpus" / "pilot-v1.json"
+    monkeypatch.setattr(cli.CorpusPaths, "ensure_layout", lambda _paths: None)
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr(cli, target, fail)
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        main(
+            [
+                "--project-root",
+                str(tmp_path),
+                "segment",
+                "--config",
+                str(config_path),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
     "argument",
     (
         r"--unsupportedC:\Users\alice\secret.txt",

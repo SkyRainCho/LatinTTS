@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from latintts.corpus.cli import main
+from latintts.corpus.cli import _load_selection, main
 from latintts.corpus.domain import CorpusState
+from latintts.corpus.inventory import InventoryInputError
 from latintts.corpus.paths import CorpusPaths
 from latintts.corpus.selection import select_pilot
 from latintts.corpus.store import write_jsonl_atomic
@@ -132,3 +133,29 @@ def test_cli_rejects_nonexact_recording_manifest_without_writing_selection(
 
     assert capsys.readouterr().err.startswith("MANIFEST_SCHEMA_MISMATCH: recording row")
     assert not (paths.manifests / "pilot-selection.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("recording_ids", "inventory_hashes"),
+    (([[]], ["a" * 64]), (["rec-1"], [{}])),
+)
+def test_selection_loader_rejects_non_string_members_before_hashing(
+    recording_ids: list[object],
+    inventory_hashes: list[object],
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pilot-selection.json"
+    write_jsonl_atomic(
+        path,
+        (
+            {
+                "schema_version": "1",
+                "strategy": "explicit-v1",
+                "recording_ids": recording_ids,
+                "inventory_hashes": inventory_hashes,
+            },
+        ),
+    )
+
+    with pytest.raises(InventoryInputError, match="pilot-selection"):
+        _load_selection(path)

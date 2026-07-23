@@ -1897,6 +1897,47 @@ def _direct_builder_inputs(paths: object, config: CorpusConfig) -> dict[str, obj
     }
 
 
+def test_processing_history_rejects_malformed_persisted_segmentation_vad(
+    tmp_path: Path,
+) -> None:
+    paths, config = _reviewed_project(tmp_path)
+    inputs = _direct_builder_inputs(paths, config)  # type: ignore[arg-type]
+    recording = inputs["recording"]
+    run_directory = (
+        paths.alignments / "runs" / config.digest / recording.recording_id  # type: ignore[attr-defined,union-attr]
+    )
+    pairing_path = run_directory / "pairing.json"
+    alignment_path = run_directory / "alignment.json"
+    context = manifest_module._ManifestContext(
+        0,
+        recording,
+        inputs["transcript"],
+        inputs["units"],
+        inputs["pairing"],
+        inputs["alignments"],
+        inputs["analysis_audio"],
+        hashlib.sha256(pairing_path.read_bytes()).hexdigest(),
+        hashlib.sha256(alignment_path.read_bytes()).hexdigest(),
+        run_directory,
+    )
+    segmentation_path = run_directory / "segmentation.json"
+    segmentation = dict(read_jsonl(segmentation_path)[0])
+    segmentation["vad"] = []
+    write_jsonl_atomic(segmentation_path, (segmentation,))
+    processing_rows = read_jsonl(run_directory.parent / "processing-events.jsonl")
+    review_path = paths.manifests / "review.jsonl"  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="segmentation VAD"):
+        manifest_module._validate_processing_history(
+            processing_rows,
+            context,
+            review_path,
+            inputs["review_events"],
+            config,
+            paths,
+        )
+
+
 @pytest.mark.parametrize(
     "case",
     (

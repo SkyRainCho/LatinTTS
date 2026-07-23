@@ -320,7 +320,10 @@ class ReportTelemetry:
         if type(raw) is not dict or set(raw) != _TELEMETRY_FIELDS:
             got = sorted(raw) if type(raw) is dict else type(raw).__name__
             raise ValueError(f"pilot telemetry must contain exact fields; got {got}")
-        return cls(**raw)
+        try:
+            return cls(**raw)
+        except TypeError as error:
+            raise ValueError(f"pilot telemetry is invalid: {error}") from error
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -418,9 +421,12 @@ def _load_telemetry(paths: CorpusPaths) -> ReportTelemetry:
 
 
 def _load_recordings(paths: CorpusPaths) -> tuple[RecordingRecord, ...]:
-    recordings = tuple(
-        _decode_recording(raw) for raw in read_jsonl(paths.manifests / "recordings.jsonl")
-    )
+    try:
+        recordings = tuple(
+            _decode_recording(raw) for raw in read_jsonl(paths.manifests / "recordings.jsonl")
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"recording row is invalid: {error}") from error
     identities = tuple(recording.recording_id for recording in recordings)
     if not recordings or len(identities) != len(set(identities)):
         raise ValueError("recordings.jsonl must contain unique recordings")
@@ -441,7 +447,7 @@ def _vad_intervals(
         raise ValueError("segmentation VAD must use 16 kHz")
     intervals_raw = vad.get("speech_intervals")
     if type(intervals_raw) is not list:
-        raise TypeError("segmentation speech_intervals must be an array")
+        raise ValueError("segmentation speech_intervals must be an array")
     intervals: list[tuple[int, int]] = []
     cursor = 0
     for interval in intervals_raw:
@@ -469,7 +475,7 @@ def _count_issue(counter: Counter[str], value: object) -> None:
     if value is None:
         return
     if not isinstance(value, str):
-        raise TypeError("issue_code must be a string or null")
+        raise ValueError("issue_code must be a string or null")
     try:
         code = IssueCode(value).value
     except ValueError as error:
@@ -886,7 +892,7 @@ def _decode_report_intent(raw: object) -> _ReportTransactionIntent:
         raise ValueError("report transaction intent schema_version must be '1'")
     transaction_directory = raw.get("transaction_directory")
     if not isinstance(transaction_directory, str):
-        raise TypeError("report transaction directory must be a string")
+        raise ValueError("report transaction directory must be a string")
     directory_identity = _decode_directory_identity(raw.get("directory_identity"))
     output_rows = raw.get("outputs")
     if type(output_rows) is not list or len(output_rows) != 2:
@@ -2142,8 +2148,11 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         segmentation_sha256 = hashlib.sha256(segmentation_path.read_bytes()).hexdigest()
         analysis_raw = segmentation.get("analysis_audio")
         if type(analysis_raw) is not dict:
-            raise TypeError("segmentation analysis_audio must be an object")
-        analysis_audio = DerivedAudio.from_dict(analysis_raw)
+            raise ValueError("segmentation analysis_audio must be an object")
+        try:
+            analysis_audio = DerivedAudio.from_dict(analysis_raw)
+        except (KeyError, TypeError) as error:
+            raise ValueError(f"segmentation analysis_audio is invalid: {error}") from error
         if (
             segmentation.get("schema_version") != "1"
             or segmentation.get("status") != "success"
@@ -2179,9 +2188,12 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         automatic_path = run_directory / "pairing-automatic.json"
         automatic_pairing = final_pairing
         if automatic_path.exists():
-            automatic_pairing = pairing_from_dict(
-                _one_row(automatic_path, "automatic pairing artifact")
-            )
+            try:
+                automatic_pairing = pairing_from_dict(
+                    _one_row(automatic_path, "automatic pairing artifact")
+                )
+            except (KeyError, TypeError) as error:
+                raise ValueError(f"automatic pairing artifact is invalid: {error}") from error
         automatic_fixed_identity = (
             automatic_pairing.schema_version,
             automatic_pairing.recording_id,
@@ -2276,7 +2288,18 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
             takes = automatic.get("takes")
             if type(takes) is not list or len(takes) != 2:
                 raise ValueError("review automatic must contain exactly two takes")
-            take_by_index = {take.get("take_index"): take for take in takes if type(take) is dict}
+            take_by_index: dict[int, dict[str, Any]] = {}
+            for take in takes:
+                if type(take) is not dict:
+                    raise ValueError("review automatic take must be an object")
+                take_index = take.get("take_index")
+                if (
+                    type(take_index) is not int
+                    or take_index not in (1, 2)
+                    or take_index in take_by_index
+                ):
+                    raise ValueError("review automatic take identities are invalid")
+                take_by_index[take_index] = take
             if set(take_by_index) != {1, 2}:
                 raise ValueError("review automatic take identities are invalid")
             for pairing_take in group.takes:
@@ -2292,7 +2315,7 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
                 expected_review_entities.add(entity_id)
                 provenance = take.get("take_provenance")
                 if type(provenance) is not dict:
-                    raise TypeError("review take_provenance must be an object")
+                    raise ValueError("review take_provenance must be an object")
                 source_start = provenance.get("source_start_sample")
                 source_end = provenance.get("source_end_sample")
                 if (
@@ -2413,7 +2436,10 @@ def _build_report_locked(paths: CorpusPaths, config: CorpusConfig) -> PilotRepor
         raise ValueError("review decision duration denominator must be non-zero")
 
     segments_path = paths.manifests / "segments.jsonl"
-    segment_rows = tuple(SegmentRecord.from_dict(raw) for raw in read_jsonl(segments_path))
+    try:
+        segment_rows = tuple(SegmentRecord.from_dict(raw) for raw in read_jsonl(segments_path))
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"segment row is invalid: {error}") from error
     segments_sha256 = hashlib.sha256(segments_path.read_bytes()).hexdigest()
     segment_keys = {
         (row.recording_id, row.repetition_group_id, row.take_index) for row in segment_rows

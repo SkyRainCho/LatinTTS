@@ -1096,7 +1096,10 @@ def _read_cached_alignment(
     rows = read_jsonl(path)
     if len(rows) != 1:
         raise ValueError("alignment cache must contain exactly one result")
-    result = result_from_dict(rows[0])
+    try:
+        result = result_from_dict(rows[0])
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"alignment cache result is invalid: {error}") from error
     _result_matches_request_provenance(result, request)
     if require_word_order:
         validate_alignment(result, request, audio_duration_seconds=audio_duration_seconds)
@@ -1119,7 +1122,7 @@ def _load_or_align(
                 audio_duration_seconds=audio_duration_seconds,
                 require_word_order=False,
             )
-        except (KeyError, TypeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "alignment cache is invalid") from error
     result = backend.align(request)
     if type(result) is not AlignmentResult:
@@ -1455,7 +1458,10 @@ def pair_recording(
             rows = read_jsonl(pairing_path)
             if len(rows) != 1:
                 raise ValueError("pairing cache must contain exactly one recording")
-            cached = pairing_from_dict(rows[0])
+            try:
+                cached = pairing_from_dict(rows[0])
+            except (KeyError, TypeError) as error:
+                raise ValueError("pairing cache payload is invalid") from error
             _validate_pairing_identity(
                 cached,
                 recording_id=recording_id,
@@ -1474,7 +1480,7 @@ def pair_recording(
                 allow_reviewed_selection=allow_reviewed_selection,
             )
             return cached
-        except (KeyError, OSError, TypeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is invalid") from error
 
     with _pairing_lock(run_directory):

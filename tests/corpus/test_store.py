@@ -213,6 +213,40 @@ def test_persist_transitions_preserves_unchanged_recordings_without_events(
     assert read_jsonl(recordings_path) == (updated.to_dict(), unselected.to_dict())
 
 
+@pytest.mark.parametrize("batched", (False, True))
+def test_persist_transitions_reject_unhashable_persisted_recording_id(
+    batched: bool,
+    tmp_path: Path,
+) -> None:
+    recordings_path = tmp_path / "recordings.jsonl"
+    events_path = tmp_path / "processing-events.jsonl"
+    original, updated, event = _transition()
+    other = _other_recording()
+    malformed_other = other.to_dict()
+    malformed_other["recording_id"] = []
+    write_jsonl_atomic(recordings_path, (original.to_dict(), malformed_other))
+    before = recordings_path.read_bytes()
+
+    with pytest.raises(ValueError, match="recording_id"):
+        if batched:
+            store.persist_recording_transitions(
+                recordings_path=recordings_path,
+                events_path=events_path,
+                recordings=(updated, other),
+                events=(event,),
+            )
+        else:
+            store.persist_recording_transition(
+                recordings_path=recordings_path,
+                events_path=events_path,
+                recordings=(updated, other),
+                event=event,
+            )
+
+    assert recordings_path.read_bytes() == before
+    assert not events_path.exists()
+
+
 def test_persist_transitions_rejects_reordered_non_event_recording_without_writes(
     tmp_path: Path,
 ) -> None:
@@ -488,6 +522,7 @@ def test_persist_transitions_rejects_invalid_batch_contracts(
         ("illegal-enum", "not a valid CorpusState"),
         ("illegal-hash", "SHA-256"),
         ("illegal-time", "timezone-aware ISO datetime"),
+        ("time-type", "timezone-aware ISO datetime"),
     ),
 )
 def test_processing_event_recovery_rejects_malformed_history_rows(
@@ -506,8 +541,10 @@ def test_processing_event_recovery_rejects_malformed_history_rows(
         row["config_sha256"] = "not-a-hash"
     elif case == "illegal-time":
         row["started_at"] = "2026-07-19T10:00:00"
+    elif case == "time-type":
+        row["started_at"] = 7
 
-    with pytest.raises((TypeError, ValueError), match=match):
+    with pytest.raises(ValueError, match=match):
         store.processing_event_exists((row,), event)
 
 

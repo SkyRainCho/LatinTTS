@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from latintts.corpus.cli import (
+    _decode_cached_vad,
     _decode_spoken_units,
     align_corpus,
     main,
@@ -213,6 +214,7 @@ def test_pair_rejects_duplicate_units_and_same_count_tampered_plan(
         "units-array",
         "unit-object",
         "unit-text",
+        "unit-text-type",
         "plan-object",
         "tokens-array",
         "plan-identity",
@@ -240,6 +242,8 @@ def test_decode_spoken_units_rejects_malformed_nested_transcript(
         raw["spoken_units"][0] = "invalid"
     elif mutation == "unit-text":
         raw["spoken_units"][0]["text"] = "Wrong"
+    elif mutation == "unit-text-type":
+        raw["spoken_units"][0]["text"] = []
     elif mutation == "plan-object":
         raw["pronunciation_plan"] = "invalid"
     elif mutation == "tokens-array":
@@ -263,8 +267,41 @@ def test_decode_spoken_units_rejects_malformed_nested_transcript(
         raw["pronunciation_plan"]["phrase_phonemes"][0] = "wrong"
     else:
         raw["spoken_units"][0]["token_end_index"] = 1
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         _decode_spoken_units(raw, "rec-1")
+
+
+def test_cached_vad_decoder_converts_external_row_type_error() -> None:
+    raw = {
+        "backend": "silero-vad",
+        "model_version": "6.2.1",
+        "model_sha256": "a" * 64,
+        "sample_rate": 16_000,
+        "parameters": {},
+        "parameters_sha256": "b" * 64,
+        "frames": [[]],
+        "speech_intervals": [],
+    }
+
+    with pytest.raises(ValueError, match="cached VAD"):
+        _decode_cached_vad(raw)
+
+
+def test_pair_rejects_non_string_transcript_identity_before_indexing(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    transcript_path = paths.manifests / "transcripts.jsonl"
+    transcript = read_jsonl(transcript_path)[0]
+    transcript["recording_id"] = []
+    write_jsonl_atomic(transcript_path, (transcript,))
+
+    with pytest.raises(ValueError, match="transcript"):
+        pair_corpus(
+            paths,
+            config,
+            _FakeAligner(),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
 
 
 def test_align_rejects_pairing_file_not_bound_to_paired_event(tmp_path: Path) -> None:
@@ -283,6 +320,105 @@ def test_align_rejects_pairing_file_not_bound_to_paired_event(tmp_path: Path) ->
     with pytest.raises(CorpusFailure) as error:
         align_corpus(paths, config, backend)
     assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_align_propagates_backend_programmer_type_error(tmp_path: Path) -> None:
+    class BrokenAligner(_FakeAligner):
+        def build_request(self, **kwargs: object) -> object:
+            raise TypeError("programmer bug")
+
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    assert pair_corpus(
+        paths,
+        config,
+        _FakeAligner(),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        align_corpus(paths, config, BrokenAligner())  # type: ignore[arg-type]
+
+
+def test_align_maps_malformed_selected_alignment_cache_to_domain_error(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    run_directory = paths.alignments / "runs" / config.digest / "rec-1"
+    pairing = read_jsonl(run_directory / "pairing.json")[0]
+    cache_key = pairing["groups"][0]["group"]["takes"][0]["alignment_cache_key"]
+    cache_path = run_directory / "alignment-cache" / f"{cache_key}.json"
+    cached = read_jsonl(cache_path)[0]
+    cached["tokens"] = "invalid"
+    write_jsonl_atomic(cache_path, (cached,))
+
+    with pytest.raises(CorpusFailure) as error:
+        align_corpus(paths, config, backend)
+
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_pair_cached_transition_programmer_type_error_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> bool:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr("latintts.corpus.cli._human_pairing_transition_exists", fail)
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        pair_corpus(
+            paths,
+            config,
+            backend,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+
+def test_pair_cached_backend_programmer_type_error_propagates(tmp_path: Path) -> None:
+    class BrokenAligner(_FakeAligner):
+        def build_request(self, **kwargs: object) -> object:
+            raise TypeError("programmer bug")
+
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    assert pair_corpus(
+        paths,
+        config,
+        _FakeAligner(),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        pair_corpus(
+            paths,
+            config,
+            BrokenAligner(),  # type: ignore[arg-type]
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
 
 
 @pytest.mark.parametrize(

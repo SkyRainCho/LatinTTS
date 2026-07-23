@@ -342,11 +342,11 @@ def _validate_effective_review_values(values: dict[str, Any]) -> None:
     if words is None:
         return
     if type(words) is not list:
-        raise TypeError("effective words must be an array")
+        raise ValueError("effective words must be an array")
     cursor = start
     for word in words:
         if type(word) is not dict:
-            raise TypeError("effective word must be an object")
+            raise ValueError("effective word must be an object")
         require_exact_fields(word, _WORD_VALUE_FIELDS, "effective word")
         if type(word["text"]) is not str or not word["text"]:
             raise ValueError("effective word text must be non-empty")
@@ -439,20 +439,51 @@ def _decode_recording(raw: dict[str, Any]) -> RecordingRecord:
     )
     metadata = raw["metadata"]
     if type(metadata) is not dict:
-        raise TypeError("recording metadata must be an object")
-    return RecordingRecord(
-        schema_version=raw["schema_version"],
-        recording_id=raw["recording_id"],
-        relative_path=raw["relative_path"],
-        sha256=raw["sha256"],
-        content_type=raw["content_type"],
-        title_or_citation=raw["title_or_citation"],
-        speaker_id=raw["speaker_id"],
-        rights_id=raw["rights_id"],
-        notes=raw["notes"],
-        metadata=AudioMetadata(**metadata),
-        state=CorpusState(raw["state"]),
-    )
+        raise ValueError("recording metadata must be an object")
+    try:
+        return RecordingRecord(
+            schema_version=raw["schema_version"],
+            recording_id=raw["recording_id"],
+            relative_path=raw["relative_path"],
+            sha256=raw["sha256"],
+            content_type=raw["content_type"],
+            title_or_citation=raw["title_or_citation"],
+            speaker_id=raw["speaker_id"],
+            rights_id=raw["rights_id"],
+            notes=raw["notes"],
+            metadata=AudioMetadata(**metadata),
+            state=CorpusState(raw["state"]),
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"recording row is invalid: {error}") from error
+
+
+def _decode_pairing_artifact(raw: dict[str, Any]) -> PairingRecording:
+    try:
+        return pairing_from_dict(raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"pairing artifact is invalid: {error}") from error
+
+
+def _decode_alignment_result(raw: dict[str, Any]) -> AlignmentResult:
+    try:
+        return result_from_dict(raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"alignment result is invalid: {error}") from error
+
+
+def _decode_review_event(raw: dict[str, Any]) -> ReviewEvent:
+    try:
+        return ReviewEvent.from_dict(raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"review event is invalid: {error}") from error
+
+
+def _decode_processing_event(raw: dict[str, Any]) -> ProcessingEvent:
+    try:
+        return ProcessingEvent.from_dict(raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"processing event is invalid: {error}") from error
 
 
 def _load_selection(paths: CorpusPaths) -> PilotSelection:
@@ -464,7 +495,14 @@ def _load_selection(paths: CorpusPaths) -> PilotSelection:
         raw, frozenset(field.name for field in fields(PilotSelection)), "selection"
     )
     if type(raw["recording_ids"]) is not list or type(raw["inventory_hashes"]) is not list:
-        raise TypeError("selection IDs and hashes must be arrays")
+        raise ValueError("selection IDs and hashes must be arrays")
+    if any(not isinstance(value, str) or not value for value in raw["recording_ids"]):
+        raise ValueError("selection recording_ids must contain non-empty strings")
+    if any(
+        not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for value in raw["inventory_hashes"]
+    ):
+        raise ValueError("selection inventory_hashes must contain lowercase SHA-256 digests")
     return PilotSelection(
         raw["schema_version"],
         raw["strategy"],
@@ -501,7 +539,7 @@ def _load_pairing_and_alignment(
     pairing_rows = read_jsonl(pairing_path)
     if len(pairing_rows) != 1:
         raise ValueError("pairing artifact must contain exactly one row")
-    pairing = pairing_from_dict(pairing_rows[0])
+    pairing = _decode_pairing_artifact(pairing_rows[0])
     alignment_rows = read_jsonl(run_directory / "alignment.json")
     if len(alignment_rows) != 1:
         raise ValueError("alignment artifact must contain exactly one row")
@@ -534,7 +572,7 @@ def _load_pairing_and_alignment(
     ):
         raise ValueError("alignment artifact identity does not match review export")
     if type(alignment["takes"]) is not list:
-        raise TypeError("alignment takes must be an array")
+        raise ValueError("alignment takes must be an array")
     return run_directory, pairing, alignment
 
 
@@ -545,7 +583,7 @@ def _load_pairing_only(
     rows = read_jsonl(run_directory / "pairing.json")
     if len(rows) != 1:
         raise ValueError("pairing artifact must contain exactly one row")
-    pairing = pairing_from_dict(rows[0])
+    pairing = _decode_pairing_artifact(rows[0])
     if pairing.recording_id != recording.recording_id or pairing.config_sha256 != config.digest:
         raise ValueError("pairing artifact identity does not match recording and config")
     return run_directory, pairing
@@ -567,9 +605,9 @@ def _alignment_by_take(
     )
     for raw in alignment["takes"]:
         if type(raw) is not dict:
-            raise TypeError("alignment take must be an object")
+            raise ValueError("alignment take must be an object")
         require_exact_fields(raw, take_fields, "alignment take")
-        result = result_from_dict(raw["alignment_result"])
+        result = _decode_alignment_result(raw["alignment_result"])
         key = (raw["repetition_group_id"], raw["take_index"])
         if key in decoded:
             raise ValueError("alignment artifact contains duplicate take identity")
@@ -1192,7 +1230,7 @@ def _bundle_file(
 
 def _validated_automatic_values(raw: object) -> dict[str, Any]:
     if type(raw) is not dict:
-        raise TypeError("automatic_values must be an object")
+        raise ValueError("automatic_values must be an object")
     require_exact_fields(raw, _AUTOMATIC_VALUE_FIELDS, "automatic values")
     if raw["review_decision"] != "unreviewed":
         raise ValueError("automatic review_decision must remain unreviewed")
@@ -1202,12 +1240,12 @@ def _validated_automatic_values(raw: object) -> dict[str, Any]:
         raise ValueError("automatic segment bounds are invalid")
     words_raw = raw["words"]
     if type(words_raw) is not list:
-        raise TypeError("automatic words must be an array")
+        raise ValueError("automatic words must be an array")
     words: list[dict[str, Any]] = []
     cursor = start
     for word in words_raw:
         if type(word) is not dict:
-            raise TypeError("automatic word must be an object")
+            raise ValueError("automatic word must be an object")
         require_exact_fields(word, _WORD_VALUE_FIELDS, "automatic word")
         if not isinstance(word["text"], str) or not word["text"]:
             raise ValueError("automatic word text must be non-empty")
@@ -1263,7 +1301,7 @@ def _new_review_event(
 
 
 def _load_existing_review_events(path: Path) -> tuple[ReviewEvent, ...]:
-    events = tuple(ReviewEvent.from_dict(row) for row in read_jsonl(path)) if path.exists() else ()
+    events = tuple(_decode_review_event(row) for row in read_jsonl(path)) if path.exists() else ()
     event_ids = tuple(event.review_event_id for event in events)
     if len(event_ids) != len(set(event_ids)):
         raise ValueError("review history contains duplicate review_event_id")
@@ -1309,10 +1347,13 @@ def _event_fields(
 
 def _validate_decision_item(raw: object) -> dict[str, Any]:
     if type(raw) is not dict:
-        raise TypeError("review decision must be an object")
+        raise ValueError("review decision must be an object")
     require_exact_fields(raw, _DECISION_ITEM_FIELDS, "review decision")
+    entity_id = raw["entity_id"]
+    if type(entity_id) is not str or not entity_id:
+        raise ValueError("review decision entity_id must be a non-empty string")
     decision = raw["decision"]
-    if decision not in {"unreviewed", "approved", "rejected"} or type(decision) is not str:
+    if type(decision) is not str or decision not in {"unreviewed", "approved", "rejected"}:
         raise ValueError("review decision must use the decision enum")
     if decision == "unreviewed":
         if any(raw[field] != "" for field in ("reason", "reviewer", "reviewed_at")):
@@ -1370,7 +1411,7 @@ def _validate_take_summary(
         or type(quality) is not dict
         or type(versions) is not dict
     ):
-        raise TypeError("review take metric and version summaries must be objects")
+        raise ValueError("review take metric and version summaries must be objects")
     require_exact_fields(candidate_scores, _CANDIDATE_SCORE_FIELDS, "candidate scores")
     require_exact_fields(quality, _QUALITY_FIELDS, "quality metrics")
     require_exact_fields(versions, _ALIGNMENT_VERSION_FIELDS, "alignment versions")
@@ -1398,7 +1439,7 @@ def _validate_take_summary(
         raise ValueError("review candidate audio hash does not match pairing")
     take_provenance = raw["take_provenance"]
     if type(take_provenance) is not dict:
-        raise TypeError("review take_provenance must be an object")
+        raise ValueError("review take_provenance must be an object")
     require_exact_fields(take_provenance, _TAKE_PROVENANCE_FIELDS, "review take provenance")
     if take_provenance != {
         "source_start_sample": take.start_sample,
@@ -1445,8 +1486,11 @@ def _validate_trusted_review_audio(
 ) -> float:
     provenance_raw = raw["audio_provenance"]
     if type(provenance_raw) is not dict:
-        raise TypeError("review audio_provenance must be an object")
-    provenance = DerivedAudio.from_dict(provenance_raw)
+        raise ValueError("review audio_provenance must be an object")
+    try:
+        provenance = DerivedAudio.from_dict(provenance_raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"review audio_provenance is invalid: {error}") from error
     trusted = extract_review_wav(
         recording,
         paths,
@@ -1573,7 +1617,7 @@ def _load_pairing_correction_submission(
         original_rows = read_jsonl(automatic_pairing_path)
         if len(original_rows) != 1:
             raise ValueError("automatic pairing artifact must contain exactly one row")
-        original_pairing = pairing_from_dict(original_rows[0])
+        original_pairing = _decode_pairing_artifact(original_rows[0])
     else:
         original_pairing = current_pairing
         original_bytes = current_bytes
@@ -1645,7 +1689,7 @@ def _load_pairing_correction_submission(
     decoded: dict[str, dict[str, Any]] = {}
     for raw in rows:
         if type(raw) is not dict:
-            raise TypeError("pairing selection must be an object")
+            raise ValueError("pairing selection must be an object")
         require_exact_fields(raw, _PAIRING_DECISION_FIELDS, "pairing selection")
         unit_id = raw["unit_id"]
         if type(unit_id) is not str or unit_id in decoded:
@@ -1656,12 +1700,12 @@ def _load_pairing_correction_submission(
                 raise ValueError("unreviewed pairing selection metadata must remain empty")
         else:
             if type(split) is not int:
-                raise TypeError("pairing selection split_sample must be an integer or null")
+                raise ValueError("pairing selection split_sample must be an integer or null")
             for field in ("reason", "reviewer"):
                 if type(raw[field]) is not str or not raw[field].strip():
                     raise ValueError(f"pairing selection {field} must be non-empty")
             if type(raw["reviewed_at"]) is not str:
-                raise TypeError("pairing selection reviewed_at must be a string")
+                raise ValueError("pairing selection reviewed_at must be a string")
             try:
                 parsed = datetime.fromisoformat(raw["reviewed_at"])
             except ValueError as error:
@@ -1680,7 +1724,7 @@ def _load_pairing_correction_submission(
     for unit_id in expected_ids:
         split = decoded[unit_id]["split_sample"]
         if type(split) is not int:
-            raise TypeError("confirmed pairing selection must contain an integer split")
+            raise ValueError("confirmed pairing selection must contain an integer split")
         selections[unit_id] = split
     corrected = materialize_reviewed_pairing(original_pairing, selections)
     corrected_bytes = (_canonical_json(pairing_to_dict(corrected)) + "\n").encode("utf-8")
@@ -1774,7 +1818,7 @@ def _validate_pairing_review_snapshot_bytes(
     corrected: PairingRecording,
 ) -> tuple[ReviewEvent, ...]:
     prefix_events = tuple(
-        ReviewEvent.from_dict(row)
+        _decode_review_event(row)
         for row in _review_snapshot_rows_from_bytes(journal, snapshot_sha256)
     )
     return validate_pairing_correction_events(original, corrected, prefix_events)
@@ -1804,7 +1848,7 @@ def _complete_review_journal_bytes(review_path: Path, existing: tuple[ReviewEven
         return b""
     snapshot_sha256 = hashlib.sha256(journal).hexdigest()
     durable_events = tuple(
-        ReviewEvent.from_dict(row)
+        _decode_review_event(row)
         for row in _review_snapshot_rows_from_bytes(journal, snapshot_sha256)
     )
     if durable_events != existing:
@@ -1827,7 +1871,7 @@ def _pairing_review_snapshot_sha256(
         submission.original_pairing.ffmpeg_version,
     )
     rows = read_jsonl(events_path) if events_path.exists() else ()
-    decoded = tuple(ProcessingEvent.from_dict(row) for row in rows)
+    decoded = tuple(_decode_processing_event(row) for row in rows)
     transitions = tuple(
         event
         for event in decoded
@@ -2034,8 +2078,8 @@ def _validate_existing_pairing_corrections(
         current_rows = read_jsonl(current_path)
         if len(automatic_rows) != 1 or len(current_rows) != 1:
             raise ValueError("pairing correction artifacts must each contain one row")
-        automatic = pairing_from_dict(automatic_rows[0])
-        corrected = pairing_from_dict(current_rows[0])
+        automatic = _decode_pairing_artifact(automatic_rows[0])
+        corrected = _decode_pairing_artifact(current_rows[0])
         if (
             automatic.recording_id != recording_id
             or automatic.config_sha256 != config.digest
@@ -2172,7 +2216,7 @@ def _import_review_bundle_locked(
                 raise ValueError("review automatic identity does not match pairing")
             source_raw = automatic_raw["source_audio"]
             if type(source_raw) is not dict:
-                raise TypeError("review source_audio must be an object")
+                raise ValueError("review source_audio must be an object")
             require_exact_fields(
                 source_raw, frozenset({"relative_path", "sha256"}), "review source audio"
             )
@@ -2183,13 +2227,13 @@ def _import_review_bundle_locked(
                 raise ValueError("review source audio identity does not match recording")
             binding_raw = automatic_raw["artifact_binding"]
             if type(binding_raw) is not dict:
-                raise TypeError("review artifact_binding must be an object")
+                raise ValueError("review artifact_binding must be an object")
             require_exact_fields(binding_raw, _ARTIFACT_BINDING_FIELDS, "review artifact binding")
             if binding_raw != _artifact_binding(run_directory, pairing, artifact, config):
                 raise ValueError("review artifact binding is stale or does not match")
             text_layers = automatic_raw["text_layers"]
             if type(text_layers) is not dict:
-                raise TypeError("review text_layers must be an object")
+                raise ValueError("review text_layers must be an object")
             require_exact_fields(
                 text_layers,
                 frozenset(
@@ -2228,7 +2272,7 @@ def _import_review_bundle_locked(
             takes_by_index: dict[int, dict[str, Any]] = {}
             for take_raw in takes_raw:
                 if type(take_raw) is not dict:
-                    raise TypeError("review automatic take must be an object")
+                    raise ValueError("review automatic take must be an object")
                 require_exact_fields(take_raw, _AUTOMATIC_TAKE_FIELDS, "review automatic take")
                 take_index = take_raw["take_index"]
                 if (

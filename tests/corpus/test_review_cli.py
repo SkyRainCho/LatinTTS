@@ -407,7 +407,7 @@ def test_review_export_rejects_strict_pairing_alignment_artifact_drift(
             alignment["takes"][0]["unit_id"] = "mismatched-unit"
         write_jsonl_atomic(alignment_path, (alignment,))
 
-    with pytest.raises((TypeError, ValueError), match=r"pairing|alignment|candidate"):
+    with pytest.raises(ValueError, match=r"pairing|alignment|candidate"):
         export_review_bundle(paths, config)
 
 
@@ -1636,7 +1636,7 @@ def test_import_review_rejects_nested_bundle_drift(tmp_path: Path) -> None:
         automatic_path.write_text(json.dumps(changed_automatic), encoding="utf-8")
         decision_path.write_text(json.dumps(changed_decision), encoding="utf-8")
         grid_path.write_text(changed_grid, encoding="utf-8")
-        with pytest.raises((TypeError, ValueError), match=match):
+        with pytest.raises(ValueError, match=match):
             import_review_bundle(paths, config)
     automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
     decision_path.write_text(json.dumps(decision), encoding="utf-8")

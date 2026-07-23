@@ -9,7 +9,9 @@ from latintts.corpus.alignment import WordSpan
 from latintts.corpus.audio import PcmMetrics
 from latintts.corpus.domain import CorpusFailure
 from latintts.corpus.manifest import require_approval
-from latintts.corpus.records import SegmentRecord
+from latintts.corpus.paths import CorpusPaths
+from latintts.corpus.records import RightsRecord, SegmentRecord
+from latintts.corpus.store import write_jsonl_atomic
 from latintts.corpus.transcripts import SpokenUnit
 
 
@@ -287,5 +289,40 @@ def test_transcript_source_validation_rejects_provenance_drift(case: str) -> Non
         raw["selected_candidate_id"] = None
     else:
         raw["selected_candidate_id"] = "missing"
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         manifest_module._validate_transcript_sources(raw, "rec-1")  # type: ignore[arg-type]
+
+
+def test_manifest_rights_loader_converts_external_shape_type_error(tmp_path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    row = RightsRecord(
+        "rights-1",
+        "owner-1",
+        "speaker-1",
+        True,
+        True,
+        True,
+        "unknown",
+        "unknown",
+        "unknown",
+        "2026-07-19",
+        "consent",
+        "",
+    ).to_dict()
+    row["allow_model_training"] = "yes"
+    write_jsonl_atomic(paths.manifests / "rights.jsonl", (row,))
+
+    with pytest.raises(ValueError, match="rights"):
+        manifest_module._load_rights(paths)
+
+
+def test_existing_manifest_loader_converts_external_shape_type_error(tmp_path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    row = _segment().to_dict()
+    row["quality_metrics"] = []
+    write_jsonl_atomic(paths.manifests / "segments.jsonl", (row,))
+
+    with pytest.raises(ValueError, match="segment"):
+        manifest_module._validate_existing_manifest(paths)

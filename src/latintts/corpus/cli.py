@@ -231,6 +231,19 @@ def _load_selection(path: Path) -> PilotSelection:
         )
         if type(raw["recording_ids"]) is not list or type(raw["inventory_hashes"]) is not list:
             raise TypeError("pilot selection IDs and hashes must be arrays")
+        if any(type(value) is not str or not value for value in raw["recording_ids"]):
+            raise ValueError("pilot selection recording_ids must contain non-empty strings")
+        if any(
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in raw["inventory_hashes"]
+        ):
+            raise ValueError(
+                "pilot selection inventory_hashes must contain lowercase SHA-256 digests"
+            )
+        if len(raw["recording_ids"]) != len(raw["inventory_hashes"]):
+            raise ValueError("pilot selection IDs and hashes must have equal lengths")
         return PilotSelection(
             schema_version=raw["schema_version"],
             strategy=raw["strategy"],
@@ -798,6 +811,21 @@ def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any],
         raise ValueError("VAD config must contain exact fields")
     if vad["backend"] != "silero-vad" or vad["model_version"] != _SILERO_VERSION:
         raise ValueError("VAD config must pin silero-vad 6.2.1")
+    for field in ("threshold", "neg_threshold", "max_speech_duration_s"):
+        if type(vad[field]) not in (int, float):
+            raise ValueError(f"VAD config {field} must be a number")
+    for field in (
+        "min_speech_duration_ms",
+        "min_silence_duration_ms",
+        "speech_pad_ms",
+        "min_silence_at_max_speech",
+        "sample_rate",
+        "window_samples",
+    ):
+        if type(vad[field]) is not int:
+            raise ValueError(f"VAD config {field} must be an integer")
+    if type(vad["use_max_poss_sil_at_max_speech"]) is not bool:
+        raise ValueError("VAD config use_max_poss_sil_at_max_speech must be a boolean")
     SileroVadBackend(
         threshold=vad["threshold"],
         neg_threshold=vad["neg_threshold"],
@@ -814,6 +842,17 @@ def _validate_segmentation_config(config: CorpusConfig) -> tuple[dict[str, Any],
         raise ValueError("pause config must contain exact fields")
     if pause["profile_id"] != "pause-profile-v1":
         raise ValueError("pause config must pin pause-profile-v1")
+    for field in (
+        "minimum_gap_ms",
+        "minimum_gap_count",
+        "maximum_iterations",
+        "minimum_cluster_size",
+    ):
+        if type(pause[field]) is not int:
+            raise ValueError(f"pause config {field} must be an integer")
+    for field in ("separation_ratio", "maximum_cluster_imbalance_ratio"):
+        if type(pause[field]) not in (int, float):
+            raise ValueError(f"pause config {field} must be a number")
     # Exercise the same parameter validator without requiring eligible gaps.
     with suppress(CorpusFailure):
         classify_pauses(
@@ -999,15 +1038,18 @@ def _decode_cached_vad(raw: object) -> VadResult:
     }:
         raise ValueError("cached VAD result must contain exact fields")
     if type(raw["frames"]) is not list or type(raw["speech_intervals"]) is not list:
-        raise TypeError("cached VAD arrays are invalid")
-    return VadResult(
-        raw["backend"],
-        raw["model_version"],
-        raw["model_sha256"],
-        raw["sample_rate"],
-        tuple(VadFrame(**frame) for frame in raw["frames"]),
-        tuple(SpeechInterval(**interval) for interval in raw["speech_intervals"]),
-    )
+        raise ValueError("cached VAD arrays are invalid")
+    try:
+        return VadResult(
+            raw["backend"],
+            raw["model_version"],
+            raw["model_sha256"],
+            raw["sample_rate"],
+            tuple(VadFrame(**frame) for frame in raw["frames"]),
+            tuple(SpeechInterval(**interval) for interval in raw["speech_intervals"]),
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"cached VAD result is invalid: {error}") from error
 
 
 def _validate_result_row(
@@ -1165,7 +1207,10 @@ def segment_corpus(
                 cached_analysis_raw = rows[0].get("analysis_audio")
                 if type(cached_analysis_raw) is not dict:
                     raise ValueError("segmentation cache lacks analysis provenance")
-                cached_analysis = DerivedAudio.from_dict(cached_analysis_raw)
+                try:
+                    cached_analysis = DerivedAudio.from_dict(cached_analysis_raw)
+                except (KeyError, TypeError) as error:
+                    raise ValueError("segmentation analysis provenance is invalid") from error
                 analysis = derive_analysis_audio(
                     record,
                     paths,
@@ -1184,7 +1229,7 @@ def segment_corpus(
                     vad_parameters=vad_parameters,
                     pause_parameters=pause_parameters,
                 )
-            except (KeyError, TypeError, ValueError, CorpusFailure) as error:
+            except (KeyError, OSError, ValueError, CorpusFailure) as error:
                 if isinstance(error, CorpusFailure) and error.code == "ALIGNER_UNAVAILABLE":
                     raise
                 raise CorpusFailure(
@@ -1321,14 +1366,25 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
         raise ValueError("transcript identity or state is invalid for pairing")
     units_raw = raw["spoken_units"]
     if type(units_raw) is not list or not units_raw:
-        raise TypeError("transcript spoken_units must be a non-empty array")
+        raise ValueError("transcript spoken_units must be a non-empty array")
     expected = frozenset(field.name for field in fields(SpokenUnit))
     units: list[SpokenUnit] = []
     unit_ids: set[str] = set()
     for unit_raw in units_raw:
         if type(unit_raw) is not dict:
-            raise TypeError("spoken unit must be an object")
+            raise ValueError("spoken unit must be an object")
         require_exact_fields(unit_raw, expected, "spoken unit")
+        if (
+            type(unit_raw["ordinal"]) is not int
+            or unit_raw["ordinal"] < 1
+            or type(unit_raw["text"]) is not str
+            or not unit_raw["text"]
+            or type(unit_raw["token_start_index"]) is not int
+            or unit_raw["token_start_index"] < 0
+            or type(unit_raw["token_end_index"]) is not int
+            or unit_raw["token_end_index"] < 0
+        ):
+            raise ValueError("spoken unit fields have invalid types or ranges")
         unit = SpokenUnit(**unit_raw)
         require_safe_pairing_id(unit.unit_id, "unit_id")
         if unit.unit_id in unit_ids:
@@ -1339,7 +1395,7 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
         raise ValueError("spoken units do not exactly reconstruct spoken_text")
     plan = raw["pronunciation_plan"]
     if type(plan) is not dict:
-        raise TypeError("transcript pronunciation plan is invalid")
+        raise ValueError("transcript pronunciation plan is invalid")
     require_exact_fields(
         plan,
         frozenset(
@@ -1357,7 +1413,7 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
     )
     tokens_raw = plan["tokens"]
     if type(tokens_raw) is not list:
-        raise TypeError("transcript pronunciation plan tokens must be an array")
+        raise ValueError("transcript pronunciation plan tokens must be an array")
     if (
         plan["schema_version"] != "1"
         or plan["rule_version"] != "ecclesiastical-roman-v1"
@@ -1368,7 +1424,7 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
         raise ValueError("pronunciation plan identity or text does not match transcript")
     for field in ("phrase_phonemes", "warning_codes"):
         if type(plan[field]) is not list or any(type(item) is not str for item in plan[field]):
-            raise TypeError(f"pronunciation plan {field} must be a string array")
+            raise ValueError(f"pronunciation plan {field} must be a string array")
     token_fields = frozenset(
         {
             "surface",
@@ -1388,7 +1444,7 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
         raise ValueError("pronunciation plan token count does not match spoken_text")
     for token_raw, span in zip(tokens_raw, spans, strict=True):
         if type(token_raw) is not dict:
-            raise TypeError("pronunciation plan token must be an object")
+            raise ValueError("pronunciation plan token must be an object")
         require_exact_fields(token_raw, token_fields, "pronunciation plan token")
         if (
             token_raw["surface"] != span.surface
@@ -1400,7 +1456,7 @@ def _decode_spoken_units(raw: dict[str, Any], recording_id: str) -> tuple[Spoken
             if type(token_raw[field]) is not list or any(
                 type(item) is not str for item in token_raw[field]
             ):
-                raise TypeError(f"pronunciation token {field} must be a string array")
+                raise ValueError(f"pronunciation token {field} must be a string array")
         if (
             not token_raw["syllables"]
             or type(token_raw["stress_index"]) is not int
@@ -1457,8 +1513,11 @@ def _load_pairing_segmentation(
         raise ValueError("segmentation cache must contain exactly one result")
     row = rows[0]
     if type(row.get("analysis_audio")) is not dict:
-        raise TypeError("segmentation analysis_audio must be an object")
-    analysis = DerivedAudio.from_dict(row["analysis_audio"])
+        raise ValueError("segmentation analysis_audio must be an object")
+    try:
+        analysis = DerivedAudio.from_dict(row["analysis_audio"])
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"segmentation analysis_audio is invalid: {error}") from error
     cached_analysis = derive_analysis_audio(
         record,
         paths,
@@ -1470,7 +1529,7 @@ def _load_pairing_segmentation(
     vad_parameters, pause_parameters = _validate_segmentation_config(config)
     vad_raw = row.get("vad")
     if type(vad_raw) is not dict or type(vad_raw.get("model_sha256")) is not str:
-        raise TypeError("segmentation VAD provenance is invalid")
+        raise ValueError("segmentation VAD provenance is invalid")
     if not _validate_result_row(
         row,
         record=record,
@@ -1482,18 +1541,24 @@ def _load_pairing_segmentation(
         pause_parameters=pause_parameters,
     ):
         raise ValueError("pairing requires successful pause classification")
-    vad_result = _decode_cached_vad(vad_raw)
+    try:
+        vad_result = _decode_cached_vad(vad_raw)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"segmentation VAD result is invalid: {error}") from error
     pause_raw = row["pause"]
     intervals_raw = pause_raw["intervals"]
     if type(intervals_raw) is not list:
-        raise TypeError("segmentation pause intervals must be an array")
-    pauses = tuple(PauseInterval(**item) for item in intervals_raw)
-    analysis_result = PauseAnalysis(
-        pauses,
-        pause_raw["threshold_seconds"],
-        pause_raw["short_median_seconds"],
-        pause_raw["long_median_seconds"],
-    )
+        raise ValueError("segmentation pause intervals must be an array")
+    try:
+        pauses = tuple(PauseInterval(**item) for item in intervals_raw)
+        analysis_result = PauseAnalysis(
+            pauses,
+            pause_raw["threshold_seconds"],
+            pause_raw["short_median_seconds"],
+            pause_raw["long_median_seconds"],
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"segmentation pause analysis is invalid: {error}") from error
     return (
         cached_analysis,
         vad_result.speech_intervals,
@@ -1591,10 +1656,16 @@ def _human_pairing_transition_exists(
         automatic_rows = read_jsonl(automatic_path)
         if len(automatic_rows) != 1:
             return False
-        automatic_pairing = pairing_from_dict(automatic_rows[0])
-    except (OSError, TypeError, ValueError):
+        try:
+            automatic_pairing = pairing_from_dict(automatic_rows[0])
+        except (KeyError, TypeError) as error:
+            raise ValueError("automatic pairing artifact is invalid") from error
+    except (OSError, ValueError):
         return False
-    decoded = tuple(ProcessingEvent.from_dict(row) for row in events)
+    try:
+        decoded = tuple(ProcessingEvent.from_dict(row) for row in events)
+    except (KeyError, TypeError, ValueError):
+        return False
     matching = tuple(
         event
         for event in decoded
@@ -1616,7 +1687,7 @@ def _human_pairing_transition_exists(
         correction_events = validate_pairing_review_snapshot(
             review_path, snapshot_sha256, automatic_pairing, pairing
         )
-    except (OSError, TypeError, ValueError):
+    except (OSError, ValueError):
         return False
     timestamp = max(event.reviewed_at for event in correction_events)
     prior = replace(record, state=CorpusState.SEGMENTED)
@@ -1646,7 +1717,14 @@ def pair_corpus(
     recordings = _load_recordings(paths)
     by_id = {record.recording_id: (index, record) for index, record in enumerate(recordings)}
     transcript_rows = read_jsonl(paths.manifests / "transcripts.jsonl")
-    transcript_by_id = {row.get("recording_id"): row for row in transcript_rows}
+    transcript_by_id: dict[str, dict[str, Any]] = {}
+    for row in transcript_rows:
+        transcript_id = row.get("recording_id")
+        if type(transcript_id) is not str or not transcript_id:
+            raise ValueError("transcript recording_id must be a non-empty string")
+        if transcript_id in transcript_by_id:
+            raise ValueError("transcripts must contain unique recording_id values")
+        transcript_by_id[transcript_id] = row
     if len(transcript_by_id) != len(transcript_rows) or set(transcript_by_id) != set(
         selection.recording_ids
     ):
@@ -1693,7 +1771,10 @@ def pair_corpus(
                 cached_rows = read_jsonl(pairing_path)
                 if len(cached_rows) != 1:
                     raise ValueError("pairing cache must contain one recording")
-                cached_pairing = pairing_from_dict(cached_rows[0])
+                try:
+                    cached_pairing = pairing_from_dict(cached_rows[0])
+                except (KeyError, TypeError) as error:
+                    raise ValueError("pairing cache payload is invalid") from error
                 pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
                 events = read_jsonl(run_directory.parent / "processing-events.jsonl")
                 reviewed_pairing = _human_pairing_transition_exists(
@@ -1705,7 +1786,7 @@ def pair_corpus(
                     paths,
                     run_directory,
                 )
-            except (KeyError, OSError, TypeError, ValueError) as error:
+            except (OSError, ValueError) as error:
                 raise CorpusFailure("CACHE_ARTIFACT_INVALID", "pairing cache is invalid") from error
         pairing = pair_recording(
             recording_id,
@@ -1836,7 +1917,10 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
             pairing_rows = read_jsonl(pairing_path)
             if len(pairing_rows) != 1:
                 raise ValueError("pairing cache must contain exactly one recording")
-            pairing = pairing_from_dict(pairing_rows[0])
+            try:
+                pairing = pairing_from_dict(pairing_rows[0])
+            except (KeyError, TypeError) as error:
+                raise ValueError("pairing cache payload is invalid") from error
             if pairing.recording_id != recording_id or pairing.config_sha256 != config.digest:
                 raise ValueError("pairing identity does not match align request")
             pairing_sha256 = hashlib.sha256(pairing_path.read_bytes()).hexdigest()
@@ -1860,6 +1944,11 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
             )
             if not human_reviewed and not processing_event_exists(events, paired_event):
                 raise ValueError("pairing artifact is not bound to its PAIRED event")
+        except (OSError, ValueError) as error:
+            raise CorpusFailure(
+                "CACHE_ARTIFACT_INVALID", "selected alignment cache is invalid"
+            ) from error
+        try:
             expected = _alignment_row(
                 pairing_path,
                 pairing,
@@ -1867,7 +1956,7 @@ def align_corpus(paths: CorpusPaths, config: CorpusConfig, backend: PairingBacke
                 backend,
                 allow_reviewed_pairing=human_reviewed,
             )
-        except (KeyError, OSError, TypeError, ValueError) as error:
+        except (KeyError, OSError, ValueError) as error:
             raise CorpusFailure(
                 "CACHE_ARTIFACT_INVALID", "selected alignment cache is invalid"
             ) from error
@@ -2292,7 +2381,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         except CorpusFailure as error:
             _print_cli_error(error.code, error, args.project_root)
             return 1
-        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+        except (InventoryInputError, OSError, ValueError) as error:
             _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1
@@ -2311,7 +2400,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         except ReportOutputRecoveryError as error:
             _print_cli_error(error.code, error, args.project_root)
             return 2
-        except (OSError, TypeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         print(f"corpus-report: {report.scale_decision.value}")
@@ -2331,7 +2420,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         except CorpusFailure as error:
             _print_cli_error(error.code, error, args.project_root)
             return 1
-        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+        except (InventoryInputError, OSError, ValueError) as error:
             _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
     if args.command == "align":
@@ -2383,7 +2472,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         except CorpusFailure as error:
             _print_cli_error(error.code, error, args.project_root)
             return 1
-        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+        except (InventoryInputError, OSError, ValueError) as error:
             _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1
@@ -2417,7 +2506,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         except CorpusFailure as error:
             _print_cli_error(error.code, error, args.project_root)
             return 1
-        except (InventoryInputError, OSError, TypeError, ValueError) as error:
+        except (InventoryInputError, OSError, ValueError) as error:
             _print_cli_error("MANIFEST_SCHEMA_MISMATCH", error, args.project_root)
             return 2
         return 0 if successful else 1

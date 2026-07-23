@@ -1592,6 +1592,60 @@ def test_pair_recording_rejects_invalid_alignment_cache_schema_before_backend_re
     assert backend.calls == 2
 
 
+def test_pair_recording_cached_alignment_programmer_type_error_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config, analysis = _analysis_fixture(tmp_path)
+    window = TextUnitWindow("unit-1", "Pater noster", 0, 160_000, ((78_000, 82_000),), 0, 2)
+    backend = _FakeAligner()
+    result = pair_recording(
+        "rec-1",
+        (window,),
+        analysis,  # type: ignore[arg-type]
+        paths,
+        backend,
+        segmentation_artifact_sha256="b" * 64,
+        config_sha256=config.digest,
+        pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    outcome = result.groups[0]
+    assert outcome.group is not None
+    evidence = outcome.group.selected_evidence
+    assert evidence.first_audio is not None
+    assert evidence.second_audio is not None
+    (paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json").unlink()
+    extracted = iter((evidence.first_audio, evidence.second_audio))
+
+    def reuse_audio(*_args: object, **_kwargs: object) -> object:
+        return next(extracted)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr(
+        "latintts.corpus.pairing._result_matches_request_provenance",
+        fail,
+    )
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        pair_recording(
+            "rec-1",
+            (window,),
+            analysis,  # type: ignore[arg-type]
+            paths,
+            backend,
+            segmentation_artifact_sha256="b" * 64,
+            config_sha256=config.digest,
+            pairing_parameters=PairingParameters(0.65, 1.35, 0.02),
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+            extract_candidate=reuse_audio,  # type: ignore[arg-type]
+        )
+
+
 def test_pair_recording_rejects_unit_token_count_mismatch(tmp_path: Path) -> None:
     paths, config, analysis = _analysis_fixture(tmp_path)
     with pytest.raises(CorpusFailure) as error:

@@ -16,6 +16,7 @@ from latintts.corpus.review import (
     replay_review_events,
     write_textgrid,
 )
+from latintts.corpus.store import write_jsonl_atomic
 from tests.corpus.factories import recording
 
 
@@ -509,7 +510,7 @@ def test_textgrid_reader_rejects_missing_word_interval_count(tmp_path: Path) -> 
 
 
 def test_recording_decoder_rejects_non_object_metadata() -> None:
-    with pytest.raises(TypeError, match="metadata"):
+    with pytest.raises(ValueError, match="metadata"):
         review_module._decode_recording(
             {
                 "schema_version": "1",
@@ -718,7 +719,7 @@ def test_automatic_value_schema_rejects_invalid_nested_values(raw: object) -> No
 
 
 def test_decision_and_change_helpers_reject_invalid_values() -> None:
-    with pytest.raises(TypeError, match="object"):
+    with pytest.raises(ValueError, match="object"):
         review_module._validate_decision_item(None)
     base = {
         "entity_id": "take-1",
@@ -779,6 +780,35 @@ def test_decision_and_change_helpers_reject_invalid_values() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "change",
+    (
+        {"decision": []},
+        {
+            "entity_id": [],
+            "decision": "unreviewed",
+            "reason": "",
+            "reviewer": "",
+            "reviewed_at": "",
+        },
+    ),
+)
+def test_decision_decoder_rejects_unhashable_members_as_value_errors(
+    change: dict[str, object],
+) -> None:
+    raw: dict[str, object] = {
+        "entity_id": "take-1",
+        "decision": "approved",
+        "reason": "reason",
+        "reviewer": "owner",
+        "reviewed_at": "2026-07-19T12:00:00+08:00",
+    }
+    raw.update(change)
+
+    with pytest.raises(ValueError, match=r"decision|entity_id"):
+        review_module._validate_decision_item(raw)
+
+
 def test_review_json_reader_rejects_duplicate_constants_and_nonobjects(tmp_path: Path) -> None:
     path = tmp_path / "decision.json"
     path.write_text('{"id":1,"id":2}', encoding="utf-8")
@@ -810,6 +840,72 @@ def test_existing_review_history_rejects_duplicate_and_noop_events(tmp_path: Pat
     noop = review_module._new_review_event("take-1", "segment_start", 0.0, 0.0, decision)
     write_jsonl_atomic(path, (noop.to_dict(),))
     with pytest.raises(ValueError, match="no-op"):
+        review_module._load_existing_review_events(path)
+
+
+def test_review_selection_loader_converts_external_shape_type_error(tmp_path: Path) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    write_jsonl_atomic(
+        paths.manifests / "pilot-selection.json",
+        (
+            {
+                "schema_version": "1",
+                "strategy": "representative",
+                "recording_ids": "rec-1",
+                "inventory_hashes": ["a" * 64],
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="selection"):
+        review_module._load_selection(paths)
+
+
+@pytest.mark.parametrize(
+    ("recording_ids", "inventory_hashes"),
+    (([[]], ["a" * 64]), (["rec-1"], [{}])),
+)
+def test_review_selection_loader_rejects_non_string_members(
+    recording_ids: list[object],
+    inventory_hashes: list[object],
+    tmp_path: Path,
+) -> None:
+    paths = CorpusPaths.from_project_root(tmp_path)
+    paths.ensure_layout()
+    write_jsonl_atomic(
+        paths.manifests / "pilot-selection.json",
+        (
+            {
+                "schema_version": "1",
+                "strategy": "representative",
+                "recording_ids": recording_ids,
+                "inventory_hashes": inventory_hashes,
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="selection"):
+        review_module._load_selection(paths)
+
+
+def test_review_event_loader_converts_external_shape_type_error(tmp_path: Path) -> None:
+    path = tmp_path / "review.jsonl"
+    event = review_module._new_review_event(
+        "take-1",
+        "review_decision",
+        "unreviewed",
+        "approved",
+        {
+            "reason": "listened",
+            "reviewer": "owner",
+            "reviewed_at": "2026-07-19T12:00:00+08:00",
+        },
+    ).to_dict()
+    event["reviewed_at"] = 7
+    write_jsonl_atomic(path, (event,))
+
+    with pytest.raises(ValueError, match="review event"):
         review_module._load_existing_review_events(path)
 
 

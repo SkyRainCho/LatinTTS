@@ -188,7 +188,10 @@ def validate_processing_events(
     rows: Iterable[dict[str, Any]],
 ) -> tuple[ProcessingEvent, ...]:
     """Decode and validate a complete processing journal without writing it."""
-    decoded_events = tuple(ProcessingEvent.from_dict(row) for row in rows)
+    try:
+        decoded_events = tuple(ProcessingEvent.from_dict(row) for row in rows)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"processing event row is invalid: {error}") from error
     event_ids = [event.event_id for event in decoded_events]
     if len(event_ids) != len(set(event_ids)):
         raise ValueError("processing events contain duplicate event_id")
@@ -267,6 +270,13 @@ def processing_event_exists(
     return bool(matching_ids or matching_transitions)
 
 
+def _validate_persisted_recording_ids(rows: Iterable[dict[str, Any]]) -> None:
+    for row in rows:
+        recording_id = row.get("recording_id")
+        if type(recording_id) is not str or not recording_id:
+            raise ValueError("existing manifest recording_id must be a non-empty string")
+
+
 def persist_recording_transition(
     *,
     recordings_path: Path,
@@ -304,6 +314,7 @@ def _persist_recording_transition_locked(
     if target_matches[0].state is not event.target_state:
         raise ValueError("target manifest state must equal event target_state")
     existing_rows = read_jsonl(recordings_path)
+    _validate_persisted_recording_ids(existing_rows)
     existing_matches = [
         row for row in existing_rows if row.get("recording_id") == event.recording_id
     ]
@@ -420,6 +431,7 @@ def _persist_recording_transitions_locked(
     ):
         raise ValueError("recordings snapshot changed before terminal persistence")
     existing_rows = _read_jsonl_in_directory(recordings_path, _recordings_directory_fd)
+    _validate_persisted_recording_ids(existing_rows)
     existing_by_id = {row.get("recording_id"): row for row in existing_rows}
     if len(existing_by_id) != len(existing_rows) or set(existing_by_id) != set(target_by_id):
         raise ValueError("target manifest recording_id set and count must remain unchanged")

@@ -127,7 +127,7 @@ class _ManifestAttestation:
         require_exact_fields(raw, _MANIFEST_ATTESTATION_FIELDS, "manifest attestation")
         evidence = raw["evidence"]
         if type(evidence) is not dict:
-            raise TypeError("manifest attestation evidence must be an object")
+            raise ValueError("manifest attestation evidence must be an object")
         try:
             decoded = ProcessingEvent.from_dict(evidence)
         except (TypeError, ValueError) as error:
@@ -370,12 +370,12 @@ def _pronunciation_slice(
 ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[str, ...], str]:
     plan = transcript["pronunciation_plan"]
     if type(plan) is not dict:
-        raise TypeError("transcript pronunciation_plan must be an object")
+        raise ValueError("transcript pronunciation_plan must be an object")
     if plan.get("schema_version") != "1" or plan.get("rule_version") != ("ecclesiastical-roman-v1"):
         raise CorpusFailure("MANIFEST_SCHEMA_MISMATCH", "pronunciation plan version is invalid")
     tokens = plan.get("tokens")
     if type(tokens) is not list:
-        raise TypeError("pronunciation plan tokens must be an array")
+        raise ValueError("pronunciation plan tokens must be an array")
     start = unit.token_start_index
     end = unit.token_end_index
     if (
@@ -412,7 +412,7 @@ def _pronunciation_slice(
         if type(warning_values) is not list or any(
             not isinstance(value, str) or not value for value in warning_values
         ):
-            raise TypeError("pronunciation warning codes must be a string array")
+            raise ValueError("pronunciation warning codes must be a string array")
         if not isinstance(normalized_value, str) or not normalized_value:
             raise ValueError("pronunciation token normalized text must be non-empty")
         ipa.append(ipa_value)
@@ -458,11 +458,11 @@ def _effective_word_spans(
         raise ValueError("effective review words do not cover the alignment")
     segment_start = effective["segment_start"]
     if type(segment_start) not in (int, float):
-        raise TypeError("effective segment_start must be numeric")
+        raise ValueError("effective segment_start must be numeric")
     output: list[WordSpan] = []
     for index, (raw, original) in enumerate(zip(words, result.words, strict=True)):
         if type(raw) is not dict:
-            raise TypeError("effective review word must be an object")
+            raise ValueError("effective review word must be an object")
         output.append(
             WordSpan(
                 raw["text"],
@@ -688,7 +688,7 @@ def build_approved_segments(
             local_start = effective["segment_start"]
             local_end = effective["segment_end"]
             if type(local_start) not in (int, float) or type(local_end) not in (int, float):
-                raise TypeError("effective review bounds must be numeric")
+                raise ValueError("effective review bounds must be numeric")
             absolute_start = take.start_sample / 16_000 + local_start
             absolute_end = take.start_sample / 16_000 + local_end
             source_start = _sample_position(absolute_start, recording.metadata.sample_rate)
@@ -1743,7 +1743,10 @@ def _publish_staged_audio(
 
 def _load_rights(paths: CorpusPaths) -> dict[str, RightsRecord]:
     rows = read_jsonl(paths.manifests / "rights.jsonl")
-    records = tuple(RightsRecord.from_dict(row) for row in rows)
+    try:
+        records = tuple(RightsRecord.from_dict(row) for row in rows)
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"rights row is invalid: {error}") from error
     by_id = {record.rights_id: record for record in records}
     if len(by_id) != len(records):
         raise ValueError("rights.jsonl contains duplicate rights_id")
@@ -1774,7 +1777,7 @@ def _validate_transcript_sources(transcript: dict[str, Any], recording_id: str) 
     by_id: dict[str, dict[str, Any]] = {}
     for raw in candidates:
         if type(raw) is not dict:
-            raise TypeError("transcript source candidate must be an object")
+            raise ValueError("transcript source candidate must be an object")
         require_exact_fields(raw, fields, "transcript source candidate")
         candidate_id = raw["candidate_id"]
         if not isinstance(candidate_id, str) or not candidate_id or candidate_id in by_id:
@@ -1823,9 +1826,19 @@ def _validate_processing_history(
         raise ValueError("recording state is not bound to processing history")
     # Context creation has already required exactly one segmentation row and
     # validated its input/config/model provenance against the pinned artifact.
-    segmentation_row = read_jsonl(context.run_directory / "segmentation.json")[0]
-    segmentation_vad = cast(dict[str, Any], segmentation_row["vad"])
-    segmentation_model_sha256 = cast(str, segmentation_vad["model_sha256"])
+    segmentation_rows = read_jsonl(context.run_directory / "segmentation.json")
+    if len(segmentation_rows) != 1:
+        raise ValueError("segmentation artifact must contain exactly one row")
+    segmentation_vad = segmentation_rows[0].get("vad")
+    if type(segmentation_vad) is not dict:
+        raise ValueError("segmentation VAD must be an object")
+    segmentation_model_sha256 = segmentation_vad.get("model_sha256")
+    if (
+        not isinstance(segmentation_model_sha256, str)
+        or len(segmentation_model_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in segmentation_model_sha256)
+    ):
+        raise ValueError("segmentation VAD model_sha256 must be lowercase SHA-256")
     transcript_sha256 = hashlib.sha256(
         context.transcript["spoken_text"].encode("utf-8")
     ).hexdigest()
@@ -1939,7 +1952,10 @@ def _validate_existing_manifest(paths: CorpusPaths) -> tuple[SegmentRecord, ...]
     manifest = paths.manifests / "segments.jsonl"
     if not manifest.exists():
         raise ValueError("terminal recording states require an existing segments.jsonl")
-    rows = tuple(SegmentRecord.from_dict(row) for row in read_jsonl(manifest))
+    try:
+        rows = tuple(SegmentRecord.from_dict(row) for row in read_jsonl(manifest))
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"segment row is invalid: {error}") from error
     identities = tuple(row.segment_id for row in rows)
     if len(identities) != len(set(identities)):
         raise ValueError("segments.jsonl contains duplicate segment_id")

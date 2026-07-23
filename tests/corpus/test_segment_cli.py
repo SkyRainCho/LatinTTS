@@ -458,6 +458,37 @@ def test_segment_cache_rejects_changed_model_weight(tmp_path: Path) -> None:
     assert changed_backend.calls == 0
 
 
+@pytest.mark.parametrize("target", ("derive_analysis_audio", "_validate_result_row"))
+def test_segment_cached_core_programmer_type_error_propagates(
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, config = _set_up(tmp_path)
+    backend = _FakeVad(_speech())
+    assert segment_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_transform,
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise TypeError("programmer bug")
+
+    monkeypatch.setattr(f"latintts.corpus.cli.{target}", fail)
+
+    with pytest.raises(TypeError, match="programmer bug"):
+        segment_corpus(
+            paths,
+            config,
+            backend,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_transform,
+        )
+
+
 @pytest.mark.parametrize(("successful", "exit_code"), ((True, 0), (False, 1)))
 def test_segment_cli_builds_pinned_backend_and_reports_outcome(
     tmp_path: Path,

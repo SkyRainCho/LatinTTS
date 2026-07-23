@@ -205,7 +205,7 @@ def test_report_intent_decoder_rejects_noncanonical_ownership_contract(case: str
     else:
         raw["outputs"].reverse()
 
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         report_module._decode_report_intent(raw)
 
 
@@ -1207,7 +1207,7 @@ def test_build_report_rejects_derived_audio_alias_without_publishing(
 def test_report_telemetry_strictly_validates_input(
     changes: dict[str, object], message: str
 ) -> None:
-    with pytest.raises((TypeError, ValueError), match=message):
+    with pytest.raises(ValueError, match=message):
         ReportTelemetry.from_dict(_telemetry_row(**changes))
 
 
@@ -1274,13 +1274,13 @@ def test_report_vad_interval_validation_rejects_each_invalid_layer(
     else:
         vad["speech_intervals"] = []
 
-    with pytest.raises((TypeError, ValueError), match=message):
+    with pytest.raises(ValueError, match=message):
         report_module._vad_intervals(raw, recording, analysis_sample_count=16_000)
 
 
 @pytest.mark.parametrize("issue", (1, "NOT_A_STABLE_ISSUE"))
 def test_report_issue_counter_rejects_invalid_issue_values(issue: object) -> None:
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         report_module._count_issue(Counter(), issue)
 
 
@@ -2038,7 +2038,7 @@ def test_build_report_rejects_invalid_pilot_identity_layers(
         segmentation["analysis_audio"] = []
         write_jsonl_atomic(segmentation_path, (segmentation,))
 
-    with pytest.raises((CorpusFailure, TypeError, ValueError), match=message):
+    with pytest.raises((CorpusFailure, ValueError), match=message):
         build_report(paths, config)
 
 
@@ -2048,6 +2048,7 @@ def test_build_report_rejects_invalid_pilot_identity_layers(
         ("identity", "identity"),
         ("takes", "exactly two takes"),
         ("take-index", "take identities"),
+        ("take-index-type", "take identities"),
         ("entity-id", "entity identity"),
         ("provenance-type", "take_provenance"),
         ("provenance-bounds", "take provenance"),
@@ -2066,6 +2067,8 @@ def test_build_report_rejects_invalid_review_automatic_layers(
         automatic["takes"] = []
     elif tamper == "take-index":
         automatic["takes"][1]["take_index"] = 1
+    elif tamper == "take-index-type":
+        automatic["takes"][0]["take_index"] = []
     elif tamper == "entity-id":
         automatic["takes"][0]["entity_id"] = "review:other"
     elif tamper == "provenance-type":
@@ -2074,7 +2077,7 @@ def test_build_report_rejects_invalid_review_automatic_layers(
         automatic["takes"][0]["take_provenance"]["source_start_sample"] += 1
     automatic_path.write_text(json.dumps(automatic), encoding="utf-8")
 
-    with pytest.raises((TypeError, ValueError), match=message):
+    with pytest.raises(ValueError, match=message):
         build_report(paths, config)
 
 
@@ -2135,6 +2138,30 @@ def test_build_report_rejects_original_pairing_with_different_run_identity(
     )
 
     with pytest.raises(ValueError, match=r"automatic pairing|pairing correction"):
+        build_report(paths, config)
+
+
+def test_build_report_converts_pairing_shape_type_error(tmp_path: Path) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    write_jsonl_atomic(paths.manifests / "pilot-telemetry.json", (_telemetry_row(),))
+    pairing_path = _first_selected_run_directory(paths, config) / "pairing.json"
+    pairing = dict(read_jsonl(pairing_path)[0])
+    pairing["windows"] = "invalid"
+    write_jsonl_atomic(pairing_path, (pairing,))
+
+    with pytest.raises(ValueError, match="pairing"):
+        build_report(paths, config)
+
+
+def test_build_report_converts_segment_shape_type_error(tmp_path: Path) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    write_jsonl_atomic(paths.manifests / "pilot-telemetry.json", (_telemetry_row(),))
+    segments_path = paths.manifests / "segments.jsonl"
+    segments = list(read_jsonl(segments_path))
+    segments[0]["quality_metrics"] = []
+    write_jsonl_atomic(segments_path, segments)
+
+    with pytest.raises(ValueError, match="segment"):
         build_report(paths, config)
 
 
