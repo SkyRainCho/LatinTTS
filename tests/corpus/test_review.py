@@ -509,8 +509,17 @@ def test_textgrid_reader_rejects_missing_word_interval_count(tmp_path: Path) -> 
         read_textgrid(path)
 
 
-def test_recording_decoder_rejects_non_object_metadata() -> None:
-    with pytest.raises(ValueError, match="metadata"):
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    (
+        (None, "metadata"),
+        ({}, "recording row"),
+    ),
+)
+def test_recording_decoder_converts_external_metadata_shape_errors(
+    metadata: object, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
         review_module._decode_recording(
             {
                 "schema_version": "1",
@@ -522,10 +531,53 @@ def test_recording_decoder_rejects_non_object_metadata() -> None:
                 "speaker_id": "speaker",
                 "rights_id": "rights",
                 "notes": "",
-                "metadata": None,
+                "metadata": metadata,
                 "state": "INGESTED",
             }
         )
+
+
+def test_alignment_decoder_converts_external_array_shape_type_error() -> None:
+    raw = {
+        "backend": "fake",
+        "backend_version": "1",
+        "model_id": "fake/model",
+        "model_revision": "a" * 40,
+        "model_license": "MIT",
+        "alignment_text": "pater",
+        "tokens": {},
+        "words": [],
+        "coverage": 1.0,
+        "mean_score": 1.0,
+        "alignment_level": "word",
+        "phoneme_timing_status": "not_estimated",
+        "warnings": [],
+        "raw_output": {},
+        "alignment_transform_version": "latin-alignment-v1",
+        "integrity_sha256": "b" * 64,
+    }
+
+    with pytest.raises(ValueError, match="alignment result is invalid"):
+        review_module._decode_alignment_result(raw)
+
+
+def test_processing_event_decoder_converts_external_array_shape_type_error() -> None:
+    raw = {
+        "schema_version": "1",
+        "event_id": "state-event",
+        "recording_id": "rec-1",
+        "previous_state": "INVENTORIED",
+        "target_state": "TRANSCRIPT_DRAFT",
+        "input_sha256s": {},
+        "config_sha256": "a" * 64,
+        "tool_versions": ["test-tool"],
+        "started_at": "2026-07-19T12:00:00+08:00",
+        "finished_at": "2026-07-19T12:00:01+08:00",
+        "result": "success",
+    }
+
+    with pytest.raises(ValueError, match="processing event is invalid"):
+        review_module._decode_processing_event(raw)
 
 
 @pytest.mark.parametrize(

@@ -666,8 +666,11 @@ def test_segment_cli_maps_failures(
         ("vad", ("delete", "neg_threshold", None)),
         ("vad", ("set", "unknown", True)),
         ("vad", ("set", "threshold", "high")),
+        ("vad", ("set", "min_speech_duration_ms", "250")),
+        ("vad", ("set", "use_max_poss_sil_at_max_speech", 1)),
         ("pause", ("delete", "minimum_cluster_size", None)),
         ("pause", ("set", "unknown", True)),
+        ("pause", ("set", "minimum_gap_ms", "50")),
         ("pause", ("set", "maximum_cluster_imbalance_ratio", "many")),
     ),
 )

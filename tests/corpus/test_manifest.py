@@ -40,6 +40,17 @@ def test_manifest_accepts_human_approved_warning_free_take() -> None:
     )
 
 
+def test_manifest_attestation_rejects_non_object_processing_evidence() -> None:
+    with pytest.raises(ValueError, match="evidence must be an object"):
+        manifest_module._ManifestAttestation.from_dict(
+            {
+                "schema_version": "1",
+                "terminal_event_id": "state-0123456789abcdef",
+                "evidence": [],
+            }
+        )
+
+
 def _segment(**changes: object) -> SegmentRecord:
     values: dict[str, object] = {
         "schema_version": "1",

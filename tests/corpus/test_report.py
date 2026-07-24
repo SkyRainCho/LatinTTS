@@ -2007,6 +2007,7 @@ def test_old_terminal_report_rejects_invalid_manifest_attestation(
         ("recording-state", "terminal review states"),
         ("rights-speaker", "rights speaker"),
         ("analysis-audio", "analysis_audio"),
+        ("analysis-audio-metrics", "analysis_audio"),
     ),
 )
 def test_build_report_rejects_invalid_pilot_identity_layers(
@@ -2035,7 +2036,10 @@ def test_build_report_rejects_invalid_pilot_identity_layers(
     else:
         segmentation_path = _first_selected_run_directory(paths, config) / "segmentation.json"
         segmentation = dict(read_jsonl(segmentation_path)[0])
-        segmentation["analysis_audio"] = []
+        if tamper == "analysis-audio":
+            segmentation["analysis_audio"] = []
+        else:
+            segmentation["analysis_audio"]["metrics"] = []
         write_jsonl_atomic(segmentation_path, (segmentation,))
 
     with pytest.raises((CorpusFailure, ValueError), match=message):
@@ -2047,6 +2051,7 @@ def test_build_report_rejects_invalid_pilot_identity_layers(
     (
         ("identity", "identity"),
         ("takes", "exactly two takes"),
+        ("take-object", "take must be an object"),
         ("take-index", "take identities"),
         ("take-index-type", "take identities"),
         ("entity-id", "entity identity"),
@@ -2065,6 +2070,8 @@ def test_build_report_rejects_invalid_review_automatic_layers(
         automatic["unit_id"] = "unit-other"
     elif tamper == "takes":
         automatic["takes"] = []
+    elif tamper == "take-object":
+        automatic["takes"][0] = []
     elif tamper == "take-index":
         automatic["takes"][1]["take_index"] = 1
     elif tamper == "take-index-type":
@@ -2150,6 +2157,26 @@ def test_build_report_converts_pairing_shape_type_error(tmp_path: Path) -> None:
     write_jsonl_atomic(pairing_path, (pairing,))
 
     with pytest.raises(ValueError, match="pairing"):
+        build_report(paths, config)
+
+
+def test_build_report_converts_automatic_pairing_shape_type_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, config = _completed_two_recording_project(tmp_path)
+    write_jsonl_atomic(paths.manifests / "pilot-telemetry.json", (_telemetry_row(),))
+    run_directory = _first_selected_run_directory(paths, config)
+    pairing_path = run_directory / "pairing-automatic.json"
+    pairing = dict(read_jsonl(run_directory / "pairing.json")[0])
+    pairing["windows"] = {}
+    write_jsonl_atomic(pairing_path, (pairing,))
+    monkeypatch.setattr(
+        report_module,
+        "_validate_existing_pairing_corrections",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(ValueError, match="automatic pairing artifact is invalid"):
         build_report(paths, config)
 
 

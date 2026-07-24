@@ -12,6 +12,9 @@ import pytest
 from latintts.corpus.cli import (
     _decode_cached_vad,
     _decode_spoken_units,
+    _load_pairing_segmentation,
+    _load_recordings,
+    _load_selection,
     align_corpus,
     main,
     pair_corpus,
@@ -287,6 +290,71 @@ def test_cached_vad_decoder_converts_external_row_type_error() -> None:
         _decode_cached_vad(raw)
 
 
+def test_selection_loader_rejects_unpaired_ids_and_hashes(tmp_path: Path) -> None:
+    path = tmp_path / "pilot-selection.json"
+    write_jsonl_atomic(
+        path,
+        (
+            {
+                "schema_version": "1",
+                "strategy": "explicit-v1",
+                "recording_ids": ["rec-1"],
+                "inventory_hashes": [],
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="equal lengths"):
+        _load_selection(path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("analysis-container", "analysis_audio must be an object"),
+        ("analysis-metrics", "analysis_audio is invalid"),
+        ("vad-provenance", "VAD provenance"),
+        ("pause-container", "pause intervals must be an array"),
+        ("pause-item", "pause analysis is invalid"),
+    ),
+)
+def test_pairing_segmentation_loader_converts_external_nested_shape_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    result_path = paths.alignments / "runs" / config.digest / "rec-1" / "segmentation.json"
+    row = deepcopy(read_jsonl(result_path)[0])
+    if mutation == "analysis-container":
+        row["analysis_audio"] = []
+    elif mutation == "analysis-metrics":
+        row["analysis_audio"]["metrics"] = []
+    elif mutation == "vad-provenance":
+        row["vad"]["model_sha256"] = []
+    elif mutation == "pause-container":
+        row["pause"]["intervals"] = {}
+        monkeypatch.setattr("latintts.corpus.cli._validate_result_row", lambda *_a, **_k: True)
+    else:
+        row["pause"]["intervals"] = [[]]
+        monkeypatch.setattr("latintts.corpus.cli._validate_result_row", lambda *_a, **_k: True)
+    write_jsonl_atomic(result_path, (row,))
+    transcript = read_jsonl(paths.manifests / "transcripts.jsonl")[0]
+    transcript_sha256 = hashlib.sha256(transcript["spoken_text"].encode("utf-8")).hexdigest()
+
+    with pytest.raises(ValueError, match=message):
+        _load_pairing_segmentation(
+            paths,
+            config,
+            _load_recordings(paths)[0],
+            transcript_sha256,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+
 def test_pair_rejects_non_string_transcript_identity_before_indexing(tmp_path: Path) -> None:
     paths, config = _set_up(tmp_path)
     transcript_path = paths.manifests / "transcripts.jsonl"
@@ -482,6 +550,60 @@ def test_pair_corpus_rejects_tampered_strict_pairing_cache(tmp_path: Path) -> No
             run_command=_audio_command,
         )
     assert error.value.code == "CACHE_ARTIFACT_INVALID"
+
+
+def test_pair_converts_cached_pairing_array_type_error_to_domain_failure(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    path = paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json"
+    raw = read_jsonl(path)[0]
+    raw["windows"] = {}
+    write_jsonl_atomic(path, (raw,))
+
+    with pytest.raises(CorpusFailure) as error:
+        pair_corpus(
+            paths,
+            config,
+            backend,
+            ffmpeg_version="ffmpeg-test-1",
+            run_command=_audio_command,
+        )
+
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "pairing cache payload is invalid" in str(error.value.__cause__)
+
+
+def test_align_converts_cached_pairing_array_type_error_to_domain_failure(tmp_path: Path) -> None:
+    paths, config = _set_up(tmp_path)
+    _segment(paths, config)
+    backend = _FakeAligner()
+    assert pair_corpus(
+        paths,
+        config,
+        backend,
+        ffmpeg_version="ffmpeg-test-1",
+        run_command=_audio_command,
+    )
+    path = paths.alignments / "runs" / config.digest / "rec-1" / "pairing.json"
+    raw = read_jsonl(path)[0]
+    raw["windows"] = {}
+    write_jsonl_atomic(path, (raw,))
+
+    with pytest.raises(CorpusFailure) as error:
+        align_corpus(paths, config, backend)
+
+    assert error.value.code == "CACHE_ARTIFACT_INVALID"
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "pairing cache payload is invalid" in str(error.value.__cause__)
 
 
 def test_pair_cli_builds_backend_and_maps_pairing_failure(
