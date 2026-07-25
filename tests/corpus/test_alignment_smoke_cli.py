@@ -23,7 +23,7 @@ def _config() -> CorpusConfig:
             "alignment": {
                 "backend": "mms-ctc",
                 "model_id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
-                "model_revision": "f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+                "model_revision": "49402e9577b1158620820667c218cd494cc44486",
                 "language": "lat",
                 "romanize": True,
                 "split_size": "word",
@@ -87,7 +87,7 @@ def _cpu_loader_modules(snapshot: Path) -> dict[str, object]:
 def test_alignment_smoke_writes_reproducible_runtime_audit_with_fake_modules(
     tmp_path: Path,
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     snapshot = tmp_path / "cache" / "snapshots" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "model.safetensors").write_bytes(b"fake weights")
@@ -229,7 +229,7 @@ def test_alignment_smoke_keeps_nvidia_smi_optional_for_cpu_fallback(
     nvidia_failure: BaseException,
     failure_name: str,
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     repository_cache = tmp_path / "hub" / "models--latin"
     snapshot = repository_cache / "snapshots" / revision
     snapshot.mkdir(parents=True)
