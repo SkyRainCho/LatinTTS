@@ -464,6 +464,15 @@ MMS CTC 对齐使用字符或罗马化 token，不直接消费 `PronunciationPla
 - 完成格式与哈希校验后原子改名。
 - 中断或异常留下可诊断日志，但不能把半成品标为成功。
 - 重跑从最近成功状态继续。
+- `report.json` / `report.md` 使用持久三态事务：`ACTIVE` 只回滚，恢复并联合校验旧报告对后
+  原子移交到 `ROLLED_BACK`；`ROLLED_BACK` 只继续清理旧事务；`COMMITTED` 只 roll-forward。
+- root outcome marker 在登记的 root payload 和私有事务目录之后最后删除。若中断发生在
+  私有目录删除后，只有当前报告对的完整身份与 intent 一致且登记 payload 均已消失时，
+  才能用 root outcome marker 完成终态恢复。
+- 该协议的验证边界是进程中断/重启；不承诺 OS crash 或断电后的目录项持久性，也不依赖
+  未经验证的 Windows 目录 `FlushFileBuffers` 行为。
+- 删除前核验登记的 device、inode、mode、size 与 SHA-256。该协议依赖
+  `corpus_mutation_lease` 协作锁；忽略协作锁的同用户路径 ABA 竞争不属于自动恢复保证。
 
 ### 15.3 Python 依赖
 
@@ -522,6 +531,7 @@ python -m latintts.corpus report
 | `AUDIO_QUALITY_REJECTED` | 人工确认音质不适用 | 保留原因并拒绝片段 |
 | `MANIFEST_SCHEMA_MISMATCH` | 产物 schema 不兼容 | 阻止消费 |
 | `CACHE_ARTIFACT_INVALID` | 缓存缺失、截断或哈希不符 | 删除该缓存产物并重算 |
+| `REPORT_OUTPUT_RECOVERY_REQUIRED` | report 双输出事务无法安全自动恢复 | 保留 intent、claim 和备份，人工核对后重跑 |
 
 错误记录包含实体 ID、阶段、稳定代码、可读说明、工具版本和可恢复建议，不依赖解析自由文本判断流程。
 

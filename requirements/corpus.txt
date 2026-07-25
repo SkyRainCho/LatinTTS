@@ -1,0 +1,2 @@
+silero-vad[onnx-cpu]==6.2.1
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@11855d1de76af2b490dd2e8e2db2661805ae90a0
