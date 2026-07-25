@@ -26,6 +26,9 @@ CI 必须在 pull request 和 `main` 分支 push 上自动运行，以只读权�
 8. 同一分支的新工作流运行会取消旧运行。
 9. 工作流只授予 `contents: read`。
 10. 不在 CI 下载真实 MMS 模型、运行真实 CUDA 对齐或读取 `local-data/`。
+11. 工作流 action 固定为不可变 SHA，并在注释中保留对应发布版本。
+12. `quality` job 使用完整 Git 历史，并按 PR 或 push 事件的提交范围检查空白错误。
+13. YAML 解析只在本地临时安装 `PyYAML==6.0.3`；不将其写入项目依赖或 CI 依赖。
 
 ## 3. 方案比较
 
@@ -95,8 +98,9 @@ concurrency:
 
 `quality` 使用 `ubuntu-latest`，步骤固定为：
 
-1. 使用 `actions/checkout@v6` 检出代码。
-2. 使用 `actions/setup-python@v6` 安装 Python 3.10，并启用 pip 缓存。
+1. 使用 `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2` 检出完整 Git
+   历史（`fetch-depth: 0`）。
+2. 使用 `actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0` 安装 Python 3.10，并启用 pip 缓存。
 3. 运行 `python -m pip install --upgrade pip`。
 4. 运行 `python -m pip install -e ".[dev]"`。
 5. 依次执行：
@@ -106,10 +110,12 @@ python -m ruff format --check .
 python -m ruff check .
 python -m mypy src
 python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
-git diff --check
+git diff --check "$BASE_SHA...$HEAD_SHA"
 ```
 
-任一步骤非零退出即令 job 失败。
+其中 `BASE_SHA` 为 `${{ github.event.pull_request.base.sha || github.event.before }}`，`HEAD_SHA` 为
+`${{ github.event.pull_request.head.sha || github.sha }}`；这会分别检查 PR 基准到 head 或 push 前后提交
+的事件感知范围。任一步骤非零退出即令 job 失败。
 
 ## 7. `tests` 矩阵 job
 
@@ -126,8 +132,8 @@ strategy:
 
 两个平台分别执行：
 
-1. 使用 `actions/checkout@v6` 检出代码。
-2. 使用 `actions/setup-python@v6` 安装 Python 3.10，并按 `pyproject.toml` 启用 pip 缓存。
+1. 使用 `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2` 检出代码。
+2. 使用 `actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0` 安装 Python 3.10，并按 `pyproject.toml` 启用 pip 缓存。
 3. 升级 pip。
 4. 安装 `-e ".[dev]"`。
 5. 执行：
@@ -163,10 +169,11 @@ python -m ruff format --check .
 python -m ruff check .
 python -m mypy src
 python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
-git diff --check
+git diff --check "$BASE_SHA...$HEAD_SHA"
 ```
 
-还必须验证 workflow YAML 可被解析，提交并推送到当前 PR 分支，然后等待 GitHub Actions 的
+还必须先在工作树 `.venv` 中临时安装 `PyYAML==6.0.3`（不修改 `pyproject.toml` 或 CI 依赖），再验证
+workflow YAML 可被解析，提交并推送到当前 PR 分支，然后等待 GitHub Actions 的
 `quality`、`tests (windows-latest)` 和 `tests (ubuntu-latest)` 全部成功。
 
 验收标准：
@@ -184,7 +191,7 @@ git diff --check
   <https://docs.astral.sh/ruff/configuration/>
 - GitHub 官方 Python Actions 指南：
   <https://docs.github.com/en/actions/tutorials/build-and-test-code/python>
-- `actions/setup-python@v6` 的缓存和最小权限说明：
+- `actions/setup-python`（固定 SHA `a309ff8b426b58ec0e2a45f0f869d46889d02405`，发布版本 `v6.2.0`）的缓存和最小权限说明：
   <https://github.com/actions/setup-python>
-- `actions/checkout@v6`：
+- `actions/checkout`（固定 SHA `de0fac2e4500dabe0009e67214ff5f5447ce83dd`，发布版本 `v6.0.2`）：
   <https://github.com/actions/checkout>

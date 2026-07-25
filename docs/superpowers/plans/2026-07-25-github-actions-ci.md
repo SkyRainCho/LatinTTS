@@ -6,7 +6,7 @@
 
 **Architecture:** Add one formatter-only exclusion in `pyproject.toml`, then add one `CI` workflow with an Ubuntu quality job and a Windows/Ubuntu test matrix. Static checks run once, full coverage runs once per platform, and GitHub concurrency cancels superseded runs from the same branch.
 
-**Tech Stack:** Python 3.10, pytest 8, pytest-cov 6, Ruff 0.16-compatible configuration, mypy 1.x strict mode, GitHub Actions, `actions/checkout@v6`, `actions/setup-python@v6`, PowerShell, GitHub CLI
+**Tech Stack:** Python 3.10, pytest 8, pytest-cov 6, Ruff 0.16-compatible configuration, mypy 1.x strict mode, GitHub Actions, `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`, `actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0`, PowerShell, GitHub CLI
 
 ## Global Constraints
 
@@ -16,6 +16,9 @@
 - Do not run the real MMS GPU smoke test or install `requirements/corpus.txt` in CI.
 - Do not upload `local-data/`, model caches, coverage artifacts, or releases.
 - Workflow permissions remain exactly `contents: read`.
+- Pin all action references to immutable SHAs and retain their release-version comments exactly.
+- The `quality` checkout uses `fetch-depth: 0`; its whitespace check uses the event-aware PR/push range.
+- Use worktree-local `.venv` for local commands. Install `PyYAML==6.0.3` only transiently before local YAML parsing; do not add it to `pyproject.toml` or CI dependencies.
 - Preserve every file under `docs/superpowers/plans/` byte-for-byte.
 - Exclude `docs/superpowers/plans/**` from Ruff formatting only; retain Ruff lint coverage.
 - Keep PR #2 as a Draft; do not modify its review state.
@@ -57,7 +60,7 @@ Expected: the branch is clean except for the already committed design/plan histo
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m ruff format --check .
 ```
 
 Expected: exit 1 and exactly these historical files are reported as requiring formatting:
@@ -97,8 +100,8 @@ allowed-confusables = ["ˈ"]
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -m ruff format --check .
-.\.venv-corpus\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m ruff check .
 ```
 
 Expected:
@@ -139,15 +142,15 @@ Expected: one commit containing only `pyproject.toml`.
 - Test: inline YAML syntax and workflow-contract assertions
 
 **Interfaces:**
-- Consumes: `pyproject.toml`, the `dev` extra, `tests/fixtures/gold_pronunciations.jsonl`, and Git refs.
-- Produces: GitHub checks named `quality`, `Tests (windows-latest)`, and `Tests (ubuntu-latest)`.
+- Consumes: `pyproject.toml`, the `dev` extra, `tests/fixtures/gold_pronunciations.jsonl`, and Git refs; the local YAML assertion additionally uses transient `PyYAML==6.0.3` from worktree `.venv` only.
+- Produces: GitHub checks named `quality`, `Tests (windows-latest)`, and `Tests (ubuntu-latest)`; `quality` has full history and checks the event-aware `BASE_SHA...HEAD_SHA` range.
 
 - [ ] **Step 1: Run a contract assertion to verify the workflow is absent**
 
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -c "from pathlib import Path; path = Path('.github/workflows/ci.yml'); assert path.is_file(), f'{path} is missing'"
+.\.venv\Scripts\python.exe -c "from pathlib import Path; path = Path('.github/workflows/ci.yml'); assert path.is_file(), f'{path} is missing'"
 ```
 
 Expected: exit 1 with `AssertionError: .github\workflows\ci.yml is missing`.
@@ -177,9 +180,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.10"
           cache: pip
@@ -197,7 +202,11 @@ jobs:
       - name: Audit gold pronunciations
         run: python -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
       - name: Check whitespace
-        run: git diff --check
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: git diff --check "$BASE_SHA...$HEAD_SHA"
 
   tests:
     name: Tests (${{ matrix.os }})
@@ -210,9 +219,9 @@ jobs:
           - ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.10"
           cache: pip
@@ -227,15 +236,17 @@ jobs:
 
 - [ ] **Step 3: Parse the YAML and assert the security/test contract**
 
-Run:
+Run (the installation is local and transient; do not add PyYAML to `pyproject.toml` or CI dependencies):
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -c "from pathlib import Path; import yaml; data = yaml.load(Path('.github/workflows/ci.yml').read_text(encoding='utf-8'), Loader=yaml.BaseLoader); assert data['name'] == 'CI'; assert data['permissions'] == {'contents': 'read'}; assert data['concurrency']['cancel-in-progress'] == 'true'; assert data['jobs']['quality']['runs-on'] == 'ubuntu-latest'; assert data['jobs']['tests']['strategy']['fail-fast'] == 'false'; assert data['jobs']['tests']['strategy']['matrix']['os'] == ['windows-latest', 'ubuntu-latest']; steps = data['jobs']['tests']['steps']; assert steps[-1]['run'] == 'python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q'; print('workflow-contract: PASS')"
+.\.venv\Scripts\python.exe -m pip install PyYAML==6.0.3
+.\.venv\Scripts\python.exe -c "from pathlib import Path; import yaml; data = yaml.load(Path('.github/workflows/ci.yml').read_text(encoding='utf-8'), Loader=yaml.BaseLoader); assert data['name'] == 'CI'; assert data['permissions'] == {'contents': 'read'}; assert data['concurrency']['cancel-in-progress'] == 'true'; assert data['jobs']['quality']['runs-on'] == 'ubuntu-latest'; assert data['jobs']['quality']['steps'][0]['with']['fetch-depth'] == '0'; assert data['jobs']['tests']['strategy']['fail-fast'] == 'false'; assert data['jobs']['tests']['strategy']['matrix']['os'] == ['windows-latest', 'ubuntu-latest']; assert data['jobs']['quality']['steps'][-1]['env']['BASE_SHA'] == '${{ github.event.pull_request.base.sha || github.event.before }}'; assert data['jobs']['quality']['steps'][-1]['env']['HEAD_SHA'] == '${{ github.event.pull_request.head.sha || github.sha }}'; steps = data['jobs']['tests']['steps']; assert steps[-1]['run'] == 'python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q'; print('workflow-contract: PASS')"
 ```
 
 Expected:
 
 ```text
+Successfully installed PyYAML-6.0.3
 workflow-contract: PASS
 ```
 
@@ -244,7 +255,7 @@ workflow-contract: PASS
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -c "from pathlib import Path; text = Path('.github/workflows/ci.yml').read_text(encoding='utf-8'); forbidden = ('requirements/corpus.txt', 'smoke-test', 'local-data/', 'upload-artifact', 'release'); found = [item for item in forbidden if item in text]; assert not found, found; print('workflow-scope: PASS')"
+.\.venv\Scripts\python.exe -c "from pathlib import Path; text = Path('.github/workflows/ci.yml').read_text(encoding='utf-8'); forbidden = ('requirements/corpus.txt', 'smoke-test', 'local-data/', 'upload-artifact', 'release'); found = [item for item in forbidden if item in text]; assert not found, found; print('workflow-scope: PASS')"
 ```
 
 Expected:
@@ -258,10 +269,10 @@ workflow-scope: PASS
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -m ruff format --check .
-.\.venv-corpus\Scripts\python.exe -m ruff check .
-.\.venv-corpus\Scripts\python.exe -m mypy src
-.\.venv-corpus\Scripts\python.exe -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy src
+.\.venv\Scripts\python.exe -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
 git diff --check
 ```
 
@@ -293,7 +304,7 @@ Expected: one commit containing only `.github/workflows/ci.yml`.
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q
+.\.venv\Scripts\python.exe -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q
 ```
 
 Expected: `1850 passed`, only platform-specific skips, total coverage at least `95.00%`, and exit 0. Test counts may increase only if implementation adds tests.
@@ -303,11 +314,11 @@ Expected: `1850 passed`, only platform-specific skips, total coverage at least `
 Run:
 
 ```powershell
-.\.venv-corpus\Scripts\python.exe -m ruff format --check .
-.\.venv-corpus\Scripts\python.exe -m ruff check .
-.\.venv-corpus\Scripts\python.exe -m mypy src
-.\.venv-corpus\Scripts\python.exe -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
-.\.venv-corpus\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m ruff format --check .
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy src
+.\.venv\Scripts\python.exe -m latintts.audit tests/fixtures/gold_pronunciations.jsonl
+.\.venv\Scripts\python.exe -m pip check
 git diff --check
 git status -sb
 ```
