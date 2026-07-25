@@ -36,6 +36,9 @@ testpaths = ["tests"]
 target-version = "py310"
 line-length = 100
 
+[tool.ruff.format]
+exclude = ["docs/superpowers/plans/**"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 allowed-confusables = ["ˈ"]
