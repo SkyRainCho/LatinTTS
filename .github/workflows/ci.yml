@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -69,4 +69,14 @@ jobs:
       - name: Install project
         run: python -m pip install -e ".[dev]"
       - name: Run full coverage suite
+        if: runner.os == 'Windows'
         run: python -m pytest --cov=latintts --cov-report=term-missing --cov-fail-under=95 -q
+      - name: Run portable core suite
+        if: runner.os == 'Linux'
+        run: >-
+          python -m pytest
+          tests/unit
+          tests/integration
+          tests/corpus/test_mms_alignment.py
+          tests/corpus/test_alignment_smoke_cli.py
+          -q
