@@ -634,13 +634,33 @@ def test_lossless_malformed_stream_maps_to_stable_audio_failure(tmp_path: Path) 
     assert error.value.code == "AUDIO_QUALITY_REJECTED"
 
 
-def test_concurrent_same_key_has_one_producer_and_no_overwrite(tmp_path: Path) -> None:
+def test_concurrent_same_key_has_one_producer_and_no_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     paths, record, config, _ = _fixture(tmp_path)
     producer_entered = threading.Event()
     release_producer = threading.Event()
+    lock_contended = threading.Event()
+    real_open = audio_module.os.open
     calls = 0
     results: list[DerivedAudio] = []
     errors: list[BaseException] = []
+
+    def observing_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        try:
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        except FileExistsError:
+            if Path(path).suffix == ".lock":
+                lock_contended.set()
+            raise
+
+    monkeypatch.setattr(audio_module.os, "open", observing_open)
 
     def blocking_runner(command: list[str], **kwargs: object) -> CompletedProcess[str]:
         nonlocal calls
@@ -669,6 +689,7 @@ def test_concurrent_same_key_has_one_producer_and_no_overwrite(tmp_path: Path) -
     first.start()
     assert producer_entered.wait(timeout=2)
     second.start()
+    assert lock_contended.wait(timeout=2)
     release_producer.set()
     first.join(timeout=3)
     second.join(timeout=3)

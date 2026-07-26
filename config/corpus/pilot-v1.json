@@ -37,7 +37,7 @@
   "alignment": {
     "backend": "mms-ctc",
     "model_id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
-    "model_revision": "f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+    "model_revision": "49402e9577b1158620820667c218cd494cc44486",
     "language": "lat",
     "romanize": true,
     "split_size": "word",

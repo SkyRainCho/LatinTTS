@@ -45,7 +45,7 @@ def _request(tmp_path: Path, **changes: object) -> AlignmentRequest:
         "backend": "mms-ctc",
         "backend_version": "0.3.0",
         "model_id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
-        "model_revision": "f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        "model_revision": "49402e9577b1158620820667c218cd494cc44486",
         "model_license": "CC-BY-NC-4.0",
         "config_sha256": _digest("config"),
         "effective_parameters": {"language": "lat"},
@@ -58,7 +58,7 @@ def _alignment_config(**changes: object) -> CorpusConfig:
     alignment: dict[str, object] = {
         "backend": "mms-ctc",
         "model_id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
-        "model_revision": "f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        "model_revision": "49402e9577b1158620820667c218cd494cc44486",
         "language": "lat",
         "romanize": True,
         "split_size": "word",
@@ -82,7 +82,7 @@ def _resolved_runtime_info() -> BackendRuntimeInfo:
         peak_memory_bytes=4096,
         aligner_version="0.3.0",
         aligner_commit=ALIGNER_COMMIT,
-        resolved_model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        resolved_model_revision="49402e9577b1158620820667c218cd494cc44486",
         model_weights_sha256="f" * 64,
         cuda_available=True,
         requested_device="cuda",
@@ -169,7 +169,7 @@ def test_build_request_binds_resolved_runtime_identity_into_cache_key(tmp_path: 
     runtime = _resolved_runtime_info()
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -214,7 +214,7 @@ def test_align_rejects_request_built_for_different_resolved_runtime(tmp_path: Pa
     )
     cuda_backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -229,7 +229,7 @@ def test_align_rejects_request_built_for_different_resolved_runtime(tmp_path: Pa
     )
     cpu_backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -282,7 +282,7 @@ def test_align_stores_runtime_identity_inside_result_integrity(tmp_path: Path) -
     runtime = _resolved_runtime_info()
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -508,7 +508,7 @@ def test_mms_output_keeps_alignment_text_non_authoritative() -> None:
         ),
         backend_version="0.3.0",
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
     )
 
     assert result.alignment_text == "gratia plena"
@@ -530,7 +530,7 @@ def test_mms_output_filters_literal_edge_star_sentinels() -> None:
         ),
         backend_version="0.3.0",
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
     )
 
     assert result.alignment_text == "gratia plena"
@@ -560,7 +560,7 @@ def test_mms_output_canonicalizes_uroman_tokens_with_task8_transform() -> None:
         ),
         backend_version="0.3.0",
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
     )
 
     assert result.alignment_text == "aue uirgo iesus aue"
@@ -582,7 +582,7 @@ def test_mms_output_rejects_missing_or_duplicate_word_spans() -> None:
             raw_results=({"start": 0.1, "end": 0.7, "text": "Gratia", "score": 0.9},),
             backend_version="0.3.0",
             model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-            model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+            model_revision="49402e9577b1158620820667c218cd494cc44486",
         )
 
     assert error.value.code == "ALIGNMENT_LOW_CONFIDENCE"
@@ -597,7 +597,7 @@ def test_mms_output_rejects_empty_backend_result() -> None:
             raw_results=(),
             backend_version="0.3.0",
             model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-            model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+            model_revision="49402e9577b1158620820667c218cd494cc44486",
         )
 
 
@@ -610,7 +610,7 @@ def test_mms_output_rejects_backend_tokens_that_do_not_map_to_spoken_text() -> N
             raw_results=({"start": 0.0, "end": 0.6, "text": "Gracia", "score": 0.9},),
             backend_version="0.3.0",
             model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-            model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+            model_revision="49402e9577b1158620820667c218cd494cc44486",
         )
 
 
@@ -625,7 +625,7 @@ def test_mms_output_converts_tensor_scalars_and_normalizes_scores() -> None:
         ),
         backend_version="0.3.0",
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
     )
 
     assert result.words[0].score == pytest.approx(0.36787944117)
@@ -684,7 +684,7 @@ def test_mms_aligner_calls_adapter_in_order_and_preserves_token_indexes(tmp_path
     )
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -713,7 +713,7 @@ def test_mms_aligner_calls_adapter_in_order_and_preserves_token_indexes(tmp_path
 def test_mms_default_constructor_derives_standard_hf_repository_cache_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     repository_cache = tmp_path / "hub" / "models--latin"
     snapshot = repository_cache / "snapshots" / revision
     snapshot.mkdir(parents=True)
@@ -741,7 +741,7 @@ def test_mms_default_constructor_derives_standard_hf_repository_cache_root(
 def test_alignment_backend_factory_derives_standard_hf_repository_cache_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     repository_cache = tmp_path / "hub" / "models--latin"
     snapshot = repository_cache / "snapshots" / revision
     snapshot.mkdir(parents=True)
@@ -763,7 +763,7 @@ def test_alignment_backend_factory_derives_standard_hf_repository_cache_root(
 def test_mms_default_constructor_keeps_nonstandard_snapshot_root_conservative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     snapshot = tmp_path / "local-model" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "model.safetensors").write_bytes(b"weights")
@@ -788,7 +788,7 @@ def test_mms_default_constructor_keeps_nonstandard_snapshot_root_conservative(
 
 def test_mms_lazy_load_uses_pinned_revision_trust_and_cache_policy(tmp_path: Path) -> None:
     calls: list[tuple[str, object]] = []
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     snapshot = tmp_path / "cache" / "snapshots" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "model.safetensors").write_bytes(b"pinned weights")
@@ -932,6 +932,21 @@ def test_create_alignment_backend_consumes_only_pinned_mms_config(tmp_path: Path
         create_alignment_backend(_alignment_config(model_revision="main"))
 
 
+def test_create_alignment_backend_accepts_tokenizer_fixed_model_revision(
+    tmp_path: Path,
+) -> None:
+    revision = "49402e9577b1158620820667c218cd494cc44486"
+
+    backend = create_alignment_backend(
+        _alignment_config(model_revision=revision),
+        dependencies=SimpleNamespace(),
+        cache_dir=tmp_path / "cache",
+        local_files_only=True,
+    )
+
+    assert backend.model_revision == revision
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     (
@@ -956,7 +971,7 @@ def test_mms_aligner_translates_cuda_oom_to_stable_corpus_failure(tmp_path: Path
 
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -993,7 +1008,7 @@ def test_mms_aligner_translates_other_runtime_errors_to_stable_failure(tmp_path:
     )
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cpu",
         dtype="float32",
         window_seconds=30,
@@ -1020,7 +1035,7 @@ def test_mms_aligner_translates_pinned_api_assertions_to_stable_failure(tmp_path
     runtime = _resolved_runtime_info()
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -1066,7 +1081,7 @@ def test_mms_aligner_preserves_low_confidence_from_empty_postprocessed_spans(
     runtime = _resolved_runtime_info()
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cuda",
         dtype="float16",
         window_seconds=30,
@@ -1089,7 +1104,7 @@ def test_mms_aligner_preserves_low_confidence_from_empty_postprocessed_spans(
 def test_runtime_info_requires_verified_loaded_dependencies() -> None:
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cpu",
         dtype="float32",
         window_seconds=30,
@@ -1113,7 +1128,7 @@ def test_loader_does_not_swallow_unrelated_programmer_type_errors() -> None:
     }
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cpu",
         dtype="float32",
         window_seconds=30,
@@ -1138,7 +1153,7 @@ def test_loader_rejects_snapshot_resolved_to_unpinned_commit(tmp_path: Path) -> 
     }
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cpu",
         dtype="float32",
         window_seconds=30,
@@ -1156,7 +1171,7 @@ def test_loader_rejects_snapshot_resolved_to_unpinned_commit(tmp_path: Path) -> 
 def test_mms_loader_resolves_unsupported_cpu_half_precision_to_float32(
     tmp_path: Path, requested_device: str
 ) -> None:
-    revision = "f37ba6bf1673872e07519fb951866cb2a32a6d7f"
+    revision = "49402e9577b1158620820667c218cd494cc44486"
     snapshot = tmp_path / "snapshots" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "model.safetensors").write_bytes(b"weights")
@@ -1239,7 +1254,7 @@ def test_mms_aligner_rejects_request_provenance_before_backend_work(tmp_path: Pa
 
     backend = MmsCtcAligner(
         model_id="MahmoudAshraf/mms-300m-1130-forced-aligner",
-        model_revision="f37ba6bf1673872e07519fb951866cb2a32a6d7f",
+        model_revision="49402e9577b1158620820667c218cd494cc44486",
         device="cpu",
         dtype="float32",
         window_seconds=30,
